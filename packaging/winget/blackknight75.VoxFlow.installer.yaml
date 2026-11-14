@@ -1,0 +1,28 @@
+# Template: __VERSION__ and __SHA256__ are filled in by update_manifest.py (see README.md in this folder).
+# Template: ProductCode is "<AppId>_is1", the per-user uninstall key Inno Setup registers; AppId is in ../voxflow.iss.
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.10.0.schema.json
+
+PackageIdentifier: blackknight75.VoxFlow
+PackageVersion: __VERSION__
+InstallerLocale: en-US
+MinimumOSVersion: 10.0.22000.0
+InstallerType: inno
+Scope: user
+InstallModes:
+- interactive
+- silent
+- silentWithProgress
+UpgradeBehavior: install
+ProductCode: '{6C0B0B5E-5A9E-4C57-9F1D-4F4F0E2A7B31}_is1'
+AppsAndFeaturesEntries:
+- DisplayName: VoxFlow
+  Publisher: VoxFlow
+  ProductCode: '{6C0B0B5E-5A9E-4C57-9F1D-4F4F0E2A7B31}_is1'
+InstallationMetadata:
+  DefaultInstallLocation: '%LOCALAPPDATA%\Programs\VoxFlow'
+Installers:
+- Architecture: x64
+  InstallerUrl: https://github.com/blackknight75/voxflow/releases/download/v__VERSION__/VoxFlow-Setup-__VERSION__.exe
+  InstallerSha256: __SHA256__
+ManifestType: installer
+ManifestVersion: 1.10.0

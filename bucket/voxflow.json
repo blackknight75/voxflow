@@ -1,0 +1,65 @@
+{
+    "version": "0.2.0",
+    "description": "Local push-to-talk dictation for Windows. Speech recognition and cleanup run on your own PC.",
+    "homepage": "https://github.com/blackknight75/voxflow",
+    "license": "MIT",
+    "notes": [
+        "VoxFlow needs Windows 11 (64-bit).",
+        "On first run the setup guide downloads the speech and language models (about 5 GB, once).",
+        "Start it from the Start menu (VoxFlow) or run 'voxflow --help' in a terminal.",
+        "Settings and history live in %APPDATA%\\VoxFlow and the models in the Hugging Face cache: 'scoop uninstall' leaves both in place."
+    ],
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/blackknight75/voxflow/releases/download/v0.2.0/VoxFlow-Setup-0.2.0.exe",
+            "hash": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+    },
+    "innosetup": true,
+    "bin": [
+        [
+            "VoxFlow-console.exe",
+            "voxflow"
+        ]
+    ],
+    "shortcuts": [
+        [
+            "VoxFlow.exe",
+            "VoxFlow"
+        ]
+    ],
+    "uninstaller": {
+        "script": [
+            "# 'Launch at login' is VoxFlow's own setting (HKCU Run value 'VoxFlow'); Scoop does not know about it.",
+            "# Same rule as the [Code] section of packaging/voxflow.iss: only an entry that starts a program inside this",
+            "# app's folder is touched. 'scoop uninstall' removes it; 'scoop update' keeps the setting and, if it names",
+            "# the old version's folder, points it at the 'current' junction instead.",
+            "$run = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'",
+            "$command = (Get-ItemProperty -LiteralPath $run -Name 'VoxFlow' -ErrorAction SilentlyContinue).VoxFlow",
+            "$app_root = (Split-Path $dir) + '\\'",
+            "$updating = [bool](Get-PSCallStack | Where-Object { $_.ScriptName -like '*\\scoop-update.ps1' })",
+            "if ($command -and $command.ToLower().Contains($app_root.ToLower())) {",
+            "    if (!$updating) {",
+            "        Remove-ItemProperty -LiteralPath $run -Name 'VoxFlow' -ErrorAction SilentlyContinue",
+            "    } elseif ((Test-Path \"$app_root\\current\") -and $command.ToLower().Contains(\"$dir\\\".ToLower())) {",
+            "        $new = $command -ireplace [regex]::Escape(\"$dir\\\"), ($app_root + 'current\\').Replace('$', '$$')",
+            "        Set-ItemProperty -LiteralPath $run -Name 'VoxFlow' -Value $new",
+            "    }",
+            "}"
+        ]
+    },
+    "checkver": {
+        "github": "https://github.com/blackknight75/voxflow"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/blackknight75/voxflow/releases/download/v$version/VoxFlow-Setup-$version.exe",
+                "hash": {
+                    "url": "https://github.com/blackknight75/voxflow/releases/download/v$version/SHA256SUMS.txt",
+                    "regex": "$sha256\\s+\\*?$basename"
+                }
+            }
+        }
+    }
+}

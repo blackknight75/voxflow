@@ -1,0 +1,29 @@
+# Template: __VERSION__ and __LICENSE__ are filled in by update_manifest.py (see README.md in this folder).
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.10.0.schema.json
+
+PackageIdentifier: blackknight75.VoxFlow
+PackageVersion: __VERSION__
+PackageLocale: en-US
+Publisher: VoxFlow
+PublisherUrl: https://github.com/blackknight75
+PublisherSupportUrl: https://github.com/blackknight75/voxflow/issues
+PackageName: VoxFlow
+PackageUrl: https://github.com/blackknight75/voxflow
+License: __LICENSE__
+ShortDescription: Local push-to-talk dictation for Windows. Speech recognition and cleanup run on your own PC.
+Description: |-
+  VoxFlow is a push-to-talk dictation app for Windows 11. Hold a hotkey, speak, and the text is typed into the
+  window you are working in. Speech recognition and the optional language-model cleanup run locally (NVIDIA GPU
+  recommended, CPU supported); no account and no cloud service are involved. The speech and language models
+  (about 5 GB) are downloaded on first run.
+Tags:
+- dictation
+- local
+- offline
+- push-to-talk
+- speech-recognition
+- speech-to-text
+- voice
+ReleaseNotesUrl: https://github.com/blackknight75/voxflow/releases/tag/v__VERSION__
+ManifestType: defaultLocale
+ManifestVersion: 1.10.0

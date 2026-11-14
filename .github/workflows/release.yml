@@ -1,0 +1,322 @@
+name: Release
+
+# Push a tag "v<version>" (it must equal voxflow.__version__) to build VoxFlow-Setup-<version>.exe and open a DRAFT
+# GitHub release with the installer and SHA256SUMS.txt attached. Nothing is public until the draft is published by hand.
+# "Run workflow" (workflow_dispatch) does the same for the chosen branch without a tag: the draft release is given the
+# tag v<version>, which GitHub creates on that commit when the draft is published.
+#
+# Before the draft exists, two gates run:
+#   1. the real-model tests on the CPU (models.yml, called from here);
+#   2. the built installer is installed, run and uninstalled on this runner (.github/scripts/installer_smoke.ps1).
+# Both depend on things outside this repository (the Hugging Face download, the runner image), so each has a
+# switch that lets a release through without it. A skipped gate is named in the run summary, and what it would
+# have checked is then done by hand (docs/RELEASE_CHECKLIST.md):
+#   "Run workflow" inputs skip_model_tests / skip_installer_test, or, for a tag push, the repository variables
+#   RELEASE_SKIP_MODEL_TESTS / RELEASE_SKIP_INSTALLER_TEST set to "true".
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      skip_model_tests:
+        description: Build without the real-model tests (models.yml)
+        type: boolean
+        default: false
+      skip_installer_test:
+        description: Draft the release without installing and uninstalling the built installer
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write          # create the draft release and upload its assets
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_NO_CACHE_DIR: "1"    # release builds start clean, and the wheel cache (about 3 GB) would only eat disk
+  # site-packages ~6 GB + dist\VoxFlow ~3.6 GB + installer ~1.8 GB + PyInstaller/Inno temp files
+  # + the installer test's copy of the app in %LOCALAPPDATA%\Programs ~3.6 GB
+  MIN_FREE_GB: "24"
+  MAX_ASSET_BYTES: "2147483648"   # GitHub: each release asset must be smaller than 2 GiB
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # CPU path only (see models.yml). A missing model cache does not fail it: the models are then downloaded.
+  models:
+    name: Real-model tests
+    if: ${{ !(inputs.skip_model_tests || vars.RELEASE_SKIP_MODEL_TESTS == 'true') }}
+    uses: ./.github/workflows/models.yml
+    permissions:
+      contents: read
+
+  installer:
+    name: Build installer and draft release
+    needs: models
+    # runs when the model tests passed or were switched off; not when they failed or were cancelled
+    if: ${{ !cancelled() && (needs.models.result == 'success' || needs.models.result == 'skipped') }}
+    # Pinned, not windows-latest: Setup refuses to run below Windows build 22000 (MinVersion in voxflow.iss), so
+    # the installer test needs Windows Server 2025 (build 26100). Server 2022 (build 20348) would be refused.
+    runs-on: windows-2025
+    timeout-minutes: 180
+    env:
+      INSTALLER_TEST: ${{ (inputs.skip_installer_test || vars.RELEASE_SKIP_INSTALLER_TEST == 'true') && 'skip' || 'run' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      # Before an hour of building: can this runner run the installer it is about to build?
+      - name: Runner Windows build against the installer's MinVersion
+        id: winver
+        run: |
+          python - <<'EOF'
+          import os, re, sys
+          iss = open("packaging/voxflow.iss", encoding="utf-8").read()
+          need = tuple(int(x) for x in re.search(r"^MinVersion=(\d+)\.(\d+)\.(\d+)\s*$", iss, re.M).groups())
+          v = sys.getwindowsversion()
+          have = (v.major, v.minor, v.build)
+          print(f"runner: Windows {have[0]}.{have[1]} build {have[2]}; MinVersion in voxflow.iss: {'.'.join(map(str, need))}")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"min_build={need[2]}\n")
+          if have < need:
+              text = (f"This runner is Windows build {have[2]}, the installer needs build {need[2]} or later and would "
+                      "refuse to start: the installer test cannot run here. Use a newer runner image (runs-on).")
+              if os.environ["INSTALLER_TEST"] == "run":
+                  sys.exit("::error::" + text)
+              print("::warning::" + text)
+          EOF
+
+      - name: Version and tag
+        id: meta
+        run: |
+          version=$(python -c "import re; print(re.search(r'^__version__\s*=\s*[\"\x27]([^\"\x27]+)', open('voxflow/__init__.py', encoding='utf-8').read(), re.M).group(1))")
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then tag="$GITHUB_REF_NAME"; else tag="v$version"; fi
+          echo "voxflow.__version__ = $version, tag = $tag"
+          if [ "$tag" != "v$version" ]; then
+            echo "::error::Tag $tag does not match voxflow.__version__ ($version). Set the version in voxflow/__init__.py, commit, and tag that commit v$version."
+            exit 1
+          fi
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "installer=VoxFlow-Setup-$version.exe"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Refuse to touch a published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          state=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null || echo none)
+          echo "existing release for $TAG: $state (true = draft, false = published, none = no release)"
+          if [ "$state" = "false" ]; then
+            echo "::error::Release $TAG is already published. Releases are not rebuilt in place: bump the version and tag again."
+            exit 1
+          fi
+
+      - name: Free disk space
+        run: |
+          python - <<'EOF'
+          import os, shutil, sys
+          need = float(os.environ["MIN_FREE_GB"])
+          drives = sorted({os.path.splitdrive(os.path.abspath(p))[0] + "\\" for p in (".", sys.prefix, os.environ["TEMP"])})
+          worst = min(shutil.disk_usage(d).free for d in drives) / 2**30
+          for d in drives:
+              print(f"{d} {shutil.disk_usage(d).free / 2**30:.1f} GiB free")
+          if worst < need:
+              sys.exit(f"::error::Only {worst:.1f} GiB free; the installer build needs about {need:.0f} GiB.")
+          EOF
+
+      # --only-binary is required (see requirements.txt): the llama-cpp-python CUDA wheel comes from the extra index.
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements-dev.txt --only-binary=:all:
+
+      # packaging/voxflow.spec bundles whatever is in site-packages/llama_cpp/lib. The CUDA 12 runtime DLLs the
+      # language model needs for the GPU are put there by this step, not by the wheel: without it the installed app
+      # would silently run its language model on the CPU.
+      - name: CUDA 12 runtime for llama.cpp
+        run: python -m voxflow.cleanup --install-cuda
+
+      # The Vulkan build (AMD / Intel / NVIDIA cards) and the CPU build (a PC without any GPU driver, where the
+      # CUDA build cannot be loaded at all) of the same llama-cpp-python release, pinned by SHA-256 in the script.
+      # scripts/build_installer.py would fetch them too; a step of its own shows a failed download for what it is.
+      - name: Vulkan and CPU builds of llama.cpp
+        run: python scripts/fetch_llama_backends.py
+
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          function Find-Iscc {
+            $cmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+            if ($cmd) { return $cmd.Source }
+            foreach ($base in @(${env:ProgramFiles(x86)}, $env:ProgramFiles, "$env:LOCALAPPDATA\Programs")) {
+              $hit = Get-ChildItem -Path (Join-Path $base "Inno Setup *\ISCC.exe") -ErrorAction SilentlyContinue |
+                Sort-Object FullName -Descending | Select-Object -First 1
+              if ($hit) { return $hit.FullName }
+            }
+          }
+          $iscc = Find-Iscc
+          if (-not $iscc) {
+            choco install innosetup --no-progress -y
+            if ($LASTEXITCODE -ne 0) { throw "choco install innosetup failed ($LASTEXITCODE)" }
+            $iscc = Find-Iscc
+          }
+          if (-not $iscc) { throw "ISCC.exe not found after installing Inno Setup" }
+          "ISCC: $iscc ($((Get-Item $iscc).VersionInfo.ProductVersion))"
+          # scripts/build_installer.py looks on PATH first
+          Split-Path $iscc | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Build (PyInstaller, then Inno Setup)
+        run: python scripts/build_installer.py --clean
+
+      - name: Check the frozen app
+        run: |
+          cd dist/VoxFlow
+          missing=0
+          for f in VoxFlow.exe VoxFlow-console.exe \
+                   _internal/llama_cpp/lib/llama.dll _internal/llama_cpp/lib/ggml-cuda.dll \
+                   _internal/llama_cpp/lib/cudart64_12.dll _internal/llama_cpp/lib/cublas64_12.dll \
+                   _internal/llama_cpp/lib/cublasLt64_12.dll \
+                   _internal/llama_cpp/lib_vulkan/llama.dll _internal/llama_cpp/lib_vulkan/ggml-vulkan.dll \
+                   _internal/llama_cpp/lib_vulkan/version.txt \
+                   _internal/llama_cpp/lib_cpu/llama.dll _internal/llama_cpp/lib_cpu/ggml-cpu.dll \
+                   _internal/llama_cpp/lib_cpu/version.txt \
+                   _internal/onnxruntime/capi/onnxruntime_providers_cuda.dll \
+                   _internal/onnxruntime_ep_webgpu/onnxruntime_providers_webgpu.dll \
+                   _internal/onnxruntime_ep_webgpu/dxcompiler.dll \
+                   _internal/nvidia/cu13 _internal/nvidia/cudnn; do
+            if [ ! -e "$f" ]; then echo "::error::missing from the frozen app: $f"; missing=1; fi
+          done
+          [ "$missing" = 0 ]
+          # the frozen interpreter starts and reaches the app's own argument parser (no models, no window)
+          ./VoxFlow-console.exe --help
+
+      - name: Size limit and checksums
+        id: sums
+        env:
+          INSTALLER: ${{ steps.meta.outputs.installer }}
+        run: |
+          cd dist
+          size=$(stat -c %s "$INSTALLER")
+          echo "$INSTALLER: $size bytes ($((size / 1048576)) MiB)"
+          if [ "$size" -ge "$MAX_ASSET_BYTES" ]; then
+            echo "::error::$INSTALLER is $size bytes. GitHub release assets must be smaller than 2 GiB ($MAX_ASSET_BYTES bytes): trim the build (packaging/voxflow.spec) before releasing."
+            exit 1
+          fi
+          sha256sum "$INSTALLER" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          sha256sum --check SHA256SUMS.txt
+          echo "sha256=$(cut -d' ' -f1 SHA256SUMS.txt)" >> "$GITHUB_OUTPUT"
+          echo "size=$size" >> "$GITHUB_OUTPUT"
+
+      # The file that was just checksummed is installed for real on this (disposable) runner, the installed
+      # program is run with nothing of the build environment on its PATH, and it is uninstalled again. Twice,
+      # because the uninstaller's handling of the "Launch at login" entry has two sides:
+      #   1 of 2  an entry that belongs to ANOTHER copy of VoxFlow must be left alone;
+      #   2 of 2  the entry of THIS install must be removed.
+      # Windows PowerShell 5.1 ("powershell"), the shell a spare PC has, so the script runs here as it does by hand.
+      - name: Installer test 1 of 2 (install, run the installed app, uninstall; a foreign login entry is kept)
+        if: env.INSTALLER_TEST == 'run'
+        shell: powershell
+        timeout-minutes: 50
+        env:
+          INSTALLER: ${{ steps.meta.outputs.installer }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          MIN_BUILD: ${{ steps.winver.outputs.min_build }}
+        run: |
+          & .github\scripts\installer_smoke.ps1 -Installer "dist\$env:INSTALLER" -ExpectedVersion $env:VERSION `
+            -MinBuild $env:MIN_BUILD -RunValue Foreign -HubCheck `
+            -LogDir "$env:RUNNER_TEMP\installer-test\1-foreign" -IUnderstandThisInstalls
+          exit $LASTEXITCODE
+
+      - name: Installer test 2 of 2 (install, uninstall; its own login entry is removed)
+        if: env.INSTALLER_TEST == 'run'
+        shell: powershell
+        timeout-minutes: 50
+        env:
+          INSTALLER: ${{ steps.meta.outputs.installer }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          MIN_BUILD: ${{ steps.winver.outputs.min_build }}
+        run: |
+          & .github\scripts\installer_smoke.ps1 -Installer "dist\$env:INSTALLER" -ExpectedVersion $env:VERSION `
+            -MinBuild $env:MIN_BUILD -RunValue Owned -SkipSelftest `
+            -LogDir "$env:RUNNER_TEMP\installer-test\2-owned" -IUnderstandThisInstalls
+          exit $LASTEXITCODE
+
+      - name: Keep the install and uninstall logs
+        if: failure() && env.INSTALLER_TEST == 'run'
+        uses: actions/upload-artifact@v7
+        with:
+          name: installer-test-logs
+          path: ${{ runner.temp }}/installer-test
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Release notes from CHANGELOG.md
+        id: notes
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          INSTALLER: ${{ steps.meta.outputs.installer }}
+          SHA256: ${{ steps.sums.outputs.sha256 }}
+        run: |
+          if python .github/scripts/release_notes.py "$VERSION" --out dist/notes.md; then
+            echo "source=changelog" >> "$GITHUB_OUTPUT"
+            {
+              echo
+              echo "---"
+              echo
+              echo "**Install:** download \`$INSTALLER\` below and run it. It installs for the current user, no administrator rights. The installer is not code-signed: on the SmartScreen prompt choose *More info*, then *Run anyway*."
+              echo
+              echo "SHA-256: \`$SHA256\`"
+            } >> dist/notes.md
+          else
+            echo "::warning::CHANGELOG.md has no section for $VERSION; the draft gets GitHub's generated notes."
+            echo "source=generated" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          INSTALLER: ${{ steps.meta.outputs.installer }}
+          NOTES: ${{ steps.notes.outputs.source }}
+          MODEL_TESTS: ${{ needs.models.result }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # a draft from an earlier run of the same tag: replace its files (a published one was refused above)
+            gh release upload "$TAG" "dist/$INSTALLER" dist/SHA256SUMS.txt --clobber --repo "$GITHUB_REPOSITORY"
+            if [ "$NOTES" = "changelog" ]; then
+              gh release edit "$TAG" --notes-file dist/notes.md --draft --repo "$GITHUB_REPOSITORY"
+            fi
+          else
+            if [ "$NOTES" = "changelog" ]; then notes=(--notes-file dist/notes.md); else notes=(--generate-notes); fi
+            gh release create "$TAG" "dist/$INSTALLER" dist/SHA256SUMS.txt \
+              --draft --title "VoxFlow $VERSION" --target "$GITHUB_SHA" "${notes[@]}" --repo "$GITHUB_REPOSITORY"
+          fi
+          url=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url --jq .url)
+          {
+            echo "### Draft release $TAG"
+            echo
+            echo "- $url"
+            echo "- \`$INSTALLER\`"
+            echo "- SHA-256 \`$(cut -d' ' -f1 dist/SHA256SUMS.txt)\`"
+            echo "- notes: $NOTES"
+            echo "- real-model tests (CPU): $MODEL_TESTS"
+            echo "- installer install/uninstall test: $INSTALLER_TEST"
+            echo
+            if [ "$MODEL_TESTS" != "success" ] || [ "$INSTALLER_TEST" != "run" ]; then
+              echo "**A gate was skipped.** Do what it would have checked by hand before publishing: docs/RELEASE_CHECKLIST.md."
+              echo
+            fi
+            echo "Before publishing: docs/RELEASE_CHECKLIST.md (microphone, GPU, live paste). winget: packaging/winget/README.md. Scoop: packaging/scoop/README.md."
+          } >> "$GITHUB_STEP_SUMMARY"

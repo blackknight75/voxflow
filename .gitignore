@@ -1,0 +1,39 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# Tests and coverage
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+coverage.json
+htmlcov/
+
+# Build output (PyInstaller, Inno Setup, generated screenshots in build/shots)
+build/
+dist/
+*.spec.bak
+
+# Model files (downloaded at first run, never committed)
+*.gguf
+*.onnx
+models/
+
+# Local tooling and editors
+.orch/
+.idea/
+.vscode/
+*.swp
+*.bak
+*.tmp
+*.log
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store

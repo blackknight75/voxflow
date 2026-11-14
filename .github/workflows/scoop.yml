@@ -1,0 +1,98 @@
+name: scoop
+
+# Keeps the Scoop manifest (bucket/voxflow.json; this repository is its own Scoop bucket) in step with the releases.
+# When a release is PUBLISHED, the hash of its installer is taken from the release's SHA256SUMS.txt, the manifest is
+# rewritten by packaging/scoop/update_manifest.py and a pull request against the default branch is opened. Scoop
+# users get the new version once that pull request is merged. Details and the manual route: packaging/scoop/README.md.
+#
+# Needs: Settings > Actions > General > "Allow GitHub Actions to create and approve pull requests" switched on
+# (otherwise `gh pr create` is refused). A pull request opened with GITHUB_TOKEN does not start other workflows, so
+# CI does not run on it by itself: close and reopen it, or push to its branch, to get the checks.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag of a published release, e.g. v0.2.0
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scoop-manifest
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  update:
+    name: Update bucket/voxflow.json
+    if: github.event_name == 'workflow_dispatch' || !github.event.release.prerelease
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write          # push the branch
+      pull-requests: write     # open the pull request
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      BASE: ${{ github.event.repository.default_branch }}
+    steps:
+      # the manifest lives on the default branch (Scoop reads the bucket from there), not on the release's tag
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Fill in version and hash
+        id: manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          case "$TAG" in v[0-9]*) ;; *) echo "::error::$TAG is not a release tag (v<version>)"; exit 1 ;; esac
+          version="${TAG#v}"
+          installer="VoxFlow-Setup-$version.exe"
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$installer"
+          if ! curl --fail --silent --head --location --output /dev/null "$url"; then
+            echo "::error::$url is not publicly downloadable (private repository, draft release or missing asset)."
+            exit 1
+          fi
+          gh release download "$TAG" --pattern SHA256SUMS.txt --dir scoop-in --repo "$GITHUB_REPOSITORY"
+          sha=$(awk -v f="$installer" '{ name = $2; sub(/^\*/, "", name); if (name == f) print $1 }' scoop-in/SHA256SUMS.txt)
+          if [ -z "$sha" ]; then echo "::error::$installer is not listed in SHA256SUMS.txt"; exit 1; fi
+          rm -rf scoop-in
+          python packaging/scoop/update_manifest.py "$version" "$sha"
+          cat bucket/voxflow.json
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Open the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.manifest.outputs.version }}
+          SHA: ${{ steps.manifest.outputs.sha }}
+        run: |
+          if git diff --quiet -- bucket/voxflow.json; then
+            echo "bucket/voxflow.json on $BASE already points at $TAG with this hash: nothing to do."
+            exit 0
+          fi
+          branch="scoop/$TAG"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git add bucket/voxflow.json
+          git commit -m "Scoop: VoxFlow $VERSION" -m "SHA-256 of VoxFlow-Setup-$VERSION.exe from the release's SHA256SUMS.txt."
+          git push --force origin "$branch"
+          if [ -n "$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --base "$BASE" --state open --json number --jq '.[].number')" ]; then
+            echo "A pull request for $branch is already open; its branch was updated."
+            exit 0
+          fi
+          gh pr create --repo "$GITHUB_REPOSITORY" --base "$BASE" --head "$branch" \
+            --title "Scoop: VoxFlow $VERSION" \
+            --body "Points the Scoop manifest (\`bucket/voxflow.json\`) at release $TAG: version $VERSION, SHA-256 \`$SHA\` (from the release's \`SHA256SUMS.txt\`). Scoop users get $VERSION when this is merged. Opened by \`.github/workflows/scoop.yml\`; CI does not start on its own for a pull request opened by GITHUB_TOKEN: close and reopen it to run the checks."

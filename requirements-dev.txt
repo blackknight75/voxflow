@@ -1,0 +1,7 @@
+-r requirements.txt
+# test runner, coverage and Qt test helpers (versions installed in the shared venv)
+pytest==9.2.0
+pytest-cov==7.1.0
+pytest-qt==4.5.0
+coverage==7.17.3
+pyinstaller==6.22.3

@@ -1,0 +1,68 @@
+name: winget
+
+# Opens the pull request on microsoft/winget-pkgs for a PUBLISHED release. Off until it is switched on:
+#   repository variable  WINGET_SUBMIT  = true
+#   repository variable  WINGET_LICENSE = the licence as it should appear in the manifest (e.g. MIT)
+#   repository secret    WINGET_PAT     = a classic personal access token with the "public_repo" scope
+# The release's installer URL must be public (public repository, published release), or winget's validation of the
+# pull request fails. Details and the manual route: packaging/winget/README.md.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag of a published release, e.g. v0.2.0
+        required: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  submit:
+    name: Submit manifest to winget-pkgs
+    if: vars.WINGET_SUBMIT == 'true' && (github.event_name == 'workflow_dispatch' || !github.event.release.prerelease)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Fill the manifest
+        id: manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WINGET_LICENSE: ${{ vars.WINGET_LICENSE }}
+        run: |
+          version="${TAG#v}"
+          installer="VoxFlow-Setup-$version.exe"
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$installer"
+          if ! curl --fail --silent --head --location --output /dev/null "$url"; then
+            echo "::error::$url is not publicly downloadable (private repository, draft release or missing asset)."
+            exit 1
+          fi
+          gh release download "$TAG" --pattern SHA256SUMS.txt --dir winget-in --repo "$GITHUB_REPOSITORY"
+          sha=$(awk -v f="$installer" '{ name = $2; sub(/^\*/, "", name); if (name == f) print $1 }' winget-in/SHA256SUMS.txt)
+          if [ -z "$sha" ]; then echo "::error::$installer is not listed in SHA256SUMS.txt"; exit 1; fi
+          python packaging/winget/update_manifest.py "$version" "$sha" --license "$WINGET_LICENSE" --strict --out winget-out
+          cat winget-out/*.yaml
+          echo "dir=winget-out" >> "$GITHUB_OUTPUT"
+
+      - name: Submit with wingetcreate
+        env:
+          WINGET_PAT: ${{ secrets.WINGET_PAT }}
+        run: |
+          if [ -z "$WINGET_PAT" ]; then echo "::error::The WINGET_PAT secret is not set."; exit 1; fi
+          curl --fail --silent --show-error --location --output wingetcreate.exe https://aka.ms/wingetcreate/latest/self-contained
+          ./wingetcreate.exe submit --token "$WINGET_PAT" "${{ steps.manifest.outputs.dir }}"

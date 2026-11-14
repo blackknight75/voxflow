@@ -1,0 +1,8 @@
+# Template: __VERSION__ is filled in by update_manifest.py (see README.md in this folder).
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.10.0.schema.json
+
+PackageIdentifier: blackknight75.VoxFlow
+PackageVersion: __VERSION__
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.10.0

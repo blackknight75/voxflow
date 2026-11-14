@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "release/**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # ---- coverage gates (percent). Edit these two numbers.
+  # Whole package, lines + branches combined (pytest-cov's --cov-fail-under).
+  COVERAGE_MIN_TOTAL: "100"
+  # Lines of the non-UI modules only (scripts/coverage.py --min). 0 = report only.
+  COVERAGE_MIN_NON_UI: "0"
+  # ---- fast mode: tests that load the real speech / language models are skipped (no GPU, no 5 GB of weights here)
+  VOXFLOW_SKIP_MODEL_TESTS: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    name: Tests (Windows, Python 3.12)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          # No pip cache: the wheels are about 3 GB per branch, and the repository's 10 GB cache limit is needed
+          # for the speech and language models (about 5 GB) that models.yml keeps.
+
+      # --only-binary is required: PyPI has only an sdist of llama-cpp-python, the CUDA wheel comes from the
+      # extra index named in requirements.txt. The GPU wheels install without a GPU. onnxruntime-gpu also imports
+      # and runs on the CPU; llama_cpp (the CUDA build) does NOT import without an NVIDIA driver, which does not
+      # matter here because fast mode does not load the language model. The real models are tested in models.yml.
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements-dev.txt --only-binary=:all:
+
+      # What a hosted runner has is the unknown here (no sound card, no GPU, a limited desktop session):
+      # print it so a failing first run can be read. Never fails the job.
+      - name: Environment report
+        continue-on-error: true
+        run: |
+          python - <<'EOF'
+          import os, platform, sys
+          print("python", sys.version)
+          print("windows", platform.platform())
+          print("session", os.environ.get("SESSIONNAME"), "| user", os.environ.get("USERNAME"))
+          try:
+              import sounddevice as sd
+              devices = sd.query_devices()
+              print("audio devices:", len(devices))
+              for d in devices:
+                  print("  ", d["name"], "in", d["max_input_channels"], "out", d["max_output_channels"])
+          except Exception as exc:
+              print("sounddevice:", type(exc).__name__, exc)
+          try:
+              import onnxruntime as ort
+              print("onnxruntime", ort.__version__, ort.get_available_providers())
+          except Exception as exc:
+              print("onnxruntime:", type(exc).__name__, exc)
+          try:
+              import llama_cpp
+              print("llama_cpp", llama_cpp.__version__)
+          except Exception as exc:
+              print("llama_cpp:", type(exc).__name__, exc)
+          import ctypes
+          print("foreground window:", ctypes.windll.user32.GetForegroundWindow())
+          EOF
+
+      # tests/conftest.py puts Qt on the "offscreen" platform and blocks the keyboard, clipboard, hook and microphone.
+      # scripts/coverage.py passes unknown arguments on to pytest, which is how --cov-fail-under gets there.
+      - name: Tests with coverage (fast mode)
+        run: >-
+          python scripts/coverage.py --fast
+          --min "$COVERAGE_MIN_NON_UI"
+          --cov-fail-under="$COVERAGE_MIN_TOTAL"
+          -o faulthandler_timeout=300

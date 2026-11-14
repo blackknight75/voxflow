@@ -1,0 +1,211 @@
+name: Models (CPU)
+
+# The tests that load the REAL speech model (Parakeet) and the REAL language model (Qwen3-4B), which ci.yml skips.
+#
+# What this covers: the CPU path only. A hosted runner has no GPU and no NVIDIA driver, so nothing here says
+# anything about CUDA or WebGPU (speed, VRAM, the GPU fallbacks); that stays a manual check, see docs/RELEASE_CHECKLIST.md.
+# Two more things, stated here so a green run is not read as more or less than it is:
+#   * the language model runs the way an installed VoxFlow runs it on a PC without a GPU driver. The pinned
+#     llama-cpp-python wheel is the CUDA build; its ggml-cuda.dll imports the NVIDIA driver library (nvcuda.dll), so
+#     it cannot be loaded here. The step "llama.cpp builds as shipped" adds the Vulkan and CPU builds of the same
+#     release in their own folders (scripts/fetch_llama_backends.py, what the installer bundles), and
+#     voxflow.cleanup picks the CPU build by itself. The step fails if it picks nothing. The Vulkan and CUDA builds
+#     are not exercised: that needs a graphics card;
+#   * the runner has 4 virtual cores (the app gives the language model half of them), a desktop CPU is several
+#     times faster. The suite's CPU latency budget is run and reported, but does not fail the run.
+#
+# Runs: by hand, twice a week (which also keeps the model cache from expiring: GitHub drops a cache that was not
+# used for 7 days), and from release.yml before the installer is built.
+#
+# The models (about 5 GB) are kept with actions/cache under a key made of the model names, so the cache changes
+# only when a default model changes. Without a cache they are downloaded from Hugging Face (anonymous, a few
+# minutes): a missing cache makes the run slower, never red. Only a run on the default branch saves the cache: a
+# cache saved from a tag or another branch could not be read by other runs and would only use up the 10 GB limit.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 4 * * 1,4"      # Monday and Thursday, 04:23 UTC
+  workflow_call:
+
+concurrency:
+  # github.workflow is the CALLING workflow's name when this runs from release.yml: a release never queues
+  # behind, or cancels, a scheduled run
+  group: models-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_NO_CACHE_DIR: "1"                 # the wheels (about 3 GB) would compete with the models for the cache limit
+  PYTHONUTF8: "1"
+  PYTHONUNBUFFERED: "1"
+  HF_HUB_DISABLE_TELEMETRY: "1"
+  HF_HUB_DISABLE_PROGRESS_BARS: "1"
+  HF_HUB_DISABLE_SYMLINKS: "1"          # real files in the cache folder: nothing for tar to get wrong
+  # Honoured by `voxflow --selftest` and scripts/e2e_selftest.py. The pytest tests use the app's default ("auto"),
+  # which ends on the CPU here because there is no GPU: speech recognition falls back by itself.
+  VOXFLOW_DEVICE: cpu
+  # Every test that loads a real model lives in these files (pytest marker "model" in test_asr.py, the "real"
+  # fixture in test_cleanup.py). The step "Model tests really ran" fails if they were skipped.
+  MODEL_TEST_FILES: tests/test_asr.py tests/test_cleanup.py
+  # Best-of-three latency of the language model against a budget set on a desktop CPU: reported, not required.
+  LATENCY_TEST: tests/test_cleanup.py::test_real_latency
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  cpu:
+    name: Real models on the CPU (Windows, Python 3.12)
+    runs-on: windows-2025
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      # --only-binary is required (see requirements.txt): the llama-cpp-python wheel comes from the extra index.
+      - name: Install dependencies
+        run: |
+          SECONDS=0
+          python -m pip install -r requirements-dev.txt --only-binary=:all:
+          echo "took ${SECONDS} s"
+
+      - name: Model cache folder and key
+        id: models
+        run: |
+          echo "HF_HUB_CACHE=${RUNNER_TEMP}\\hf-hub" >> "$GITHUB_ENV"
+          key="hf-windows-$(python .github/scripts/fetch_models.py --key)"
+          echo "cache key: $key"
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the models
+        id: restore
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/hf-hub
+          key: ${{ steps.models.outputs.key }}
+
+      # The app's own loading code downloads what is missing (see the script): anonymous, no token.
+      - name: Download missing models
+        run: |
+          SECONDS=0
+          echo "cache hit: ${{ steps.restore.outputs.cache-hit }}"
+          python .github/scripts/fetch_models.py
+          echo "took ${SECONDS} s"
+
+      # Saved right after the download, so a failing test further down does not cost the next run 5 GB again.
+      - name: Save the models
+        if: steps.restore.outputs.cache-hit != 'true' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/hf-hub
+          key: ${{ steps.models.outputs.key }}
+
+      # See the header. The same three build folders an installed VoxFlow has; which one loads is the app's own
+      # choice (voxflow.cleanup.LLAMA_BACKENDS), asked here with the device on "auto". With an NVIDIA driver present
+      # (a self-hosted GPU machine) the CUDA build also gets its CUDA 12 runtime; VOXFLOW_DEVICE=cpu still applies
+      # to the self-tests further down.
+      - name: llama.cpp builds as shipped
+        id: llama
+        run: |
+          SECONDS=0
+          python scripts/fetch_llama_backends.py
+          if python -c "import ctypes; ctypes.WinDLL('nvcuda.dll')" 2>/dev/null; then
+            echo "NVIDIA driver found: adding the CUDA 12 runtime"
+            python -m voxflow.cleanup --install-cuda
+          fi
+          python - <<'EOF'
+          import logging, os, sys
+          logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s", stream=sys.stdout)
+          from voxflow import cleanup
+          name = cleanup._select_llama_libs("auto")
+          if name is None:
+              sys.exit("::error::no llama.cpp build could be loaded on this runner; the language model cannot be tested.")
+          import llama_cpp
+          print("llama_cpp", llama_cpp.__version__, "loads from", os.environ["LLAMA_CPP_LIB_PATH"])
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"build={name} build, chosen by the app (as shipped)\n")
+          EOF
+          echo "took ${SECONDS} s"
+
+      - name: Environment report
+        continue-on-error: true
+        run: |
+          python - <<'EOF'
+          import os, platform, sys
+          print("python", sys.version)
+          print("windows", platform.platform(), "| cores", os.cpu_count())
+          print("session", os.environ.get("SESSIONNAME"), "| HF_HUB_CACHE", os.environ.get("HF_HUB_CACHE"))
+          import onnxruntime as ort
+          print("onnxruntime", ort.__version__, ort.get_available_providers())
+          from voxflow import cleanup, gpuprobe
+          print("NVIDIA driver:", gpuprobe.nvidia_driver(), "| Vulkan devices:", [str(g) for g in gpuprobe.vulkan_gpus()])
+          from voxflow import asr
+          print("speech back-ends:", {b.name: b.unusable(False) or "usable" for b in asr.ASR_BACKENDS})
+          print("llama.cpp build:", cleanup._select_llama_libs("auto"), os.environ.get("LLAMA_CPP_LIB_PATH"))
+          import llama_cpp
+          print("llama_cpp", llama_cpp.__version__, "| GPU offload supported:", llama_cpp.llama_supports_gpu_offload())
+          import ctypes
+          print("foreground window:", ctypes.windll.user32.GetForegroundWindow())
+          EOF
+          python .github/scripts/fetch_models.py --status
+
+      # No VOXFLOW_SKIP_MODEL_TESTS here: the real-model tests run. tests/conftest.py still blocks the keyboard,
+      # clipboard, hook and microphone and points APPDATA at a temp folder.
+      - name: Real-model tests
+        run: |
+          SECONDS=0
+          python -m pytest $MODEL_TEST_FILES -q -rs --durations=25 -p no:cacheprovider \
+            --deselect "$LATENCY_TEST" --junitxml="$RUNNER_TEMP/model-tests.xml" -o faulthandler_timeout=900
+          echo "took ${SECONDS} s"
+
+      # A model that is missing or did not load makes these tests SKIP themselves, which pytest counts as success.
+      - name: Model tests really ran
+        if: ${{ !cancelled() }}
+        run: >-
+          python .github/scripts/ci_gate.py junit "$RUNNER_TEMP/model-tests.xml"
+          --must-run test_asr --must-run test_real_ --may-skip test_tts_accuracy
+
+      - name: Language-model latency budget (reported, not required)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: python -m pytest "$LATENCY_TEST" -q -rs --durations=5 -p no:cacheprovider
+
+      # `voxflow --selftest` has no switch to leave out its keyboard-hook and clipboard steps, and whether a hosted
+      # runner's session allows them is not known in advance. ci_gate.py requires the UI imports, both model loads
+      # on the CPU backend and the two pipeline runs; a hook or clipboard failure is shown as a warning.
+      - name: Built-in self-test on the sample clip
+        if: ${{ !cancelled() }}
+        run: |
+          SECONDS=0
+          python .github/scripts/ci_gate.py selftest --backend cpu -- python -m voxflow --selftest tests/tts_sample.wav
+          echo "took ${SECONDS} s"
+
+      # The whole product path with stand-ins for the desktop (hotkey -> recorder -> models -> paste), with
+      # accuracy thresholds and per-stage timings. Reported, not required, until it has been seen green on a
+      # runner: then remove continue-on-error.
+      - name: End-to-end self-test, CPU (reported, not required)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          SECONDS=0
+          python scripts/e2e_selftest.py --device cpu --runs 3
+          echo "took ${SECONDS} s"
+
+      - name: Summary
+        if: ${{ !cancelled() }}
+        run: |
+          {
+            echo "### Real-model tests, CPU path only"
+            echo
+            echo "- models from the cache: ${{ steps.restore.outputs.cache-hit == 'true' && 'yes' || 'no (downloaded)' }} (key \`${{ steps.models.outputs.key }}\`)"
+            echo "- llama.cpp build: ${{ steps.llama.outputs.build || 'not set up' }}"
+            echo "- job status so far: ${{ job.status }}"
+            echo "- not covered here: GPU (CUDA, Vulkan, WebGPU), real microphone, real paste. See docs/RELEASE_CHECKLIST.md."
+          } >> "$GITHUB_STEP_SUMMARY"

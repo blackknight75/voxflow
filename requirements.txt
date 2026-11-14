@@ -1,0 +1,38 @@
+# VoxFlow - merged, pinned requirements (Python 3.12, Windows 11; verified on an RTX 5080 and, for the WebGPU and
+# Vulkan paths, on that card and an AMD integrated GPU: no discrete AMD or Intel card was available).
+#
+#   .venv\Scripts\python.exe -m pip install -r requirements.txt --only-binary=:all:
+#
+# --only-binary matters: PyPI has only an *sdist* for llama-cpp-python, which would try to compile it.
+# The prebuilt CUDA wheel comes from the extra index below.
+# Do NOT install plain `onnxruntime` or `onnxruntime-directml` next to onnxruntime-gpu: they share one package
+# folder. Dev/test tools: requirements-dev.txt.
+--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124
+
+# --- UI + app
+PySide6==6.12.0
+numpy==2.5.4
+sounddevice==0.5.6
+
+# --- speech recognition (Parakeet TDT via ONNX)
+huggingface-hub==2.4.0
+onnx-asr==0.12.0
+onnxruntime-gpu==1.31.1
+# The WebGPU execution provider (Dawn on Direct3D 12) as a plugin for the onnxruntime above (needs >= 1.24.4):
+# voxflow.asr registers it at run time for discrete AMD / Intel / NVIDIA cards. It replaces no file of onnxruntime-gpu.
+onnxruntime-ep-webgpu==0.5.0
+# onnxruntime-gpu 1.31 is built for CUDA 13: these wheels supply the runtime (no system CUDA install needed)
+nvidia-cuda-runtime==13.5.37
+nvidia-cublas==13.10.0.20
+nvidia-cudnn-cu13==9.28.1.4
+nvidia-cufft==12.5.0.14
+nvidia-curand==10.4.5.25
+nvidia-cuda-nvrtc==13.5.37
+nvidia-nvjitlink==13.5.37
+
+# --- transcript cleanup (small local LLM through llama.cpp, CUDA 12.4 prebuilt wheel)
+# After installing, run once:  .venv\Scripts\python.exe -m voxflow.cleanup --install-cuda
+#                              .venv\Scripts\python.exe scripts\fetch_llama_backends.py
+# The CUDA wheel only loads on a PC with an NVIDIA driver. The second command adds the Vulkan and CPU builds of the
+# SAME version next to it (pinned by SHA-256 in that script: update the pins together with this version).
+llama-cpp-python==0.3.36
