@@ -99,10 +99,12 @@ def _setup_dll_paths() -> None:
 #   lib_vulkan  the Vulkan build      } put there by scripts/fetch_llama_backends.py (source install) and
 #   lib_cpu     the plain CPU build   } bundled by the installer; version.txt names the release they belong to
 MIN_GPU_MEMORY_MB = 3500      # the default model needs about 3 GB on the GPU: a 4 GB card is the smallest that fits
-# The model also reads recogniser text that the rules left alone but that runs two clauses together, when one sentence
-# (_SPEED_CHECK) took at most this long at load. Measured: about 50-110 ms per such line on an RTX 5080 (CUDA);
-# a CPU takes over a second and never qualifies, so CPU-only PCs keep the old latency.
+# The model also reads recogniser text that the rules left alone but that runs two clauses together, while its
+# calls run at most this fast: PUNCTUATION_PASS_MAX_MS for a sentence of _SPEED_CHECK's length (13 words), i.e. about
+# 31 ms per word, judged on the GPU's own recent calls. Measured: about 50-110 ms per such line on an RTX 5080 (CUDA).
+# The CPU never gets the pass, so CPU-only PCs keep the old latency. 0 switches the pass off.
 PUNCTUATION_PASS_MAX_MS = 400
+_PASS_MIN_WORDS = 8           # short lines cost a fixed overhead: judge them as if they had this many words
 
 
 def _cuda_unusable(asked_for: bool) -> str | None:
@@ -473,23 +475,33 @@ def _cap_names(t: str) -> str:
 # a possessive "their" is never followed by "going to", "its" never by "been" or an article.
 _SENT_START = r"(?:(?<=^)|(?<=[.!?]\s)|(?<=\n))"
 # "Yes that works" -> "Yes, that works": an interjection at the start of a sentence, followed by a new clause
+# ("Hey there" is a greeting, not "Hey" + a clause: no comma)
 _INTRO_RE = re.compile(
     rf"{_SENT_START}(Yes|Yeah|Yep|No|Nope|Well|Okay|OK|Oh|Sure|Hey|Alright)"
-    r" (?=(?:I|I'm|I'll|I've|I'd|you|you're|we|we're|they|they're|he|she|it|it's|that|that's|this|there|"
-    r"let's|so|thanks|thank)\b)", re.I)
-_LETS_AFTER = "so ok okay now then and but well".split()      # "so lets go": "lets" opens the clause
+    r" (?!(?<=hey )there\b)(?=(?:I|I'm|I'll|I've|I'd|you|you're|we|we're|they|they're|he|she|it|it's|that|that's|"
+    r"this|there|let's|so|thanks|thank)\b)", re.I)
+_END = r"(?![\w'-])"         # the next word ends here: "its not-null checks" is not "its not"
+# "So lets go": "lets" opens the clause only at the start of a sentence, or right after one of these words there.
+# Anywhere else it can be the verb ("She lets the dog out and lets go").
+_LETS_LEAD = r"(?:so|ok|okay|now|well)"
+_LETS_NEXT = (r"(?= (?:go|do|see|try|meet|make|get|talk|start|keep|move|say|take|wait|look|check|plan|call|"
+              r"discuss|use|grab|focus|begin|schedule|review|hope|not)" + _END + ")")
+# "smaller then expected" -> "than", only before a word that cannot open a clause of time. "Things were better
+# then.", "easier then, back in school" and "better then we go home" stay as dictated (ambiguous: left alone).
+_THAN_NEXT = (r"(?= (?:expected|usual|planned|needed|necessary|required|normal|average|before|ever|the|a|an|"
+              r"any|anyone|anything|anybody|everyone|everything|most|my|your|our|his|me|him|us|them|"
+              r"one|two|three|four|five|six|seven|eight|nine|ten|twenty|fifty|hundred|\d+)" + _END + ")")
 _HOMOPHONE_RULES = [
-    (re.compile(r"\btheir(?= going to\b)", re.I), "they're"),
-    (re.compile(r"\btheir(?= (?:is|are|was|were|will be|has been|have been)\b)", re.I), "there"),
+    (re.compile(r"\btheir(?= going to" + _END + ")", re.I), "they're"),
+    (re.compile(r"\btheir(?= (?:is|are|was|were|will be|has been|have been)" + _END + ")", re.I), "there"),
     # not before "very" / "really" / "going": "its very own office", "its going rate" are possessive
-    (re.compile(r"\bits(?= (?:been|a|an|the|not|gonna|going to|okay|ok|fine)\b)", re.I), "it's"),
+    (re.compile(r"\bits(?= (?:been|a|an|the|not|gonna|going to|okay|ok|fine)" + _END + ")", re.I), "it's"),
     (re.compile(r"\byour(?= welcome\b(?:[.!,]|$| to\b))", re.I), "you're"),
-    (re.compile(r"\b(?:(?<=^)|(?<=[.!?,]\s)|" + "|".join(rf"(?<=\b{w} )" for w in _LETS_AFTER) + r")lets"
-                r"(?= (?:go|do|see|try|meet|make|get|talk|start|keep|move|say|take|wait|look|check|plan|call|"
-                r"discuss|use|grab|focus|begin|schedule|review|hope|not)\b)", re.I), "let's"),
+    (re.compile(r"(?:(?<=^)|(?<=[.!?]\s)|(?<=\n))lets" + _LETS_NEXT, re.I), "let's"),
+    (re.compile(r"(?:(?<=^)|(?<=[.!?]\s)|(?<=\n))(" + _LETS_LEAD + r",? )lets" + _LETS_NEXT, re.I), r"\1let's"),
     (re.compile(r"\b(would|could|should|must|might) of\b(?! course)", re.I), r"\1 have"),
     (re.compile(r"\b(more|less|rather|better|worse|bigger|smaller|faster|slower|higher|lower|larger|cheaper|easier|"
-                r"harder|longer|shorter|greater|fewer) then\b", re.I), r"\1 than"),
+                r"harder|longer|shorter|greater|fewer) then" + _THAN_NEXT, re.I), r"\1 than"),
 ]
 
 
@@ -510,13 +522,14 @@ def grammar_rules(t: str) -> str:
 
 # a clause starting in the middle of a sentence with no punctuation before it ("last night I will", "today could
 # you", "good however we"): recogniser output that needs the language model even though the rules left it alone
-_CLAUSE_START = r"(?:I|we|they|you|he|she|can|could|would|what|how|however|otherwise|let's|please)"
+_CLAUSE_START = r"(?:I|we|they|he|she|can|could|would|what|how|however|otherwise|let's|please)"
 _RUNON_RE = re.compile(rf"(?<=\w) ([A-Za-z']+) ({_CLAUSE_START})\b", re.I)
 _RUNON_NOT_BEFORE = frozenset(
     "and but or so that because if when think know knew said hope guess wish believe than where which who whom as "
     "before after until since while though although what how why whether me him her us them to of for with unless "
     "once do does did can could would should will i we they you he she it is are was were be been not just also "
     "really even then i'm thank".split())
+_RUNON_MIN_BEFORE = 3
 
 
 # "When the build finishes let me know": a sentence that opens with a subordinate clause usually needs a comma
@@ -526,15 +539,22 @@ _SUBORDINATE_RE = re.compile(r"(?:^|(?<=[.!?]\s))(?:if|when|once|after|before|si
 
 def looks_unpunctuated(text: str) -> bool:
     """True when a sentence of ``text`` seems to run two clauses together without punctuation."""
-    if any(m.group(1).lower() not in _RUNON_NOT_BEFORE for m in _RUNON_RE.finditer(text)):
-        return True
-    return any(_SUBORDINATE_RE.search(s) for s in re.split(r"(?<=[.!?])\s+", text))
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    for s in sentences:
+        for m in _RUNON_RE.finditer(s):
+            # a new clause needs a few words before it: "Last week I told you", "Today we ship" open with an
+            # adverbial and are correct as dictated
+            if m.group(1).lower() not in _RUNON_NOT_BEFORE and len(s[:m.start(2)].split()) >= _RUNON_MIN_BEFORE:
+                return True
+    return any(_SUBORDINATE_RE.search(s) for s in sentences)
 
 
-def rule_clean(text: str, formatting: bool = True, terminal: bool = True, fillers: bool = True) -> str:
+def rule_clean(text: str, formatting: bool = True, terminal: bool = True, fillers: bool = True,
+               grammar: bool = True) -> str:
     """Deterministic clean-up. Never changes meaning.
 
     ``terminal=False`` suppresses the added sentence-final punctuation (used for non-final lines).
+    ``grammar=False`` skips ``grammar_rules`` (command mode: a spoken instruction keeps the old rule set).
     """
     t = text.replace("\x00", "").strip()
     if t and not t.strip(_INVISIBLE):
@@ -567,7 +587,8 @@ def rule_clean(text: str, formatting: bool = True, terminal: bool = True, filler
         return ""
     t = _cap_sentences(t)
     t = _cap_names(t)
-    t = grammar_rules(t)
+    if grammar:
+        t = grammar_rules(t)
     # terminal punctuation for multi-word prose (not for single words / code-ish / lists)
     last = t.split("\n")[-1]
     if (
@@ -1581,6 +1602,8 @@ class Cleaner:
         # the model also reads recogniser text that looks finished but runs clauses together (``looks_unpunctuated``)
         # only where one sentence measured fast at load: on a GPU that costs tens of milliseconds, on a CPU a second
         self.punctuation_pass = False
+        self._learn_speed = False              # True on a GPU: model call times switch the pass on / off
+        self._ms_per_word: float | None = None  # running average of recent model calls (``_note_speed``)
 
     # ------------------------------------------------------------------ loading
     def _resolve_path(self) -> str:
@@ -1632,19 +1655,25 @@ class Cleaner:
             last_err = None
             for gpu in attempts:
                 try:
+                    self._ms_per_word, self._learn_speed, self.punctuation_pass = None, False, False
                     self._llm = self._build(path, gpu)
                     self.backend = (libs or "cuda") if gpu else "cpu"
                     # warm up (also primes the KV cache with the constant few-shot prefix)
                     self._llm_clean("um so what is the capital of france", max_ms=60000)
-                    if gpu:
+                    if gpu and libs is not None:
                         # a GPU that loads the model but cannot keep up would make every dictation time out
                         # (basic clean-up only): time one sentence and prefer the CPU if it is that slow
                         t0 = time.perf_counter()
                         self._llm_clean(_SPEED_CHECK, max_ms=60000)
                         took = time.perf_counter() - t0
-                        if took > self.timeout_s / 2 and libs is not None:
+                        if took > self.timeout_s / 2:
                             raise RuntimeError(f"the GPU took {took:.1f} s for one sentence, too slow for dictation")
-                        self.punctuation_pass = took * 1000 <= PUNCTUATION_PASS_MAX_MS
+                        self._note_speed(_SPEED_CHECK, took)       # already measured: free
+                    # the default CUDA build is not timed at load (that would add a sentence to every start): the
+                    # punctuation pass starts on there and the first real model calls decide (``_note_speed``)
+                    self._learn_speed = gpu
+                    self.punctuation_pass = gpu and PUNCTUATION_PASS_MAX_MS > 0 and (
+                        self._ms_per_word is None or self._pass_fast())
                     self._ready = True
                     log.info("cleanup model loaded on %s: %s", self.backend, self.model)
                     return
@@ -1737,6 +1766,17 @@ class Cleaner:
         assert self._llm is not None
         budget = (max_ms / 1000.0) if max_ms else self.timeout_s
         return self._run_bounded(lambda abort: self._generate(text, abort), budget, "cleanup LLM")
+
+    def _pass_fast(self) -> bool:
+        limit = PUNCTUATION_PASS_MAX_MS / len(_SPEED_CHECK.split())
+        return self._ms_per_word is not None and self._ms_per_word <= limit
+
+    def _note_speed(self, text: str, seconds: float) -> None:
+        """Feed one model call's time into the running average that decides the punctuation pass."""
+        per = seconds * 1000 / max(_PASS_MIN_WORDS, len(text.split()))
+        prev = self._ms_per_word
+        self._ms_per_word = per if prev is None else (prev + per) / 2
+        self.punctuation_pass = PUNCTUATION_PASS_MAX_MS > 0 and self._pass_fast()
 
     @property
     def has_llm(self) -> bool:
@@ -1886,7 +1926,12 @@ class Cleaner:
             allow_period = not bullet and idx == len(lines) - 1 and not _is_fragment(body)
             try:
                 self.last_info["llm"] = True
-                res = self._llm_clean(body, max_ms=remaining * 1000)
+                t_call = time.perf_counter()
+                try:
+                    res = self._llm_clean(body, max_ms=remaining * 1000)
+                finally:
+                    if self._learn_speed:
+                        self._note_speed(body, time.perf_counter() - t_call)
                 res = res.strip().strip('"').strip()
                 if res[:2] in ("- ", "* ") or res[:1] == "•":
                     res = ""  # model invented a bullet

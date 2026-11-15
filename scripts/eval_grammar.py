@@ -132,7 +132,7 @@ def freeze_asr(path: Path = DATA, voice: str | None = None) -> None:
     print(f"voice {voice}, asr {asr.backend}")
     with tempfile.TemporaryDirectory(prefix="voxflow-grammar-") as td:
         for case in data["cases"]:
-            if case["cat"] in ("homophone", "clean"):
+            if case["cat"] in ("homophone", "clean", "heldout"):
                 case["asr"] = ""
                 continue
             wav = Path(td) / f"{case['id']}.wav"

@@ -1,5 +1,5 @@
 {
-  "about": "Grammar / punctuation / capitalisation eval set for the English cleanup (scripts/eval_grammar.py). Each case: 'raw' is a hand-written unpunctuated lowercase transcript (the hard case), 'asr' is what Parakeet TDT 0.6b v3 wrote for the same words spoken by a Windows voice (frozen by scripts/eval_grammar.py --freeze-asr; empty = not frozen, e.g. homophones that TTS cannot express), 'expect' lists the acceptable outputs with smart formatting on and no tone.",
+  "about": "Grammar / punctuation / capitalisation eval set for the English cleanup (scripts/eval_grammar.py). The 15 heldout cases are already correct, were written without tuning the rules on them, and must come through unchanged. Each case: 'raw' is a hand-written unpunctuated lowercase transcript (the hard case), 'asr' is what Parakeet TDT 0.6b v3 wrote for the same words spoken by a Windows voice (frozen by scripts/eval_grammar.py --freeze-asr; empty = not frozen, e.g. homophones that TTS cannot express), 'expect' lists the acceptable outputs with smart formatting on and no tone.",
   "asr_voice": "Microsoft David Desktop",
   "cases": [
     {"id": "runon-report", "cat": "runon", "raw": "i finished the report last night i will send it to you after lunch", "expect": ["I finished the report last night. I will send it to you after lunch."], "asr": "I finished the report last night I will send it to you after lunch."},
@@ -51,6 +51,21 @@
     {"id": "short-sounds", "cat": "short", "raw": "sounds good", "expect": ["Sounds good.", "Sounds good"], "asr": "Sounds good."},
     {"id": "short-agree", "cat": "short", "raw": "i agree", "expect": ["I agree.", "I agree"], "asr": "I agree."},
     {"id": "names-sent", "cat": "names", "raw": "i talked to david and maria about the move to london", "expect": ["I talked to David and Maria about the move to London."], "asr": "I talked to David and Maria about the move to London."},
-    {"id": "names-company", "cat": "names", "raw": "we are moving the backend from aws to azure next quarter", "expect": ["We are moving the backend from AWS to Azure next quarter."], "asr": "We are moving the backend from AWS to Azure next quarter."}
+    {"id": "names-company", "cat": "names", "raw": "we are moving the backend from aws to azure next quarter", "expect": ["We are moving the backend from AWS to Azure next quarter."], "asr": "We are moving the backend from AWS to Azure next quarter."},
+    {"id": "heldout-01", "cat": "heldout", "raw": "Over the weekend we cleaned out the garage.", "expect": ["Over the weekend we cleaned out the garage."], "asr": ""},
+    {"id": "heldout-02", "cat": "heldout", "raw": "I would rather wait until the numbers are final.", "expect": ["I would rather wait until the numbers are final."], "asr": ""},
+    {"id": "heldout-03", "cat": "heldout", "raw": "Its battery lasts all day.", "expect": ["Its battery lasts all day."], "asr": ""},
+    {"id": "heldout-04", "cat": "heldout", "raw": "Their office is closed on Mondays.", "expect": ["Their office is closed on Mondays."], "asr": ""},
+    {"id": "heldout-05", "cat": "heldout", "raw": "No, thanks. I already ate.", "expect": ["No, thanks. I already ate."], "asr": ""},
+    {"id": "heldout-06", "cat": "heldout", "raw": "Well, that went better than expected.", "expect": ["Well, that went better than expected."], "asr": ""},
+    {"id": "heldout-07", "cat": "heldout", "raw": "She told me the meeting moved to Thursday.", "expect": ["She told me the meeting moved to Thursday."], "asr": ""},
+    {"id": "heldout-08", "cat": "heldout", "raw": "We could try a different approach next sprint.", "expect": ["We could try a different approach next sprint."], "asr": ""},
+    {"id": "heldout-09", "cat": "heldout", "raw": "Honestly, I think the first draft was stronger.", "expect": ["Honestly, I think the first draft was stronger."], "asr": ""},
+    {"id": "heldout-10", "cat": "heldout", "raw": "Then we can decide who presents.", "expect": ["Then we can decide who presents."], "asr": ""},
+    {"id": "heldout-11", "cat": "heldout", "raw": "The bigger issue is the deadline.", "expect": ["The bigger issue is the deadline."], "asr": ""},
+    {"id": "heldout-12", "cat": "heldout", "raw": "My sister lets her kids stay up late on weekends.", "expect": ["My sister lets her kids stay up late on weekends."], "asr": ""},
+    {"id": "heldout-13", "cat": "heldout", "raw": "Can you check whether the invoice was paid?", "expect": ["Can you check whether the invoice was paid?"], "asr": ""},
+    {"id": "heldout-14", "cat": "heldout", "raw": "Earlier today they announced the new pricing.", "expect": ["Earlier today they announced the new pricing."], "asr": ""},
+    {"id": "heldout-15", "cat": "heldout", "raw": "Before you leave, please lock the back door.", "expect": ["Before you leave, please lock the back door."], "asr": ""}
   ]
 }
