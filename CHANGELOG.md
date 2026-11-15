@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The setup guide downloads and loads the speech model before the hotkey practice, which now opens only once the
+  model is ready. A model that is already downloaded skips the wait; a failed download can be retried from the
+  guide, or the practice skipped.
+- Turning off *Keep history* offers to delete the transcripts already saved, and the History page says when
+  history is off while older transcripts are still listed.
+
+### Fixed
+
+- Errors while cleaning up or pasting a dictation could quote the dictated words in `voxflow.log`. They are now
+  logged by error type and code location only.
+- The setup guide said the models are about 1 GB; they are about 5 GB.
+
 ## [0.2.0] - 2026-11-14
 
 First public release. VoxFlow is a push-to-talk dictation app for Windows 11 that runs entirely on your PC:

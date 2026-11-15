@@ -856,7 +856,7 @@ class Modal(QWidget):
 
 
 def confirm(host: QWidget, title: str, message: str, action: str, on_confirm, danger: bool = True,
-            name: str = "confirm") -> Modal:
+            name: str = "confirm", cancel: str = "Cancel") -> Modal:
     """Build an "are you sure?" dialog for a destructive action (the window opens it, focused on Cancel)."""
     m = Modal(host, title, message, width=420, name=name)
 
@@ -864,7 +864,7 @@ def confirm(host: QWidget, title: str, message: str, action: str, on_confirm, da
         m.close_modal()
         on_confirm()
 
-    m.add_buttons(action, go, danger=danger)
+    m.add_buttons(action, go, cancel=cancel, danger=danger)
     return m
 
 

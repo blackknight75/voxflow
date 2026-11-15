@@ -39,7 +39,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
-from . import gpuprobe, langs
+from . import gpuprobe, langs, system
 from . import modelhub  # noqa: F401  (import side effect: Hugging Face telemetry is switched off)
 
 log = logging.getLogger("voxflow.cleanup")
@@ -1440,7 +1440,7 @@ def smart_format(text: str) -> str:
             out.append(("- " if bullet else "") + body)
         return "\n".join(out)
     except Exception as exc:  # noqa: BLE001 - formatting is a nicety: never lose the dictation over it
-        log.warning("smart formatting failed, keeping the plain text: %s", exc)
+        log.warning("smart formatting failed, keeping the plain text: %s", system.redacted_exc(exc))
         return text
 
 
@@ -1683,7 +1683,7 @@ class Cleaner:
                 self._terms = None
             return apply_tone(out, tone, lang) if tone else out
         except Exception as e:  # noqa: BLE001
-            log.warning("cleanup failed, returning input: %s", e)
+            log.warning("cleanup failed, returning input: %s", system.redacted_exc(e))
             return text
 
     def _clean_other(self, text: str, lang: str, smart: bool) -> str:
@@ -1696,7 +1696,8 @@ class Cleaner:
                 out = langs.smart_format(out, pack)
             return out
         except Exception as exc:  # noqa: BLE001 - never lose a dictation over a language rule
-            log.warning("clean-up for language '%s' failed, using the plain tidy-up: %s", lang or "?", exc)
+            log.warning("clean-up for language '%s' failed, using the plain tidy-up: %s", lang or "?",
+                        system.redacted_exc(exc))
             return clean_foreign(text)
 
     def _clean_lang(self, text: str, pack) -> str:

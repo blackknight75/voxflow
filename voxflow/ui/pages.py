@@ -364,6 +364,18 @@ class HistoryPage(Page):
             bar.addWidget(w)
         self.head_col.addLayout(bar)
 
+        # history is off but older transcripts are still on disk: say so above them, so nobody thinks new ones are kept
+        self.btn_off_on = Button("Turn history on", "secondary", height=30)
+        self.btn_off_on.setObjectName("history_off_turn_on")
+        self.btn_off_on.clicked.connect(lambda: self.setting("save_history", True))
+        self.off_note = Card(padding=0, spacing=0)
+        self.off_note.setObjectName("history_off_note")
+        off_row = Row("History is off", "New dictations are not saved. The transcripts below were kept from before; "
+                                        "Clear all deletes them.", self.btn_off_on, icon="history")
+        off_row.divider = False
+        self.off_note.body.addWidget(off_row)
+        self.off_note.hide()
+        self.body.addWidget(self.off_note)
         self.count = Label("", T.F_SMALL, "TEXT_DIM", wrap=False)
         self.count.setObjectName("history_count")
         self.body.addWidget(self.count)
@@ -406,6 +418,7 @@ class HistoryPage(Page):
             total, items = 0, []
         more = len(items) > self._limit
         items = items[:self._limit]
+        self.off_note.setVisible(total > 0 and not failed and not self.ctl.get("save_history"))
         self.list.set_items(items)
         self.list.setVisible(bool(items))
         self.btn_more.setVisible(more)
@@ -1545,9 +1558,10 @@ class SettingsPage(Page):
 
         # ---- history & privacy
         sec = Section("History and privacy")
-        sec.add(self._toggle("save_history", "Keep history",
-                             "Saves your transcripts on this PC so you can search, copy and paste them again.",
-                             icon="history"))
+        row = sec.add(self._toggle("save_history", "Keep history",
+                                   "Saves your transcripts on this PC so you can search, copy and paste them again. "
+                                   "When it is off, no transcript is written to disk.", icon="history"))
+        row.findChild(Toggle, "settings_save_history").toggled.connect(self._history_toggled)   # after the setting
         self.retention = ChoiceButton(name="Keep transcripts for")
         self.retention.setObjectName("settings_retention")
         self.retention.setFixedWidth(160)
@@ -1744,6 +1758,24 @@ class SettingsPage(Page):
         """Apply a setting; if the controller rejects it, snap the control back to the real value."""
         if not self.setting(key, value):
             self._on_config(key, self.ctl.get(key))
+
+    def _history_toggled(self, on: bool) -> None:
+        """History was just switched off: offer to delete what is already saved (keeping it is the default)."""
+        if on or self.ctl.get("save_history"):
+            return                                       # switched on, or the controller refused to switch it off
+        try:
+            n = int(self.ctl.history.count())
+        except Exception:  # noqa: BLE001 - the offer is a convenience; History > Clear all still works
+            return
+        if n <= 0:
+            return
+        self.win.open_modal(confirm(
+            self.win.panel, "Delete your saved history too?",
+            f"New dictations will not be saved from now on. {n:,} transcript{'s are' if n != 1 else ' is'} still "
+            "stored on this PC from before. Delete them now? Your stats are kept. This cannot be undone.",
+            f"Delete {n:,} transcript{'s' if n != 1 else ''}",
+            lambda: self.run(self.ctl.history.clear, success="Saved history deleted."),
+            name="history_off_confirm", cancel="Keep them"))
 
     # ---- sync from controller
     def _on_config(self, key: str, value) -> None:

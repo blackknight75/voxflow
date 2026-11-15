@@ -167,6 +167,27 @@ def shutdown_logging() -> None:
         _fault_file = None
 
 
+# =========================================================================== dictated text stays out of the log
+def redacted_exc(exc: BaseException) -> str:
+    """``KeyError at cleanup.py:812 in _fix`` for an exception raised while handling dictated text.
+
+    The message is left out on purpose: it can quote the words being processed (a ``KeyError`` names the word it
+    looked up, a ``ValueError`` may repeat its input), and the log file must never hold dictated text. An
+    ``OSError`` keeps its reason and file name, which are about the disk, never about the words."""
+    tb = traceback.extract_tb(exc.__traceback__) if exc.__traceback__ is not None else []
+    where = f" at {Path(tb[-1].filename).name}:{tb[-1].lineno} in {tb[-1].name}" if tb else ""
+    detail = ""
+    if isinstance(exc, OSError):
+        detail = ": " + " ".join(str(p) for p in (exc.strerror, exc.filename) if p)
+    return f"{type(exc).__name__}{where}{detail}"
+
+
+def redacted_traceback(exc: BaseException) -> str:
+    """The stack of ``exc`` (file, line, code) without the exception message; see :func:`redacted_exc`."""
+    frames = traceback.format_list(traceback.extract_tb(exc.__traceback__)) if exc.__traceback__ else []
+    return "Traceback (most recent call last):\n" + "".join(frames) + redacted_exc(exc)
+
+
 # =========================================================================== crash handling
 def write_crash_report(data_dir: str | Path, exc_type, exc, tb, where: str = "main thread") -> Path | None:
     """Write ``logs/crash-<timestamp>.log`` with the traceback. Returns its path (None if it failed)."""
