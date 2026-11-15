@@ -54,7 +54,7 @@ def clean_instruction(spoken: str, language: str | None = None) -> str:
     spoken = spoken or ""
     lang = resolve_language(spoken, language)
     if lang == "en":
-        text = rule_clean(spoken, formatting=False, terminal=False).strip()
+        text = rule_clean(spoken, formatting=False, terminal=False, grammar=False).strip()
     else:
         text = langs.rule_clean(spoken, langs.get(lang), formatting=False, terminal=False).strip()
     return text or spoken.strip()

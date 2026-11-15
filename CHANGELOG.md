@@ -40,6 +40,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   alias for those. Web addresses, paths and identifiers are left alone, and a snippet's text is never changed by
   the dictionary. The check uses a bundled English word list (SCOWL, about 200 KB).
 
+### Improved
+
+- **Better punctuation and grammar, with no new model and no new download.** On a fast GPU, the cleanup model
+  now also reads recogniser text that looks finished but runs two sentences together ("I finished the report
+  last night I will send it after lunch"). This costs about 50-100 ms more on those dictations only; text that
+  is already punctuated skips it. The pass follows the GPU's own recent model calls (no extra work at start-up)
+  and switches itself off while they are slow. CPU-only PCs keep their old speed.
+- The rule pass adds the comma after a leading "Yes", "Well", "No" or "Okay", and fixes a few unambiguous
+  homophones ("their going to" -> "they're going to", "smaller then expected" -> "smaller than expected",
+  "would of" -> "would have"). Ambiguous cases ("Things were better then.") are left as dictated. Command mode
+  instructions are not changed by these rules.
+- The cleanup model's homophone fixes and "send it to Mark, no wait, send it to Lisa" corrections are no longer
+  thrown away by its safety checks. A half-written spoken e-mail address ("anna.dot.lee") is now rejected.
+
 ## [0.2.0] - 2026-11-14
 
 First public release. VoxFlow is a push-to-talk dictation app for Windows 11 that runs entirely on your PC:
