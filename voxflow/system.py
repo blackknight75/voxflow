@@ -167,7 +167,50 @@ def shutdown_logging() -> None:
         _fault_file = None
 
 
+# =========================================================================== dictated text stays out of the log
+def redacted_exc(exc: BaseException) -> str:
+    """``KeyError at cleanup.py:812 in _fix`` for an exception raised while handling dictated text.
+
+    The message is left out on purpose: it can quote the words being processed (a ``KeyError`` names the word it
+    looked up, a ``ValueError`` may repeat its input), and the log file must never hold dictated text. An
+    ``OSError`` keeps its reason and file name, which are about the disk, never about the words."""
+    tb = traceback.extract_tb(exc.__traceback__) if exc.__traceback__ is not None else []
+    where = f" at {Path(tb[-1].filename).name}:{tb[-1].lineno} in {tb[-1].name}" if tb else ""
+    detail = ""
+    if isinstance(exc, OSError):
+        detail = ": " + " ".join(str(p) for p in (exc.strerror, exc.filename) if p)
+    return f"{type(exc).__name__}{where}{detail}"
+
+
+def redacted_traceback(exc: BaseException) -> str:
+    """The stack of ``exc`` (file, line, code) without any exception message, chained causes included the way
+    ``traceback.format_exception`` prints them; see :func:`redacted_exc`."""
+    chain, seen, cur = [], set(), exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        chain.append(cur)
+        cur = cur.__cause__ if cur.__cause__ is not None else (None if cur.__suppress_context__ else cur.__context__)
+    parts = []
+    for i, e in enumerate(reversed(chain)):                       # oldest cause first, as Python prints it
+        if i:                                                     # how ``e`` is linked to the one printed above
+            parts.append("\nThe above exception was the direct cause of the following exception:\n\n"
+                         if e.__cause__ is not None else
+                         "\nDuring handling of the above exception, another exception occurred:\n\n")
+        frames = traceback.format_list(traceback.extract_tb(e.__traceback__)) if e.__traceback__ else []
+        parts.append("Traceback (most recent call last):\n" + "".join(frames) + redacted_exc(e) + "\n")
+    return "".join(parts).rstrip("\n")
+
+
 # =========================================================================== crash handling
+def _with_tb(exc_type, exc, tb) -> BaseException:
+    """The exception of an ``excepthook`` triple, carrying its traceback (a hook may be handed a bare type)."""
+    if not isinstance(exc, BaseException):
+        exc = exc_type() if isinstance(exc_type, type) and issubclass(exc_type, BaseException) else Exception()
+    if tb is not None and exc.__traceback__ is None:
+        exc.__traceback__ = tb
+    return exc
+
+
 def write_crash_report(data_dir: str | Path, exc_type, exc, tb, where: str = "main thread") -> Path | None:
     """Write ``logs/crash-<timestamp>.log`` with the traceback. Returns its path (None if it failed)."""
     stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -177,7 +220,8 @@ def write_crash_report(data_dir: str | Path, exc_type, exc, tb, where: str = "ma
         with path.open("a", encoding="utf-8") as fh:
             fh.write(f"VoxFlow crash report {_dt.datetime.now().isoformat(timespec='seconds')}\n")
             fh.write(f"where: {where}\npython: {sys.version}\nplatform: {sys.platform}\n\n")
-            fh.write("".join(traceback.format_exception(exc_type, exc, tb)))
+            # frames and error types only: a message can quote dictated text (see redacted_exc)
+            fh.write(redacted_traceback(_with_tb(exc_type, exc, tb)) + "\n")
         return path
     except OSError:
         return None
@@ -193,7 +237,8 @@ def install_crash_handler(data_dir: str | Path, on_crash=None) -> None:
     def report(exc_type, exc, tb, where: str) -> None:
         if issubclass(exc_type, KeyboardInterrupt):
             return
-        logging.getLogger("voxflow").critical("uncaught exception in %s", where, exc_info=(exc_type, exc, tb))
+        logging.getLogger("voxflow").critical("uncaught exception in %s\n%s", where,     # no message: see above
+                                              redacted_traceback(_with_tb(exc_type, exc, tb)))
         path = write_crash_report(data_dir, exc_type, exc, tb, where)
         if path is not None:
             logging.getLogger("voxflow").critical("crash report written to %s", path)

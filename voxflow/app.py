@@ -152,7 +152,7 @@ def run_pipeline(audio, asr, cleaner, cleanup_enabled: bool = True, **clean_opti
             # the language model was wanted but timed out or had no time left: the text is rule-cleaned only
             out["rules_only"] = bool(cleaned) and isinstance(info, dict) and bool(info.get("rules_only"))
         except Exception as exc:  # cleanup failed: keep the raw transcript
-            log.warning("cleanup raised, pasting the raw transcript: %s", exc)
+            log.warning("cleanup raised, pasting the raw transcript: %s", system.redacted_exc(exc))
         out["t_clean"] = time.perf_counter() - t1
     return out
 

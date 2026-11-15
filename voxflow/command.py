@@ -12,6 +12,8 @@ from __future__ import annotations
 import logging
 import re
 
+from .system import redacted_exc
+
 log = logging.getLogger("voxflow.command")
 
 _SYSTEM = (
@@ -116,7 +118,7 @@ class CommandMode:
         try:
             text = self.injector.copy_selection()
         except Exception as exc:  # noqa: BLE001
-            log.warning("selection grab failed: %s", exc)
+            log.warning("selection grab failed: %s", redacted_exc(exc))
             text = None
         if text is None:
             raise CommandError("Couldn't read the selection because the clipboard is busy. Nothing was changed.")
@@ -150,7 +152,7 @@ class CommandMode:
         except TimeoutError:
             raise CommandError("Command mode took too long and was stopped. Nothing was changed.") from None
         except Exception as exc:  # noqa: BLE001
-            log.warning("command generation failed: %s", exc)
+            log.warning("command generation failed: %s", redacted_exc(exc))
             raise CommandError("The language model failed on that request. Nothing was changed.") from None
         out = tidy_output(raw, selection)
         if not out:

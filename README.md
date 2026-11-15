@@ -172,9 +172,10 @@ All shortcuts can be changed in Settings; an "undo last paste" shortcut is avail
 * Tray: left-click opens the window, right-click opens the menu (status, pause, smart cleanup, sound cues,
   microphone, paste last transcript, Settings, quit).
 
-**First run.** The first launch opens a short setup guide (microphone check, hotkey practice, model status) and
-downloads the two models. Progress is shown in the Flow bar, in the setup guide and under Settings >
-On-device models.
+**First run.** The first launch opens a short setup guide (microphone check, model download, hotkey practice) and
+downloads the two models. The hotkey practice opens once the speech model is ready (straight away when it is already
+downloaded). Progress is shown in the Flow bar, in the setup guide and under Settings > On-device models; closing the
+guide does not stop the download.
 
 **Backup.** Settings > Backup and sync > Export writes one `.voxbackup` file (history optional). Import shows
 what the file holds first and lets you tick the parts to import; *Merge* only adds what is missing (settings
@@ -262,8 +263,10 @@ VoxFlow is built so that there is nothing to trust: audio and text are processed
 | `%USERPROFILE%\.cache\huggingface\hub\` | The downloaded models (the standard Hugging Face cache) |
 | A sync folder, only if you choose one | Dictionary, snippets, styles and settings. Never history or statistics. |
 
-Recorded audio is held in memory for the transcription and is not written to disk. You can switch history off,
-set a retention period, or clear it at any time (History > Clear all).
+Recorded audio is held in memory for the transcription and is not written to disk. You can switch history off
+(Settings > History and privacy > Keep history; VoxFlow then offers to delete what is already saved), set a
+retention period, or clear it at any time (History > Clear all). With history off no transcript is written to disk.
+The log file never contains dictated text: errors while handling your words are logged by type and place only.
 
 ## Speed and accuracy
 

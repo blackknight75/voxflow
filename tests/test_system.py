@@ -296,7 +296,9 @@ def test_write_crash_report(tmp_path):
     assert path.parent == tmp_path / "logs" and path.name.startswith("crash-") and path.suffix == ".log"
     text = path.read_text(encoding="utf-8")
     assert "VoxFlow crash report" in text and "where: thread pipeline" in text
-    assert "RuntimeError: kaboom" in text and "Traceback (most recent call last)" in text and "python: " in text
+    assert "RuntimeError at test_system.py:" in text and "in _raise" in text and "python: " in text
+    assert "Traceback (most recent call last)" in text
+    assert "kaboom" not in text, "the message can quote dictated text: type and place only"
     blocker = tmp_path / "file"
     blocker.write_text("x")
     assert sysmod.write_crash_report(blocker, *_raise()) is None, "an unwritable folder must not raise from a crash"
@@ -309,7 +311,8 @@ def test_crash_handler_reports_main_thread_exceptions_and_runs_cleanup(tmp_path,
     with caplog.at_level("CRITICAL"):
         sys.excepthook(*_raise("main thread died"))
     reports = list((tmp_path / "logs").glob("crash-*.log"))
-    assert len(reports) == 1 and "main thread died" in reports[0].read_text(encoding="utf-8")
+    assert len(reports) == 1 and "RuntimeError at test_system.py:" in reports[0].read_text(encoding="utf-8")
+    assert "main thread died" not in reports[0].read_text(encoding="utf-8") and "main thread died" not in caplog.text
     assert cleaned == ["unmuted"] and chained == [RuntimeError]
     assert "uncaught exception in main thread" in caplog.text and "crash report written to" in caplog.text
     assert (tmp_path / "logs" / "fault.log").exists(), "faulthandler must be armed for native crashes"

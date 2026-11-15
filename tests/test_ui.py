@@ -15,6 +15,7 @@ from tests.controller_rig import make_rig
 from voxflow.context import AppContext
 from voxflow.ui import dialogs
 from voxflow.ui import theme as T
+from voxflow.ui.onboarding import STEPS
 from voxflow.ui.shell import build_ui
 from voxflow.ui.window import PAGE_KEYS
 
@@ -330,6 +331,54 @@ def test_history_empty_states(ui):
     assert empty.accessibleName() == "History is off"
     ui.find("history_empty_action").click()
     assert ui.c.get("save_history") is True
+
+
+def test_turning_history_off_offers_to_delete_what_is_saved(make_ui):
+    ui = make_ui(prepare=lambda rig: seed(rig, 3))
+    ui.page("settings")
+    labels = " ".join(w.text() for w in ui.win.findChildren(QWidget) if hasattr(w, "text") and callable(w.text)
+                      and isinstance(w.text(), str))
+    assert "Paused while Keep history is off." in labels and "no words are learned" in labels
+    toggle = ui.find("settings_save_history")
+    toggle.click()
+    assert ui.c.get("save_history") is False, "history is off at once, whatever is chosen in the dialog"
+    dialog = ui.find("history_off_confirm")
+    texts = " ".join(w.text() for w in dialog.findChildren(QWidget) if hasattr(w, "text") and callable(w.text))
+    assert dialog.isVisible() and "3 transcripts are still stored" in texts and "Keep them" in texts
+    ui.render()
+    ui.find("history_off_confirm_cancel").click()              # "Keep them"
+    assert ui.c.history.count() == 3
+
+    ui.page("history")
+    note = ui.find("history_off_note")
+    assert note.isVisible() and ui.find("history_list").isVisible(), "the old transcripts are marked as such"
+    ui.render()
+    ui.find("history_off_turn_on").click()
+    assert ui.c.get("save_history") is True and not note.isVisible()
+
+    ui.page("settings")
+    toggle.click()
+    ui.find("history_off_confirm_ok").click()
+    assert ui.c.history.count() == 0 and "Saved history deleted." in ui.toasts()
+    assert ui.c.stats.summary()["total_words"] > 0, "stats are kept"
+    ui.c.set("save_history", True)
+    toggle.click()
+    assert not ui.find_all("history_off_confirm") or not ui.find("history_off_confirm").isVisible(), \
+        "nothing saved: nothing to offer"
+    ui.page("history")
+    assert not ui.find("history_off_note").isVisible() and ui.find("history_empty").accessibleName() == "History is off"
+
+    ui.page("settings")
+    toggle.click()                                             # switching it back on offers nothing
+    assert ui.c.get("save_history") is True
+
+    def broken():
+        raise OSError("history.json is locked")
+
+    ui.c.history.count = broken
+    toggle.click()                                             # the offer is skipped; turning off still works
+    assert ui.c.get("save_history") is False
+    del ui.c.history.count
 
 
 def test_history_lists_groups_searches_and_toggles_raw(make_ui):
@@ -988,8 +1037,8 @@ def test_onboarding_walkthrough_to_the_end(make_ui):
     ob.mic.chosen.emit(ob.mic.options[1][0])
     assert ui.c.get("mic_device") == ob.mic.options[1][0] and ob.mic_status.text() == "Listening… say something."
 
-    ob.btn_next.click()                                        # -> hotkey practice
-    assert ob.index == 2 and not ui.c._monitor
+    ob.btn_next.click()                                        # -> hotkey practice (the model step is passed
+    assert STEPS[ob.index] == "hotkey" and not ui.c._monitor   #    over: the speech model is already loaded)
     assert ob.try_status.text() == "Waiting for you to hold the hotkey."
     ui.rig.pause()
     ui.rig.press()
@@ -1000,10 +1049,8 @@ def test_onboarding_walkthrough_to_the_end(make_ui):
     ui.wait(lambda: "This is my first dictation." in ob.practice.toPlainText())
     ui.render(ob)
 
-    ob.btn_next.click()                                        # -> models
-    assert ob.index == 3 and ob.models_note.text() == "Everything is downloaded and ready."
     ob.btn_back.click()
-    assert ob.index == 2
+    assert STEPS[ob.index] == "mic", "Back passes over the model step too while there is nothing to wait for"
     ob.btn_next.click()
     ob.btn_next.click()                                        # -> done
     assert ob.index == 4 and ob.btn_next.text() == "Start dictating" and not ob.btn_skip.isVisible()
@@ -1033,14 +1080,103 @@ def test_onboarding_shows_model_download_and_failure(make_ui):
     ui = make_ui(config={"onboarding_done": False})
     ui.wait(lambda: ui.shell.onboarding is not None)
     ob = ui.shell.onboarding
-    ob.go(3)
+    ob.go(STEPS.index("models"))
     ui.c._on_model_event("asr", {"state": "downloading", "detail": "Downloading… 312 MB of 2,550 MB",
                                  "progress": 0.12, "backend": ""})
-    assert "You do not have to wait here" in ob.models_note.text()
+    assert "hotkey practice opens as soon as speech recognition is ready" in ob.models_note.text()
+    assert not ob.btn_next.isEnabled()
     ui.render(ob)
     ui.c._on_model_event("asr", {"state": "failed", "detail": "No internet.", "progress": None, "backend": ""})
     assert "could not be loaded" in ob.models_note.text() and "Settings" in ob.models_note.text()
+    assert ob.btn_next.isEnabled() and ob.btn_next.text() == "Skip practice"
     ob.skip()
+
+
+def test_onboarding_waits_for_the_speech_model_before_the_hotkey_practice(make_ui):
+    """First run on a new PC: the model is still downloading when the microphone check is done. The hotkey
+    practice opens only once the model is ready, and a failed download can be retried from the guide."""
+    ui = make_ui(config={"onboarding_done": False})
+    ui.wait(lambda: ui.shell.onboarding is not None)
+    ob = ui.shell.onboarding
+    ui.c._on_model_event("asr", {"state": "downloading", "detail": "Downloading… 312 MB of 2,550 MB",
+                                 "progress": 0.12, "backend": ""})
+    ob.btn_next.click()
+    ob.btn_next.click()                                        # mic -> models (not the practice: nothing would type)
+    assert STEPS[ob.index] == "models" and not ob.btn_next.isEnabled() and ob._slow_timer.isActive()
+    assert ob.model_lines["asr"].state.text() == "Downloading 12%"
+    ui.qtbot.keyClick(ob.btn_next, Qt.Key.Key_Return)
+    ob._next()
+    assert STEPS[ob.index] == "models", "neither the button nor Enter skips ahead while the model loads"
+    ob._slow_timer.timeout.emit()                              # 20 s later, still downloading
+    assert "taking a while" in ob.models_note.text() and "keeps loading in the background" in ob.models_note.text()
+
+    ui.c._on_model_event("asr", {"state": "failed", "detail": "No internet.", "progress": None, "backend": ""})
+    assert ob.btn_retry.isVisible() and not ob._slow_timer.isActive()
+    loads = ui.rig.asr.loads
+    ob.btn_retry.click()                                       # the real reload: only the failed model
+    ui.wait(lambda: ui.rig.asr.loads == loads + 1 and ob.model_lines["asr"].state.text() == "Ready")
+    assert ob.btn_next.isEnabled() and ob.btn_next.text() == "Continue" and not ob.btn_retry.isVisible()
+    assert ob.btn_next.hasFocus(), "the keyboard user can go on with Enter"
+    ob.btn_next.click()
+    assert STEPS[ob.index] == "hotkey" and ob.try_status.text() == "Waiting for you to hold the hotkey."
+    ob.btn_back.click()
+    assert STEPS[ob.index] == "mic"
+    ob.skip()
+
+
+def test_onboarding_can_skip_the_practice_when_the_speech_model_fails(make_ui):
+    ui = make_ui(config={"onboarding_done": False})
+    ui.wait(lambda: ui.shell.onboarding is not None)
+    ob = ui.shell.onboarding
+    ob.go(STEPS.index("models"))
+    ui.c._on_model_event("asr", {"state": "failed", "detail": "No internet.", "progress": None, "backend": ""})
+    ob.btn_next.click()                                        # "Skip practice"
+    assert STEPS[ob.index] == "done"
+    ob.btn_back.click()
+    assert STEPS[ob.index] == "models", "Back passes over the practice that was skipped"
+    ob.go(STEPS.index("hotkey"))                               # reached anyway: it says why nothing happens
+    assert "not ready yet" in ob.try_status.text()
+    ob.skip()
+
+
+def test_a_retried_download_that_is_slow_again_gets_the_slow_note(make_ui):
+    """The real reload reports "loading" from its thread after the click, so the guide re-reads "failed" at the
+    click itself; the slow-load timer must start when the queued busy state arrives."""
+    import threading
+    ui = make_ui(config={"onboarding_done": False})
+    ui.wait(lambda: ui.shell.onboarding is not None)
+    ob = ui.shell.onboarding
+    ob.go(STEPS.index("models"))
+    ui.c._on_model_event("asr", {"state": "failed", "detail": "No internet.", "progress": None, "backend": ""})
+    assert not ob._slow_timer.isActive()
+    gate = threading.Event()
+    ui.rig.asr.load_gate = gate                                # the retried load hangs
+    try:
+        ob.btn_retry.click()
+        ui.wait(lambda: ui.c.model_status("asr")["state"] in ("loading", "downloading"))
+        ui.wait(lambda: ob._slow_timer.isActive())
+        assert not ob.btn_next.isEnabled()
+        ob._slow_timer.timeout.emit()
+        assert "taking a while" in ob.models_note.text()
+    finally:
+        gate.set()
+    ui.wait(lambda: ui.c.model_status("asr")["state"] == "ready")
+    assert not ob._slow_timer.isActive() and ob.btn_next.isEnabled()
+    ob.skip()
+
+
+def test_closing_the_guide_while_the_model_loads_keeps_loading(make_ui):
+    ui = make_ui(config={"onboarding_done": False})
+    ui.wait(lambda: ui.shell.onboarding is not None)
+    ob = ui.shell.onboarding
+    ui.c._on_model_event("asr", {"state": "downloading", "detail": "", "progress": 0.5, "backend": ""})
+    ob.go(STEPS.index("models"))
+    assert ob._slow_timer.isActive()
+    ob.close()
+    assert ui.shell.onboarding is None and ui.c.get("onboarding_done") is True and not ob._slow_timer.isActive()
+    loads = ui.rig.asr.loads
+    ui.c.reload_models(["asr"])                                # the load goes on without the guide
+    ui.wait(lambda: ui.rig.asr.loads == loads + 1 and ui.c.model_status("asr")["state"] == "ready")
 
 
 def test_onboarding_hotkey_recorder_changes_the_shortcut(make_ui):

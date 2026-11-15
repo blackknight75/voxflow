@@ -1467,9 +1467,10 @@ class Controller(QObject):
                     if not self.injector.undo():
                         self._sig_notice.emit("warning", "Couldn't send the undo because a modifier key is "
                                                          "still held down.")
-            except Exception:  # noqa: BLE001 - never kill the worker
-                # the details belong in the log; the user gets plain words and a next step
-                log.exception("pipeline job '%s' failed", job.get("kind"))
+            except Exception as exc:  # noqa: BLE001 - never kill the worker
+                # the details belong in the log (the stack, never the message: it can quote the dictated words);
+                # the user gets plain words and a next step
+                log.error("pipeline job '%s' failed\n%s", job.get("kind"), system.redacted_traceback(exc))
                 message = _JOB_FAILURES.get(job.get("kind"), _JOB_FAILURES["dictate"])
                 if "gen" in job:
                     self._sig_failed.emit(message, job["gen"])
@@ -1519,7 +1520,7 @@ class Controller(QObject):
         if text.strip():
             cleaned = text
             text = self.snippets.expand(self.dictionary.apply(text))
-            if cfg.auto_learn and res["cleaned"]:
+            if cfg.auto_learn and cfg.save_history and res["cleaned"]:     # history off: learn nothing from it
                 for suggestion in self.dictionary.learn(res["raw"], cleaned):
                     self._sig_suggestion.emit(suggestion)
         ok, message = self._paste(text)
@@ -1600,8 +1601,8 @@ class Controller(QObject):
                     self.history.add_entry(entry)
                 if entry["mode"] == "dictate":
                     self.stats.record(entry["words"], entry["duration_s"], entry["app_exe"], entry["ts"])
-            except Exception:  # noqa: BLE001
-                log.exception("could not file the transcript")
+            except Exception as exc:  # noqa: BLE001
+                log.error("could not file the transcript\n%s", system.redacted_traceback(exc))
 
     def _owns_bar(self, gen: int) -> bool:
         """False when a newer recording started (or is running): a stale job must not repaint the flow bar."""
