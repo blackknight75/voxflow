@@ -54,7 +54,8 @@ Good to know before you start:
   card everything runs on the CPU: plain dictation is still quick, and sentences that need the language model take
   about 2 seconds (see [Speed](#speed-and-accuracy)). Only an NVIDIA card (and an AMD integrated GPU) was available
   for testing: the WebGPU and Vulkan paths were run on those, and separate AMD and Intel cards are untested.
-  Integrated graphics are not picked automatically, because the one we measured was slower than the CPU.
+  Integrated graphics are not used at startup, because the one we measured was slower than the CPU; the
+  background speed check switches to one only where it measures faster (see [Configuration](#configuration)).
 * You need Windows 11 (64-bit) and free disk space for the program plus the 5 GB of models.
 
 ## Why VoxFlow
