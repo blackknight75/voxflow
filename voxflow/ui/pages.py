@@ -1485,7 +1485,8 @@ class SettingsPage(Page):
         sec.add(self._toggle("smart_formatting", "Smart formatting",
                              "Writes spoken numbers, dates, emails, links and lists the way you would type them."))
         sec.add(self._toggle("auto_learn", "Learn new words",
-                             "Suggests dictionary entries when you correct a word VoxFlow got wrong."))
+                             "Suggests dictionary entries when you correct a word VoxFlow got wrong. Paused while "
+                             "Keep history is off."))
         self.body.addWidget(sec)
 
         # ---- sound
@@ -1560,7 +1561,8 @@ class SettingsPage(Page):
         sec = Section("History and privacy")
         row = sec.add(self._toggle("save_history", "Keep history",
                                    "Saves your transcripts on this PC so you can search, copy and paste them again. "
-                                   "When it is off, no transcript is written to disk.", icon="history"))
+                                   "When it is off, no transcript is written to disk and no words are learned "
+                                   "from your dictations.", icon="history"))
         row.findChild(Toggle, "settings_save_history").toggled.connect(self._history_toggled)   # after the setting
         self.retention = ChoiceButton(name="Keep transcripts for")
         self.retention.setObjectName("settings_retention")

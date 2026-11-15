@@ -1520,7 +1520,7 @@ class Controller(QObject):
         if text.strip():
             cleaned = text
             text = self.snippets.expand(self.dictionary.apply(text))
-            if cfg.auto_learn and res["cleaned"]:
+            if cfg.auto_learn and cfg.save_history and res["cleaned"]:     # history off: learn nothing from it
                 for suggestion in self.dictionary.learn(res["raw"], cleaned):
                     self._sig_suggestion.emit(suggestion)
         ok, message = self._paste(text)

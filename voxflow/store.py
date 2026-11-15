@@ -107,13 +107,26 @@ class _JsonStore:
             self._backup("corrupt")
             self._load(None)
 
+    BACKUP_TAGS: tuple[str, ...] = ("corrupt",)    # every ``_backup`` tag this store can write
+
+    def _backup_path(self, tag: str) -> Path:
+        return self.path.with_name(f"{self.path.stem}.{tag}{self.path.suffix}")
+
     def _backup(self, tag: str) -> None:
         try:
             if self.path.exists():
-                target = self.path.with_name(f"{self.path.stem}.{tag}{self.path.suffix}")
-                target.write_bytes(self.path.read_bytes())
+                self._backup_path(tag).write_bytes(self.path.read_bytes())
         except OSError:
             pass
+
+    def _drop_backups(self) -> None:
+        """Delete the copies ``_backup`` kept (``history.v1.json``, ``history.corrupt.json``): they hold the
+        same data as the file, so clearing the store must clear them too."""
+        for tag in self.BACKUP_TAGS:
+            try:
+                self._backup_path(tag).unlink(missing_ok=True)
+            except OSError as exc:
+                log.warning("could not delete %s: %s", self._backup_path(tag).name, exc.strerror or exc)
 
     def _load(self, data) -> None:
         raise NotImplementedError
@@ -901,6 +914,7 @@ class History(_JsonStore):
     """Transcript history, newest first, with a size cap and optional retention in days."""
 
     filename = "history.json"
+    BACKUP_TAGS = ("corrupt", "v1")
     indent = None                   # compact: the file holds thousands of entries and is rewritten per dictation
 
     def __init__(self, path: str | Path | None = None, limit: int = 5000, retention_days: int = 0,
@@ -1041,9 +1055,12 @@ class History(_JsonStore):
         return removed
 
     def clear(self) -> None:
+        """Delete every transcript: the file is rewritten at once, and the backup copies are deleted too."""
         with self._lock:
             self._items = []
             self._save()
+            self.flush()
+            self._drop_backups()
         self._notify("history")
 
     # ---- reading

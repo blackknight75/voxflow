@@ -346,10 +346,8 @@ class Onboarding(QWidget):
                 self.try_status.setText("The speech model is not ready yet, so the hotkey has nothing to type with.")
         elif step == "models":
             self._slow = False
-            for name in self.model_lines:
+            for name in self.model_lines:      # starts the slow-load timer while the speech model is busy
                 self._on_model(name, self._model_status(name))
-            if self._asr_state() in BUSY_STATES:
-                self._slow_timer.start()
         elif step == "done":
             self._fill_tips()
         self.btn_next.setFocus(Qt.FocusReason.OtherFocusReason) if step != "hotkey" else None
@@ -523,6 +521,8 @@ class Onboarding(QWidget):
         self.btn_retry.setVisible(bool(failed))
         if asr not in BUSY_STATES:
             self._slow_timer.stop()
+        elif STEPS[self.index] == "models" and not self._slow and not self._slow_timer.isActive():
+            self._slow_timer.start()     # also when a retry's "loading" arrives after the click (queued signal)
         if STEPS[self.index] == "models":
             self._gate_models_step(asr)
 
@@ -552,10 +552,9 @@ class Onboarding(QWidget):
             self.models_note.setText(f"That did not work: {exc}")
             return
         self._slow = False
-        for name in self.model_lines:
+        self._slow_timer.stop()
+        for name in self.model_lines:          # the real controller reports "loading" later; _on_model starts the timer
             self._on_model(name, self._model_status(name))
-        if STEPS[self.index] == "models" and self._asr_state() in BUSY_STATES:
-            self._slow_timer.start()
 
     def _on_captured(self, combo: str) -> None:
         if self.recorder.capturing:

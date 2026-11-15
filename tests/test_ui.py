@@ -336,6 +336,9 @@ def test_history_empty_states(ui):
 def test_turning_history_off_offers_to_delete_what_is_saved(make_ui):
     ui = make_ui(prepare=lambda rig: seed(rig, 3))
     ui.page("settings")
+    labels = " ".join(w.text() for w in ui.win.findChildren(QWidget) if hasattr(w, "text") and callable(w.text)
+                      and isinstance(w.text(), str))
+    assert "Paused while Keep history is off." in labels and "no words are learned" in labels
     toggle = ui.find("settings_save_history")
     toggle.click()
     assert ui.c.get("save_history") is False, "history is off at once, whatever is chosen in the dialog"
@@ -1133,6 +1136,32 @@ def test_onboarding_can_skip_the_practice_when_the_speech_model_fails(make_ui):
     assert STEPS[ob.index] == "models", "Back passes over the practice that was skipped"
     ob.go(STEPS.index("hotkey"))                               # reached anyway: it says why nothing happens
     assert "not ready yet" in ob.try_status.text()
+    ob.skip()
+
+
+def test_a_retried_download_that_is_slow_again_gets_the_slow_note(make_ui):
+    """The real reload reports "loading" from its thread after the click, so the guide re-reads "failed" at the
+    click itself; the slow-load timer must start when the queued busy state arrives."""
+    import threading
+    ui = make_ui(config={"onboarding_done": False})
+    ui.wait(lambda: ui.shell.onboarding is not None)
+    ob = ui.shell.onboarding
+    ob.go(STEPS.index("models"))
+    ui.c._on_model_event("asr", {"state": "failed", "detail": "No internet.", "progress": None, "backend": ""})
+    assert not ob._slow_timer.isActive()
+    gate = threading.Event()
+    ui.rig.asr.load_gate = gate                                # the retried load hangs
+    try:
+        ob.btn_retry.click()
+        ui.wait(lambda: ui.c.model_status("asr")["state"] in ("loading", "downloading"))
+        ui.wait(lambda: ob._slow_timer.isActive())
+        assert not ob.btn_next.isEnabled()
+        ob._slow_timer.timeout.emit()
+        assert "taking a while" in ob.models_note.text()
+    finally:
+        gate.set()
+    ui.wait(lambda: ui.c.model_status("asr")["state"] == "ready")
+    assert not ob._slow_timer.isActive() and ob.btn_next.isEnabled()
     ob.skip()
 
 
