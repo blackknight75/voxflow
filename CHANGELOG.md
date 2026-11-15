@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Snippets fire the way people say them: "Insert my address.", "My, address.", "Sign-off", "signoff",
+  "zoom link two" for "zoom link 2", whatever case and punctuation the recogniser writes. A trigger said on its own
+  inserts exactly the snippet, and a trigger the clean-up reworded still fires.
+- Dictionary words work without "sounds like" aliases: close misspellings of a word ("Kubernetis", "Graphana",
+  "pie torch", "get hub") are corrected after recognition. Ordinary words, web addresses, paths and identifiers
+  are left alone, and a snippet's text is never changed by the dictionary.
+
 ## [0.2.0] - 2026-11-14
 
 First public release. VoxFlow is a push-to-talk dictation app for Windows 11 that runs entirely on your PC:

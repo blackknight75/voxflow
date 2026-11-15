@@ -119,6 +119,7 @@ class Controller(QObject):
         # ---- stores
         self.dictionary = store.Dictionary(self.data_dir)
         self.snippets = store.Snippets(self.data_dir)
+        self._rule_cleaner = None                     # model-free clean-up, for a trigger the full one reworded
         self.history = store.History(self.data_dir, limit=cfg.history_limit,
                                      retention_days=cfg.history_retention_days)
         self.stats = store.Stats(self.data_dir)
@@ -1481,6 +1482,27 @@ class Controller(QObject):
         return {"tone": self.styles.tone_for(context.exe, context.title), "terms": self.dictionary.terms(),
                 "language": cfg.language, "smart": cfg.smart_formatting}
 
+    def _personalise(self, text: str, raw: str, context: AppContext) -> str:
+        """The user's snippets and dictionary, applied to the cleaned dictation.
+
+        Snippets go first and the dictionary only corrects the words around them, so a snippet is typed exactly
+        as saved. When the clean-up reworded a trigger phrase that the recogniser did hear (the language model
+        or smart formatting rewrote "sig dot" as "sig."), the dictation is rule-cleaned again without those
+        steps, so the snippet still fires: saying the trigger must always work."""
+        if raw and raw != text and not self.snippets.matches(text) and self.snippets.matches(raw):
+            kwargs = dict(self._clean_kwargs(context), smart=False)
+            try:
+                if self._rule_cleaner is None:
+                    from .cleanup import Cleaner
+                    self._rule_cleaner = Cleaner(use_llm=False)
+                    self._rule_cleaner.load()
+                again = self._rule_cleaner.clean(raw, **kwargs)
+            except Exception:  # noqa: BLE001 - the rules never fail a dictation
+                log.exception("rule clean-up for a snippet failed")
+                again = ""
+            text = again if again and self.snippets.matches(again) else raw
+        return self.snippets.expand(text, transform=self.dictionary.apply)
+
     def _paste(self, text: str) -> tuple[bool, str]:
         """Paste on the worker thread. Returns (text reached the app or the clipboard, flow-bar message)."""
         self.injector.begin(text)
@@ -1518,7 +1540,7 @@ class Controller(QObject):
             return
         if text.strip():
             cleaned = text
-            text = self.snippets.expand(self.dictionary.apply(text))
+            text = self._personalise(text, res["raw"], ctx)
             if cfg.auto_learn and res["cleaned"]:
                 for suggestion in self.dictionary.learn(res["raw"], cleaned):
                     self._sig_suggestion.emit(suggestion)

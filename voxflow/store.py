@@ -255,6 +255,136 @@ def _interesting_casing(tok: str) -> bool:
     return any(c.isdigit() for c in core) and any(c.isalpha() for c in core)
 
 
+# ---- close-misspelling correction (the recogniser cannot be told the user's words, so they are fixed afterwards)
+_FUZZY_MIN_LEN = 5                  # shorter terms are only matched exactly: "Dan" must never eat "can"
+_FUZZY_MAX_WORDS = 4                # a name heard as at most this many words ("cube are net ease")
+_FUZZY_WORD_RE = re.compile(r"\w+(?:['’]\w+)*")
+_FUZZY_GAP_RE = re.compile(r"[ \t]+|[ \t]*-[ \t]*")       # what may sit between the words of one spoken name
+_POSSESSIVE_RE = re.compile(r"['’]s$", re.I)
+# a term is a word of prose: never touch it inside a URL, a path, an e-mail address or an identifier
+# ("github.com/voxflow", "VOXFLOW_DEVICE", "C:\\voxflow\\logs"); a sentence's full stop after it is fine
+_NOT_IN_CODE_BEFORE = r"(?<![\w./\\@])"
+_NOT_IN_CODE_AFTER = r"(?![\w@/\\]|[.:]\w)"
+_CODE_BEFORE_RE = re.compile(r"[\w./\\@]$")
+_CODE_AFTER_RE = re.compile(r"^(?:[\w@/\\]|[.:]\w)")
+# frequent words that are never a misspelt name, whatever they look like ("doctor" is not "Docker")
+_COMMON_WORDS = frozenset("""
+about above after again against almost along already also always among another answer around asked
+because become before began begin being below better between bring brought build called came cannot
+change children close come coming could country course doctor during early earth every family father
+first follow found friend going great group happen having heard house important large later learn
+leave letter light little lives might money morning mother never number often order other paper people
+picture place plant point power present problem question quite really right river school second seemed
+several should sentence small something sometimes sound spell stand start state still story study
+system taken their there these thing think those though thought three through today together toward
+under until using usually water where which while white whole without world would write writing years
+young matter better letters motion nation station notion lotion sister mister master faster
+""".split())
+
+
+def _squash(s: str) -> str:
+    return re.sub(r"[\W_]+", "", s.lower())
+
+
+def _first_sound(key: str) -> str:
+    c = key[:1]
+    return "a" if c in "aeiou" else c                  # "Otto" / "auto": a vowel is a vowel
+
+
+def _fuzzy_index(entries) -> dict:
+    """What ``_fuzzy_fix`` matches against: every term and alias of ``_FUZZY_MIN_LEN`` letters or more."""
+    from .cleanup import phonetic_key
+
+    by_sound: dict[str, list[tuple[str, str, str]]] = {}
+    longest = 0
+    for e in entries:
+        for k in [e["term"]] + list(e["aliases"]):
+            sq = _squash(k)
+            if len(sq) < _FUZZY_MIN_LEN or sq.isdigit():
+                continue
+            ph = phonetic_key(sq)
+            by_sound.setdefault(_first_sound(ph), []).append((sq, ph, e["term"]))
+            longest = max(longest, len(sq))
+    return {"by_sound": by_sound, "longest": longest} if by_sound else {}
+
+
+def _fuzzy_score(cand: str, n_words: int, index: dict) -> tuple[float, str] | None:
+    """(similarity, term) of the dictionary key closest to the squashed span ``cand``, or None."""
+    from .cleanup import phonetic_key
+
+    sound = phonetic_key(cand)
+    best = None
+    for sq, ph, term in index["by_sound"].get(_first_sound(sound), ()):
+        if abs(len(cand) - len(sq)) > max(2, len(sq) // 4):
+            continue
+        if cand == sq:
+            score = 1.0
+        else:
+            if n_words == 1 and (len(cand) < _FUZZY_MIN_LEN or cand in _COMMON_WORDS
+                                 or cand.startswith(sq) or sq.startswith(cand)):
+                continue                       # an ordinary word, or the term plus / minus an ending ("Stripes")
+            m = difflib.SequenceMatcher(None, cand, sq)
+            if m.real_quick_ratio() < 0.7 or m.quick_ratio() < 0.7:
+                continue
+            spelt, heard = m.ratio(), difflib.SequenceMatcher(None, sound, ph).ratio()
+            # one word: it must both look and sound like the term (stops "doctor" -> "Docker");
+            # a name split into several words ("get hub", "pie torch") may look different but must sound alike
+            if n_words == 1:
+                ok = heard >= 0.84 and spelt >= 0.75 and spelt + heard >= 1.7
+            else:
+                ok = max(spelt, heard) >= 0.8 and min(spelt, heard) >= 0.7
+            if not ok:
+                continue
+            score = (spelt + heard) / 2 - 0.02 * (n_words - 1)
+        if best is None or score > best[0]:
+            best = (score, term)
+    return best
+
+
+def _fuzzy_fix(text: str, index: dict) -> str:
+    """Replace close misspellings of dictionary terms, left to right, never across punctuation."""
+    words = list(_FUZZY_WORD_RE.finditer(text))
+    out: list[str] = []
+    last = i = 0
+    while i < len(words):
+        best = None                                     # (score, n_words, replacement)
+        for n in range(1, _FUZZY_MAX_WORDS + 1):
+            if i + n > len(words):
+                break
+            if n > 1 and not _FUZZY_GAP_RE.fullmatch(text[words[i + n - 2].end():words[i + n - 1].start()]):
+                break                                   # "Get. Hub" is two sentences, not one name
+            if _CODE_BEFORE_RE.search(text[:words[i].start()][-1:]) or _CODE_AFTER_RE.match(
+                    text[words[i + n - 1].end():words[i + n - 1].end() + 2]):
+                continue                                # part of a URL, path or identifier
+            span = text[words[i].start():words[i + n - 1].end()]
+            suffix = ""
+            if _POSSESSIVE_RE.search(span):
+                span, suffix = span[:-2], span[-2:]
+            cand = _squash(span)
+            if len(cand) > index["longest"] + 3:
+                break
+            hit = _fuzzy_score(cand, n, index)
+            if hit is None:
+                continue
+            score, term = hit
+            if span == term:
+                score = 1.01                            # already right: keep it, and keep the next word
+            if best is None or score > best[0]:
+                best = (score, n, term + suffix)
+        if best is None:
+            i += 1
+            continue
+        _score, n, replacement = best
+        out.append(text[last:words[i].start()])
+        out.append(replacement)
+        last = words[i + n - 1].end()
+        i += n
+    if not out:
+        return text
+    out.append(text[last:])
+    return "".join(out)
+
+
 class Dictionary(_JsonStore):
     """Personal vocabulary: ``{id, term, aliases}`` entries plus an auto-learn suggestion queue."""
 
@@ -266,6 +396,7 @@ class Dictionary(_JsonStore):
         self._dismissed: set[str] = set()
         self._regex = None
         self._replacements: dict[str, str] = {}
+        self._fuzzy: dict = {}
         if not isinstance(data, dict):
             return
         for raw in data.get("entries") or []:
@@ -432,28 +563,32 @@ class Dictionary(_JsonStore):
             for k in keys:
                 repl.setdefault(_match_key(k), e["term"])
         self._replacements = repl
+        self._fuzzy = _fuzzy_index(self._entries)
         if not repl:
             self._regex = False
             return
         alts = [r"[\s\-]+".join(re.escape(w) for w in k.split(" "))
                 for k in sorted(repl, key=len, reverse=True)]
-        self._regex = re.compile(r"(?<![\w])(?:" + "|".join(alts) + r")(?![\w])", re.I)
+        self._regex = re.compile(_NOT_IN_CODE_BEFORE + r"(?:" + "|".join(alts) + r")" + _NOT_IN_CODE_AFTER, re.I)
 
     def apply(self, text: str) -> str:
-        """Replace sounds-like spellings (and wrongly cased terms) with the dictionary term, whole words only."""
+        """Write dictionary terms the user's way, whole words only:
+
+        * an exact match of the term, a "sounds like" alias or the spoken form of a camel-case name ("vox flow"),
+          in any letter case and with spaces or hyphens between the words, becomes the term;
+        * a close misspelling of a term (or of an alias) as the recogniser wrote it ("Kubernetis",
+          "Supercalifragilistic expialidocio", "pie torch") becomes the term too. That is what makes a plain
+          entry without aliases do something: the speech model cannot be told the user's words, so this is
+          the step that corrects them (see ``_fuzzy_fix``)."""
         if not text:
             return text
         with self._lock:
             if self._regex is None:
                 self._compile()
-            rx, repl = self._regex, self._replacements
-        if not rx:
-            return text
-
-        def sub(m: re.Match) -> str:
-            return repl.get(_match_key(m.group(0)), m.group(0))
-
-        return rx.sub(sub, text)
+            rx, repl, fuzzy = self._regex, self._replacements, self._fuzzy
+        if rx:
+            text = rx.sub(lambda m: repl.get(_match_key(m.group(0)), m.group(0)), text)
+        return _fuzzy_fix(text, fuzzy) if fuzzy else text
 
     # ---- import / export
     @staticmethod
@@ -691,6 +826,46 @@ class Dictionary(_JsonStore):
 
 
 # =========================================================================== snippets
+_TRIGGER_WORD_RE = re.compile(r"[^\s,.;:!?\-–—\"“”()\[\]]+")      # "c++" and "#tag" keep their symbols
+_NUMBER_WORDS = ("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen "
+                 "sixteen seventeen eighteen nineteen twenty").split()
+_WORD_TO_DIGITS = {w: str(i) for i, w in enumerate(_NUMBER_WORDS)}
+_DIGITS_TO_WORD = {v: k for k, v in _WORD_TO_DIGITS.items()}
+_SNIPPET_GAP = r"[\s,.;:!?\-–—]"            # what the recogniser may write between the words of a trigger
+# a dictation that is only "insert my address" / "paste the snippet sign off" means the snippet itself
+_SNIPPET_LEAD = (r"(?:(?:please\s+)?(?:insert|paste|type|add|put|use)\s*[,:]?\s+(?:(?:the|my|a)\s+)?"
+                 r"(?:snippet\s*[,:]?\s+)?)?")
+
+
+def _trigger_words(trigger: str) -> list[str]:
+    return [w.replace("’", "'") for w in _TRIGGER_WORD_RE.findall(str(trigger).lower())]
+
+
+def _trigger_key(trigger: str) -> str:
+    """How a trigger sounds: lower case, words only, numbers as digits ("Zoom link two" == "zoom-link 2")."""
+    return " ".join(_WORD_TO_DIGITS.get(w, w) for w in _trigger_words(trigger))
+
+
+def _trigger_word_pattern(word: str) -> str:
+    digits = _WORD_TO_DIGITS.get(word, word)
+    spoken = _DIGITS_TO_WORD.get(digits)
+    if spoken is not None:
+        return f"(?:{re.escape(digits)}|{spoken})"
+    return "['’]?".join(re.escape(part) for part in word.split("'") if part)  # "let's" == "lets" == "let’s"
+
+
+def _trigger_pattern(trigger: str) -> str:
+    """Regex body for one trigger: its words with any recogniser punctuation between them; two words that make
+    four letters or more may also be run together ("sign off" == "signoff", "e mail" == "email")."""
+    words = _trigger_words(trigger)
+    if not words:
+        return ""
+    out = _trigger_word_pattern(words[0])
+    for prev, word in zip(words, words[1:]):
+        out += _SNIPPET_GAP + ("*" if len(prev) + len(word) >= 4 else "+") + _trigger_word_pattern(word)
+    return out
+
+
 class Snippets(_JsonStore):
     """Voice shortcuts: saying the trigger phrase types the saved text."""
 
@@ -716,11 +891,11 @@ class Snippets(_JsonStore):
         return _norm_spaces(re.sub(r"[.,!?;:]+", " ", trigger))
 
     def _find_trigger(self, trigger: str) -> dict | None:
-        low = trigger.lower()
-        return next((e for e in self._entries if e["trigger"].lower() == low), None)
+        key = _trigger_key(trigger)                  # "sign-off" and "Sign off" are said the same way
+        return next((e for e in self._entries if _trigger_key(e["trigger"]) == key), None)
 
     def _clean(self, trigger, text, skip: dict | None = None) -> tuple[str, str]:
-        if not isinstance(trigger, str) or not self._norm_trigger(trigger):
+        if not isinstance(trigger, str) or not _trigger_words(trigger):
             raise ValueError("Type the phrase you will say to insert this snippet.")
         if not isinstance(text, str) or not text.strip():
             raise ValueError("Type the text this snippet should insert.")
@@ -809,28 +984,68 @@ class Snippets(_JsonStore):
             self._notify("snippets")
         return changed
 
-    def expand(self, text: str) -> str:
-        """Replace spoken trigger phrases with their snippet text.
-
-        A dictation that is nothing but the trigger becomes exactly the snippet (no added full stop)."""
-        if not text:
-            return text
+    def _compiled(self):
+        """(inline regex, whole-dictation regex, texts by group name), built once per change of the snippets."""
         with self._lock:
             if self._regex is None:
-                table = {e["trigger"].lower(): e["text"] for e in self._entries}
-                if table:
-                    alts = [r"[\s,]+".join(re.escape(w) for w in k.split(" "))
-                            for k in sorted(table, key=len, reverse=True)]
-                    self._regex = (re.compile(r"(?<![\w])(?:" + "|".join(alts) + r")(?![\w])", re.I), table)
+                texts: dict[str, str] = {}
+                alts: list[str] = []
+                for i, e in enumerate(sorted(self._entries, key=lambda e: len(_trigger_key(e["trigger"])),
+                                             reverse=True)):
+                    pattern = _trigger_pattern(e["trigger"])
+                    if pattern:
+                        texts[f"s{i}"] = e["text"]
+                        alts.append(f"(?P<s{i}>{pattern})")
+                if alts:
+                    body = "|".join(alts)
+                    self._regex = (re.compile(r"(?<![\w@/\\])(?:" + body + r")(?![\w@/\\])", re.I),
+                                   re.compile(_SNIPPET_LEAD + r"(?:" + body + r")", re.I), texts)
                 else:
-                    self._regex = (None, table)
-            rx, table = self._regex
-        if rx is None:
+                    self._regex = (None, None, texts)
+            return self._regex
+
+    def matches(self, text: str) -> bool:
+        """Does ``text`` say one of the trigger phrases?"""
+        rx = self._compiled()[0]
+        return bool(text and rx is not None and rx.search(text))
+
+    def expand(self, text: str, transform=None) -> str:
+        """Replace spoken trigger phrases with their snippet text, the way people say them and the way the
+        recogniser writes them down: any letter case, with the punctuation it adds around and between the
+        words ("Sign-off.", "My, address", "insert  My Address"), joined up ("signoff"), and with numbers as
+        words or digits ("zoom link two" / "zoom link 2").
+
+        A dictation that is nothing but the trigger - optionally after "insert" / "paste" / "type" - becomes
+        exactly the snippet text, without the full stop the recogniser added. Elsewhere the snippet replaces
+        the trigger in the sentence. ``transform`` (the dictionary) is applied to the text around the
+        snippets only: a snippet is always typed exactly as it was saved."""
+        if not text:
             return text
-        whole = rx.fullmatch(text.strip().rstrip(".!?"))
+        rx, whole_rx, texts = self._compiled()
+        if rx is None:
+            return transform(text) if transform else text
+        core = text.strip().strip("\"'“”‘’()[]").strip().rstrip(".!?…,;:").strip()
+        whole = whole_rx.fullmatch(core)
         if whole:
-            return table.get(re.sub(r"[\s,]+", " ", whole.group(0)).lower(), text)
-        return rx.sub(lambda m: table.get(re.sub(r"[\s,]+", " ", m.group(0)).lower(), m.group(0)), text)
+            return texts[whole.lastgroup]
+        out: list[str] = []
+        last = 0
+        for m in rx.finditer(text):
+            out.append(self._around(text[last:m.start()], transform))
+            out.append(texts[m.lastgroup])
+            last = m.end()
+            # a trigger said as a sentence of its own ("Thanks. Sign off.") is the snippet: no full stop after it.
+            # One that ends a longer sentence ("Send it to my address.") keeps the sentence's full stop.
+            if not text[last:].strip(" \t.!?…") and not text[:m.start()].strip(" \t\"“'‘")[-1:].isalnum():
+                last = len(text)
+        if not out:
+            return transform(text) if transform else text
+        out.append(self._around(text[last:], transform))
+        return "".join(out)
+
+    @staticmethod
+    def _around(part: str, transform) -> str:
+        return transform(part) if transform and part.strip() else part
 
     def import_(self, path: str) -> int:
         """Add snippets from a JSON file (``[{trigger, text}]`` or an export). Returns the number added."""
