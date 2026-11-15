@@ -366,7 +366,7 @@ def test_smart_and_tone_are_applied_after_the_model():
 def test_model_is_not_consulted_for_text_that_needs_nothing():
     c, llm = with_llm("SHOULD NOT BE USED")
     assert c.clean("Hello world.") == "Hello world."
-    assert c.clean("ok thanks") == "Ok thanks."
+    assert c.clean("ok thanks") == "Ok, thanks."          # the comma is the rule pass's (grammar_rules)
     assert llm.calls == [] and c.last_info["llm"] is False
 
 

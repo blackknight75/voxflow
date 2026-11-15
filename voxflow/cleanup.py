@@ -99,6 +99,10 @@ def _setup_dll_paths() -> None:
 #   lib_vulkan  the Vulkan build      } put there by scripts/fetch_llama_backends.py (source install) and
 #   lib_cpu     the plain CPU build   } bundled by the installer; version.txt names the release they belong to
 MIN_GPU_MEMORY_MB = 3500      # the default model needs about 3 GB on the GPU: a 4 GB card is the smallest that fits
+# The model also reads recogniser text that the rules left alone but that runs two clauses together, when one sentence
+# (_SPEED_CHECK) took at most this long at load. Measured: about 50-110 ms per such line on an RTX 5080 (CUDA);
+# a CPU takes over a second and never qualifies, so CPU-only PCs keep the old latency.
+PUNCTUATION_PASS_MAX_MS = 400
 
 
 def _cuda_unusable(asked_for: bool) -> str | None:
@@ -464,6 +468,69 @@ def _cap_names(t: str) -> str:
     return _AMBIG_MONTH_RE.sub(lambda m: m.group(1).capitalize(), t)
 
 
+# --------------------------------------------------------------------------- grammar rules
+# Cheap, unambiguous fixes. Each pattern only fires where the other reading is (nearly) impossible English:
+# a possessive "their" is never followed by "going to", "its" never by "been" or an article.
+_SENT_START = r"(?:(?<=^)|(?<=[.!?]\s)|(?<=\n))"
+# "Yes that works" -> "Yes, that works": an interjection at the start of a sentence, followed by a new clause
+_INTRO_RE = re.compile(
+    rf"{_SENT_START}(Yes|Yeah|Yep|No|Nope|Well|Okay|OK|Oh|Sure|Hey|Alright)"
+    r" (?=(?:I|I'm|I'll|I've|I'd|you|you're|we|we're|they|they're|he|she|it|it's|that|that's|this|there|"
+    r"let's|so|thanks|thank)\b)", re.I)
+_LETS_AFTER = "so ok okay now then and but well".split()      # "so lets go": "lets" opens the clause
+_HOMOPHONE_RULES = [
+    (re.compile(r"\btheir(?= going to\b)", re.I), "they're"),
+    (re.compile(r"\btheir(?= (?:is|are|was|were|will be|has been|have been)\b)", re.I), "there"),
+    # not before "very" / "really" / "going": "its very own office", "its going rate" are possessive
+    (re.compile(r"\bits(?= (?:been|a|an|the|not|gonna|going to|okay|ok|fine)\b)", re.I), "it's"),
+    (re.compile(r"\byour(?= welcome\b(?:[.!,]|$| to\b))", re.I), "you're"),
+    (re.compile(r"\b(?:(?<=^)|(?<=[.!?,]\s)|" + "|".join(rf"(?<=\b{w} )" for w in _LETS_AFTER) + r")lets"
+                r"(?= (?:go|do|see|try|meet|make|get|talk|start|keep|move|say|take|wait|look|check|plan|call|"
+                r"discuss|use|grab|focus|begin|schedule|review|hope|not)\b)", re.I), "let's"),
+    (re.compile(r"\b(would|could|should|must|might) of\b(?! course)", re.I), r"\1 have"),
+    (re.compile(r"\b(more|less|rather|better|worse|bigger|smaller|faster|slower|higher|lower|larger|cheaper|easier|"
+                r"harder|longer|shorter|greater|fewer) then\b", re.I), r"\1 than"),
+]
+
+
+def _keep_case(old: str, new: str) -> str:
+    return new[0].upper() + new[1:] if old[:1].isupper() else new
+
+
+def grammar_rules(t: str) -> str:
+    """Commas after a leading interjection and a few unambiguous homophone fixes (see the patterns above).
+    Deterministic, no model; part of ``rule_clean``."""
+    for rx, rep in _HOMOPHONE_RULES:
+        if rep.startswith("\\1"):
+            t = rx.sub(lambda m, r=rep: m.expand(r), t)
+        else:
+            t = rx.sub(lambda m, r=rep: _keep_case(m.group(0), r), t)
+    return _INTRO_RE.sub(lambda m: m.group(1) + ", ", t)
+
+
+# a clause starting in the middle of a sentence with no punctuation before it ("last night I will", "today could
+# you", "good however we"): recogniser output that needs the language model even though the rules left it alone
+_CLAUSE_START = r"(?:I|we|they|you|he|she|can|could|would|what|how|however|otherwise|let's|please)"
+_RUNON_RE = re.compile(rf"(?<=\w) ([A-Za-z']+) ({_CLAUSE_START})\b", re.I)
+_RUNON_NOT_BEFORE = frozenset(
+    "and but or so that because if when think know knew said hope guess wish believe than where which who whom as "
+    "before after until since while though although what how why whether me him her us them to of for with unless "
+    "once do does did can could would should will i we they you he she it is are was were be been not just also "
+    "really even then i'm thank".split())
+
+
+# "When the build finishes let me know": a sentence that opens with a subordinate clause usually needs a comma
+_SUBORDINATE_RE = re.compile(r"(?:^|(?<=[.!?]\s))(?:if|when|once|after|before|since|although|though|because|while|"
+                             r"unless|as soon as)\b[^,;:.!?]{12,}[.!?]?$", re.I | re.M)
+
+
+def looks_unpunctuated(text: str) -> bool:
+    """True when a sentence of ``text`` seems to run two clauses together without punctuation."""
+    if any(m.group(1).lower() not in _RUNON_NOT_BEFORE for m in _RUNON_RE.finditer(text)):
+        return True
+    return any(_SUBORDINATE_RE.search(s) for s in re.split(r"(?<=[.!?])\s+", text))
+
+
 def rule_clean(text: str, formatting: bool = True, terminal: bool = True, fillers: bool = True) -> str:
     """Deterministic clean-up. Never changes meaning.
 
@@ -500,6 +567,7 @@ def rule_clean(text: str, formatting: bool = True, terminal: bool = True, filler
         return ""
     t = _cap_sentences(t)
     t = _cap_names(t)
+    t = grammar_rules(t)
     # terminal punctuation for multi-word prose (not for single words / code-ish / lists)
     last = t.split("\n")[-1]
     if (
@@ -764,7 +832,9 @@ def _accept(src: str, out: str) -> bool:
     """
     if not out.strip():
         return False
-    sw, ow = _words(src), _words(out)
+    # a homophone fix ("there car" -> "their car", "smaller then" -> "smaller than") is the same word here
+    sw = [_HOMOPHONE_KEY.get(w, w) for w in _words(src)]
+    ow = [_HOMOPHONE_KEY.get(w, w) for w in _words(out)]
     if not ow:
         return False
     cue = bool(_CORRECTION_CUE.search(src))
@@ -772,6 +842,8 @@ def _accept(src: str, out: str) -> bool:
         return False
     if re.search(r"[,;:][A-Za-z]", out) and not re.search(r"[,;:][A-Za-z]", src):
         return False                                   # "John,oops,Mark": mangled spacing
+    if _GLUED_SYMBOL_RE.search(out) and not _GLUED_SYMBOL_RE.search(src):
+        return False                                   # "anna.dot.lee": a spoken symbol half written out
     if len(ow) > len(sw) * 1.25 + 3:
         return False
     if len(ow) < len(sw) * 0.4 - 1:
@@ -816,18 +888,59 @@ def _accept(src: str, out: str) -> bool:
 
     eff = [i2 for i2 in range(len(sw)) if not exempt(i2)]
     ow_eff = [w.replace("'", "") if w.replace("'", "") in sset and w not in sset else w for w in ow if w in sset or w.replace("'", "") in sset]
+    exempt_words = {sw[x] for x in range(len(sw)) if exempt(x)}
+    # the kept words are aligned to the input leftmost first; a correction that repeats its lead-in ("send it to
+    # mark no wait send it to lisa") keeps the LATER copy, which only a rightmost alignment finds
+    corrected = _dropped_ok(sw, eff, _align(sw, eff, ow_eff, exempt_words, False), cue)
+    if corrected is None and cue:
+        corrected = _dropped_ok(sw, eff, _align(sw, eff, ow_eff, exempt_words, True), cue)
+    if corrected is None:
+        return False
+    # --- numbers: copied verbatim; never invented
+    stoks, otoks = set(_NUM_TOKEN_RE.findall(src)), set(_NUM_TOKEN_RE.findall(out))
+    if otoks - stoks and not _SPOKEN_NUM.search(src):
+        return False
+    if any(t not in otoks and t not in corrected for t in stoks - otoks):
+        return False
+    # --- no new symbols that change content ($ % # & * + = ~ ^)
+    if set(re.findall(r"[$%#&*+=~^|<>]", out)) - set(re.findall(r"[$%#&*+=~^|<>]", src)):
+        return False
+    return True
+
+
+_GLUED_SYMBOL_RE = re.compile(r"\w[.@](?:dot|at|slash|underscore|dash)\b|\b(?:dot|at|slash|underscore|dash)[.@]\w",
+                              re.I)
+_HOMOPHONE_KEY = {
+    "they're": "their", "there": "their", "you're": "your", "it's": "its", "than": "then", "let's": "lets",
+    "too": "to", "who's": "whose", "we're": "were",
+}
+
+
+def _align(sw: list[str], eff: list[int], ow_eff: list[str], exempt_words: set, from_right: bool):
+    """Indices (into ``sw``) of the input words the output kept, matched in order; None if the output has words out
+    of order or not in the input. ``from_right``: each word takes its latest possible occurrence."""
+    order = list(reversed(eff)) if from_right else eff
+    words = list(reversed(ow_eff)) if from_right else ow_eff
     matched: list[int] = []
     pos = 0
-    for w in ow_eff:
+    for w in words:
         nxt_pos = pos
-        while nxt_pos < len(eff) and sw[eff[nxt_pos]] != w:
+        while nxt_pos < len(order) and sw[order[nxt_pos]] != w:
             nxt_pos += 1
-        if nxt_pos >= len(eff):
-            if any(sw[x] == w for x in range(len(sw)) if exempt(x)):
+        if nxt_pos >= len(order):
+            if w in exempt_words:
                 continue                                 # a filler / symbol word the model kept
-            return False                                 # words out of order / not in input
-        matched.append(eff[nxt_pos])
+            return None                                  # words out of order / not in input
+        matched.append(order[nxt_pos])
         pos = nxt_pos + 1
+    return matched
+
+
+def _dropped_ok(sw: list[str], eff: list[int], matched, cue: bool):
+    """The words of every dropped run if each one is an allowed drop (a stutter, or "earlier value + correction
+    marker" right before a kept replacement), else None."""
+    if matched is None:
+        return None
     mset = set(matched)
     corrected: set[str] = set()
     k = 0
@@ -841,35 +954,25 @@ def _accept(src: str, out: str) -> bool:
         run = [sw[x] for x in eff[k:m2]]
         prev_run = [sw[x] for x in eff[max(0, k - len(run)):k]]
         y = sw[eff[m2]] if m2 < len(eff) else None
-        k0 = k
         k = m2
         if run == prev_run:                              # stutter: "to to", "the the", "i think i think"
             continue
         if y is None:
-            return False                                 # nothing follows: would keep the earlier value
+            return None                                  # nothing follows: would keep the earlier value
         first_marker = next((n for n, w in enumerate(run) if w in _CORE_MARKERS), None)
         content = [w for w in run if w not in _MARKERS]
         limit_c, limit_r = (4, 9) if cue else (2, 5)
         if not content or len(content) > limit_c or len(run) > limit_r:
-            return False
+            return None
         if first_marker is not None:
             # all content words come BEFORE the marker (X marker Y); content after it means the model
             # dropped the later value
             if any(w not in _MARKERS for w in run[first_marker:]):
-                return False
+                return None
         elif not (_kind(content[-1]) is not None and _kind(content[-1]) == _kind(y)):
-            return False
+            return None
         corrected.update(run)
-    # --- numbers: copied verbatim; never invented
-    stoks, otoks = set(_NUM_TOKEN_RE.findall(src)), set(_NUM_TOKEN_RE.findall(out))
-    if otoks - stoks and not _SPOKEN_NUM.search(src):
-        return False
-    if any(t not in otoks and t not in corrected for t in stoks - otoks):
-        return False
-    # --- no new symbols that change content ($ % # & * + = ~ ^)
-    if set(re.findall(r"[$%#&*+=~^|<>]", out)) - set(re.findall(r"[$%#&*+=~^|<>]", src)):
-        return False
-    return True
+    return corrected
 
 
 def _salvage_case(body: str, model_out: str) -> str:
@@ -1475,6 +1578,9 @@ class Cleaner:
         self._ready = False
         self.backend = "none"
         self.last_info: dict = dict(_NO_REPORT)   # what the most recent ``clean`` call did
+        # the model also reads recogniser text that looks finished but runs clauses together (``looks_unpunctuated``)
+        # only where one sentence measured fast at load: on a GPU that costs tens of milliseconds, on a CPU a second
+        self.punctuation_pass = False
 
     # ------------------------------------------------------------------ loading
     def _resolve_path(self) -> str:
@@ -1530,14 +1636,15 @@ class Cleaner:
                     self.backend = (libs or "cuda") if gpu else "cpu"
                     # warm up (also primes the KV cache with the constant few-shot prefix)
                     self._llm_clean("um so what is the capital of france", max_ms=60000)
-                    if gpu and libs is not None:
+                    if gpu:
                         # a GPU that loads the model but cannot keep up would make every dictation time out
                         # (basic clean-up only): time one sentence and prefer the CPU if it is that slow
                         t0 = time.perf_counter()
                         self._llm_clean(_SPEED_CHECK, max_ms=60000)
                         took = time.perf_counter() - t0
-                        if took > self.timeout_s / 2:
+                        if took > self.timeout_s / 2 and libs is not None:
                             raise RuntimeError(f"the GPU took {took:.1f} s for one sentence, too slow for dictation")
+                        self.punctuation_pass = took * 1000 <= PUNCTUATION_PASS_MAX_MS
                     self._ready = True
                     log.info("cleanup model loaded on %s: %s", self.backend, self.model)
                     return
@@ -1756,7 +1863,8 @@ class Cleaner:
         if not (self.use_llm and self._llm is not None and self._ready):
             return ruled
         # LLM works line-by-line so formatting commands (newlines / bullets) survive.
-        unchanged = text.strip() == ruled
+        # "unchanged" ignores the grammar rules' own fixes, so they never make the model run where it did not before
+        unchanged = ruled in (text.strip(), grammar_rules(text.strip()))
         lines = ruled.split("\n")
         out_lines: list[str] = []
         remaining = self.timeout_s
@@ -1766,7 +1874,8 @@ class Cleaner:
             if not body.strip():
                 out_lines.append(line)
                 continue
-            if not self._needs_llm(body, unchanged):
+            if not self._needs_llm(body, unchanged) and not (
+                    self.punctuation_pass and len(body.split()) > 2 and looks_unpunctuated(body)):
                 out_lines.append(line)
                 continue
             if remaining <= 0.05:                        # an earlier line used up the time
@@ -1801,7 +1910,7 @@ class Cleaner:
 
 
 __all__ = ["Cleaner", "rule_clean", "smart_format", "apply_tone", "is_english", "resolve_language",
-           "clean_foreign", "phonetic_key", "DEFAULT_MODEL"]
+           "clean_foreign", "phonetic_key", "grammar_rules", "looks_unpunctuated", "DEFAULT_MODEL"]
 
 
 if __name__ == "__main__":
