@@ -1030,8 +1030,9 @@ class SnippetsPage(Page, _ImportExport):
                                   f"{failed}. Nothing was changed on disk.", "Try again", self.refresh)
         elif not items:
             self.empty.show_state("empty", "snippet", "No snippets yet",
-                                  "Create a snippet, then just say its phrase while dictating, for example "
-                                  "“my address”, and VoxFlow types the full text.", "Create a snippet",
+                                  "Create a snippet, then dictate just its phrase, for example “my address”, "
+                                  "or say “insert my address” in a sentence, and VoxFlow types the full text.",
+                                  "Create a snippet",
                                   lambda: self.edit(None))
 
     def _remove(self, entry: dict) -> None:
@@ -1043,7 +1044,9 @@ class SnippetsPage(Page, _ImportExport):
 
     def edit(self, entry: dict | None) -> Modal:
         m = Modal(self.win.panel, "Edit snippet" if entry else "New snippet",
-                  "Say the phrase while dictating and VoxFlow inserts the text.", width=500, name="snippet_editor")
+                  "Dictate just the phrase, or say “insert” (or “paste”, “type”) before it inside a sentence, and "
+                  "VoxFlow types the text. Said in an ordinary sentence without “insert”, the phrase stays as it is.",
+                  width=500, name="snippet_editor")
         trig = LineEdit(entry["trigger"] if entry else "", "e.g. my address", name="Spoken phrase")
         trig.setObjectName("snippet_trigger")
         field(m, "When I say", trig)

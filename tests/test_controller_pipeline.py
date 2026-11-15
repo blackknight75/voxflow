@@ -76,8 +76,10 @@ def test_dictionary_and_snippets_are_applied_after_cleanup(rig):
     rig.c.dictionary.add("GitHub", ["get hub"])
     rig.c.snippets.add("my address", "221B Baker Street\nLondon")
     rig.dictate("push it to get hub and send it to my address")
-    assert rig.injector.pasted == ["Push it to GitHub and send it to 221B Baker Street\nLondon."]
-    assert rig.last_entry()["text"] == rig.injector.pasted[0]
+    assert rig.injector.pasted == ["Push it to GitHub and send it to my address."], "no lead word: no snippet"
+    rig.dictate("push it to get hub and send it to, insert my address")
+    assert rig.injector.pasted[-1] == "Push it to GitHub and send it to, 221B Baker Street\nLondon."
+    assert rig.last_entry()["text"] == rig.injector.pasted[-1]
     rig.dictate("my address")
     assert rig.injector.pasted[-1] == "221B Baker Street\nLondon", "a snippet said alone is pasted exactly"
 

@@ -282,7 +282,8 @@ class Rig:
         if config is not None:
             import json
             (self.data_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
-        self.asr, self.cleaner = TAsr(), TCleaner()
+        # asr= / cleaner= swap in other doubles, e.g. voxflow.fakes.FakeTranscriber / FakeCleaner (the real rules)
+        self.asr, self.cleaner = kw.pop("asr", None) or TAsr(), kw.pop("cleaner", None) or TCleaner()
         self.injector, self.mixer, self.autostart = TInjector(), TMixer(), TAutostart()
         self.sounds: list[str] = []
         self.context = context or AppContext("notepad.exe", "Untitled - Notepad", 0x100)
