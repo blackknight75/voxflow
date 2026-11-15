@@ -105,9 +105,12 @@ def test_trigger_spelling_and_spoken_form_need_not_agree(rig, trigger, spoken):
 def test_snippet_inside_a_sentence_and_at_its_end(rig):
     rig.c.snippets.add("my address", ADDRESS)
     rig.c.snippets.add("sign off", "Best regards,\nAlex")
-    assert say(rig, "Please send it to my address, thanks.") == f"Please send it to {ADDRESS}, thanks."
+    # inside a sentence the trigger needs a lead word, and the lead word goes too
+    assert say(rig, "Please send it to my address, thanks.") == "Please send it to my address, thanks."
+    assert say(rig, "Please send it to, insert my address, thanks.") == f"Please send it to, {ADDRESS}, thanks."
     # the recogniser's full stop after a closing snippet is not typed after the sign-off
-    assert say(rig, "Thanks for the help. Sign off.") == "Thanks for the help. Best regards,\nAlex"
+    assert say(rig, "Thanks for the help. Insert sign off.") == "Thanks for the help. Best regards,\nAlex"
+    assert say(rig, "Thanks for the help. Sign off.") == "Thanks for the help. Sign off."
 
 
 def test_snippet_edits_take_effect_on_the_next_dictation_without_a_restart(app):
@@ -134,7 +137,8 @@ def test_snippet_text_is_typed_exactly_as_saved(rig):
     rig.c.snippets.add("repo link", "see github.com/acme/get-hub-tools (get hub)")
     assert say(rig, "Repo link.") == "see github.com/acme/get-hub-tools (get hub)"
     # ... while the dictionary still corrects the words around it
-    assert say(rig, "Push to get hub, repo link.") == "Push to GitHub, see github.com/acme/get-hub-tools (get hub)"
+    assert say(rig, "Push to get hub, paste repo link.") == \
+        "Push to GitHub, see github.com/acme/get-hub-tools (get hub)."      # the sentence keeps its full stop
 
 
 def test_trigger_reworded_by_the_language_model_still_fires(tmp_path, qtbot, monkeypatch):
@@ -163,8 +167,8 @@ def test_duplicate_triggers_are_the_same_spoken_phrase(rig):
 @pytest.mark.parametrize("term, spoken, pasted", [
     ("Kubernetes", "I deploy on Kubernetis every day.", "I deploy on Kubernetes every day."),
     ("Kubernetes", "Kubernetis's scheduler is fine.", "Kubernetes's scheduler is fine."),
-    ("PyTorch", "We train it in pie torch.", "We train it in PyTorch."),
-    ("GitHub", "Push it to get hub.", "Push it to GitHub."),
+    ("PyTorch", "We train it in py torch.", "We train it in PyTorch."),
+    ("GitHub", "Push it to Git Hub.", "Push it to GitHub."),       # real words: only with the term's capitals
     ("Grafana", "Open the graphana dashboard.", "Open the Grafana dashboard."),
     ("Postgres", "It runs on post gress.", "It runs on Postgres."),
     ("Supercalifragilisticexpialidocious", "Supercalifragilistic expialidocio.",

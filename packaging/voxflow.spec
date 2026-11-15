@@ -104,6 +104,8 @@ for name in ("onnxruntime_providers_webgpu.dll", "dxcompiler.dll"):
 # importlib.metadata lookups (onnx-asr asks for its own and onnxruntime's version at import time)
 metadata = collect_data_files("onnx_asr")   # preprocessor .onnx / .npz data
 metadata += llama_extra_data
+# the word lists the dictionary's misspelling correction checks against (about 200 KB, see scripts/build_wordlist.py)
+metadata += [(str(p), "voxflow/data") for p in sorted((ROOT / "voxflow" / "data").iterdir()) if p.is_file()]
 
 for dist in ("onnx-asr", "onnxruntime-gpu", "onnxruntime-ep-webgpu", "huggingface-hub", "numpy", "llama_cpp_python", "tqdm", "packaging",
              "filelock", "requests", "httpx", "pyyaml", "hf-xet", "sounddevice", "PySide6", "shiboken6"):

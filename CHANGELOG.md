@@ -9,12 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Snippets fire the way people say them: "Insert my address.", "My, address.", "Sign-off", "signoff",
-  "zoom link two" for "zoom link 2", whatever case and punctuation the recogniser writes. A trigger said on its own
-  inserts exactly the snippet, and a trigger the clean-up reworded still fires.
-- Dictionary words work without "sounds like" aliases: close misspellings of a word ("Kubernetis", "Graphana",
-  "pie torch", "get hub") are corrected after recognition. Ordinary words, web addresses, paths and identifiers
-  are left alone, and a snippet's text is never changed by the dictionary.
+- Snippets fire when you ask for them, the way people say it: dictate just the phrase ("My address.", "Um, sign
+  off", "E-mail") to get exactly the snippet, or say "insert", "paste" or "type" right before it inside a sentence
+  ("Insert my address, please" types the address, without "Insert"). The same works with the lead words of
+  Spanish, French, German ("füge meine Adresse ein", "meine Adresse einfügen"), Italian, Portuguese and Dutch.
+  Case, punctuation, hyphens and "zoom link two" / "zoom link 2" do not matter, and a trigger the clean-up
+  reworded still fires. A phrase that merely occurs in a sentence ("I will sign off on the budget", "send me an
+  email") is left alone.
+- Dictionary words work without "sounds like" aliases: misspellings the recogniser makes that are not English
+  words ("Kubernetis", "Graphana", "Postgress" spoken as "post gress") are corrected after recognition. Real
+  words are never turned into a term ("copper" stays, not "Cooper"; "Red is" stays, not "Redis"), and a term that
+  is itself an ordinary word ("Linear", "Hunter") no longer capitalises that word in prose; add a "sounds like"
+  alias for those. Web addresses, paths and identifiers are left alone, and a snippet's text is never changed by
+  the dictionary. The check uses a bundled English word list (SCOWL, about 200 KB).
 
 ## [0.2.0] - 2026-11-14
 

@@ -815,6 +815,10 @@ class Controller(QObject):
                                             "backend": backend})
 
         def load_asr() -> None:
+            try:
+                self.dictionary.prepare()          # off the dictation path: the word list loads in ~30 ms
+            except Exception:  # noqa: BLE001 - it is built on first use instead
+                log.exception("dictionary matchers could not be prepared")
             repo = "" if self._fake else modelhub.asr_repo(cfg.asr_model)
             cached = modelhub.is_cached(repo)
             report("asr", "loading" if cached else "downloading",

@@ -106,7 +106,7 @@ hotkey to the paste for a clean sentence, **192 ms** when the language model is 
 | **Smart formatting** | Spoken numbers, money, percentages, dates, times, e-mail addresses, links, file names and numbered lists are written the way you would type them. |
 | **Command mode** | Hold **Alt + Win** and say what to do with the selected text ("make this more formal", "translate to Spanish", "turn into bullets"); the selection is replaced. With nothing selected it writes new text. |
 | **Dictionary** | Names and jargon are always spelled your way, with "sounds like" aliases and import/export. VoxFlow suggests entries when the cleanup had to correct a name. |
-| **Snippets** | Say a short phrase ("my address") and a longer saved text is inserted. |
+| **Snippets** | Dictate just a short phrase ("my address"), or say "insert my address" inside a sentence, and a longer saved text is inserted. |
 | **Style per app** | Tone (formal, casual, very casual) per category (personal, work, e-mail, other). Apps are mapped to categories, browsers by window title, and you can override any app. |
 | **History and stats** | Searchable history (cleaned and raw text, app, time) with copy, paste again, delete and export (txt, csv, json), plus a retention setting. Words dictated, speed, time saved, streak, activity chart, top apps. |
 | **Paste last / undo** | **Alt + Shift + Z** pastes the last transcript again; an optional shortcut undoes the last paste. |

@@ -524,11 +524,12 @@ def test_snippets_reject_duplicates_and_missing_ids(sn):
     ("My address.", "221B Baker Street\nLondon"),                 # whole utterance: exactly the snippet
     ("  MY ADDRESS!  ", "221B Baker Street\nLondon"),
     ("My, address.", "221B Baker Street\nLondon"),
-    ("send it to my address please", "send it to 221B Baker Street\nLondon please"),
-    ("Send it to my address.", "Send it to 221B Baker Street\nLondon."),
+    ("send it to my address please", "send it to my address please"),   # in a sentence: only after a lead word
+    ("send it to, insert my address please", "send it to, 221B Baker Street\nLondon please"),
+    ("Send it to, insert my address.", "Send it to, 221B Baker Street\nLondon."),
     ("my addresses are many", "my addresses are many"),          # whole words only
     ("the signature block", "the signature block"),
-    ("sig and my address", "Best,\nDan and 221B Baker Street\nLondon"),
+    ("type sig and paste my address", "Best,\nDan and 221B Baker Street\nLondon"),
     ("my address book", "ADDRESS BOOK"),                          # longest trigger wins
     ("", ""),
 ])
@@ -542,7 +543,8 @@ def test_snippets_expand(sn, spoken, expected):
 def test_snippets_expand_is_literal_and_tracks_changes(sn):
     assert sn.expand("my address") == "my address"                 # no snippets yet
     a = sn.add("regex test", r"\1 \g<0> $1 (.*)")
-    assert sn.expand("a regex test b") == r"a \1 \g<0> $1 (.*) b"
+    assert sn.expand("a regex test b") == "a regex test b"            # in a sentence: only after a lead word
+    assert sn.expand("a insert regex test b") == r"a \1 \g<0> $1 (.*) b"
     sn.update(a["id"], trigger="c++ tip", text="use RAII")
     assert sn.expand("regex test") == "regex test"
     assert sn.expand("c++ tip") == "use RAII"
