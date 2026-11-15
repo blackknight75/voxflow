@@ -21,8 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Errors while cleaning up or pasting a dictation could quote the dictated words in `voxflow.log`. They are now
   logged by error type and code location only. Crash reports and uncaught errors are written the same way.
-- Clearing history now also deletes its backup copies (`history.v1.json`, `history.corrupt.json`), which held
-  the same transcripts.
+- Deleting history (one entry, retention, the size limit, *Clear all*, an import that replaces it) now also
+  deletes its backup copies (`history.v1.json`, `history.corrupt.json`) once the updated file is written, so
+  deleted text never survives in a backup.
 - In the setup guide, a retried download that is slow again now shows the "taking a while" note.
 - The setup guide said the models are about 1 GB; they are about 5 GB.
 

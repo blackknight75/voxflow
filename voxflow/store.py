@@ -108,6 +108,7 @@ class _JsonStore:
             self._load(None)
 
     BACKUP_TAGS: tuple[str, ...] = ("corrupt",)    # every ``_backup`` tag this store can write
+    _purge_backups = False      # data was deleted: drop the backup copies after the next successful write
 
     def _backup_path(self, tag: str) -> Path:
         return self.path.with_name(f"{self.path.stem}.{tag}{self.path.suffix}")
@@ -121,7 +122,8 @@ class _JsonStore:
 
     def _drop_backups(self) -> None:
         """Delete the copies ``_backup`` kept (``history.v1.json``, ``history.corrupt.json``): they hold the
-        same data as the file, so clearing the store must clear them too."""
+        same data as the file, so deleted data must not survive in them. A copy that cannot be deleted is logged
+        and is tried again after the next deletion."""
         for tag in self.BACKUP_TAGS:
             try:
                 self._backup_path(tag).unlink(missing_ok=True)
@@ -219,7 +221,10 @@ class _JsonStore:
             self.last_save_error = str(exc) or type(exc).__name__
             if first:
                 self._notify("save_failed:" + self.path.stem)
-            return
+            return                               # a pending backup purge waits for a write that works
+        if self._purge_backups:                  # the file without the deleted data is on disk now
+            self._purge_backups = False
+            self._drop_backups()
         if self.last_save_error:
             self.last_save_error = ""
             self._notify("save_ok:" + self.path.stem)
@@ -949,7 +954,7 @@ class History(_JsonStore):
         pruned = self._prune()
         if migrated and self._items:
             self._backup("v1")
-        if migrated or pruned:
+        if migrated or pruned:                   # pruned: the v1 copy goes once the migrated file is written
             self._save()
 
     def _dump(self):
@@ -965,7 +970,10 @@ class History(_JsonStore):
             cutoff = now - self.retention_days * 86400.0
             self._items = [e for e in self._items if e["ts"] >= cutoff]
         del self._items[max(1, int(self.limit)):]
-        return len(self._items) != before
+        removed = len(self._items) != before
+        if removed:
+            self._purge_backups = True           # see _write: deleted text must not survive in a backup copy
+        return removed
 
     # ---- settings
     def configure(self, limit: int | None = None, retention_days: int | None = None) -> None:
@@ -1017,9 +1025,10 @@ class History(_JsonStore):
         ``replace`` the current history is dropped first. Malformed entries are skipped. Returns #added."""
         added = 0
         with self._lock:
-            if replace:
+            if replace and self._items:
                 self._items = []
-            known = {e["id"] for e in self._items}
+                self._purge_backups = True
+            known ={e["id"] for e in self._items}
             now = self._clock()
             for raw in items or []:
                 if not (isinstance(raw, dict) and isinstance(raw.get("text"), str) and raw["text"].strip()):
@@ -1049,18 +1058,19 @@ class History(_JsonStore):
             self._items = [e for e in self._items if e["id"] != entry_id]
             removed = len(self._items) != before
             if removed:
+                self._purge_backups = True
                 self._save()
         if removed:
             self._notify("history")
         return removed
 
     def clear(self) -> None:
-        """Delete every transcript: the file is rewritten at once, and the backup copies are deleted too."""
+        """Delete every transcript: the file is rewritten at once, then the backup copies are deleted too."""
         with self._lock:
             self._items = []
+            self._purge_backups = True
             self._save()
             self.flush()
-            self._drop_backups()
         self._notify("history")
 
     # ---- reading

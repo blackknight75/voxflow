@@ -140,21 +140,114 @@ def test_with_history_off_nothing_is_learned_from_dictation(rig):
     assert rig.c.dictionary.suggestions()[0]["term"] == "GitHub"
 
 
-def test_clearing_history_also_deletes_its_backup_copies(tmp_path):
-    tmp_path = tmp_path / "profile"
-    tmp_path.mkdir()
-    """``history.v1.json`` (kept when an old file is migrated) and ``history.corrupt.json`` (kept when the file
-    could not be read) hold full transcripts too, so the delete offer and Clear all must remove them."""
+# ``history.v1.json`` (kept when an old file is migrated) and ``history.corrupt.json`` (kept when the file could
+# not be read) hold full transcripts too: once the file without the deleted entries is written, any deletion
+# (one entry, retention, the size cap, Clear all, an import that replaces) removes them.
+KEPT = "lunch at noon tomorrow"
+BACKUPS = ("history.v1.json", "history.corrupt.json")
+
+
+def migrated_profile(tmp_path, **kw):
+    """A profile whose history was just migrated from version 1 (an old SECRET entry, a recent KEPT one), with a
+    corrupt-file copy as well. Returns the History, its folder and the two entries."""
+    import json
+    import time as _time
+
     from voxflow import store
-    (tmp_path / "history.json").write_text('[{"text": "%s", "ts": 1700000000}]' % SECRET, encoding="utf-8")
-    h = store.History(tmp_path)                                   # a version 1 file: migrated, a copy is kept
-    assert (tmp_path / "history.v1.json").exists() and h.count() == 1
-    (tmp_path / "history.corrupt.json").write_text(SECRET, encoding="utf-8")
-    (tmp_path / "dictionary.corrupt.json").write_text("{}", encoding="utf-8")     # other stores' copies stay
+    folder = tmp_path / "profile"
+    folder.mkdir()
+    now = _time.time()
+    (folder / "history.json").write_text(json.dumps([{"text": SECRET, "ts": now - 10 * 86400},
+                                                     {"text": KEPT, "ts": now - 3600}]), encoding="utf-8")
+    h = store.History(folder, **kw)
+    (folder / "history.corrupt.json").write_text(SECRET, encoding="utf-8")
+    (folder / "dictionary.corrupt.json").write_text("{}", encoding="utf-8")     # other stores' copies stay
+    entries = sorted(h.snapshot(), key=lambda e: e["ts"])
+    return h, folder, entries[0], entries[-1]
+
+
+def _delete_one(h, secret):
+    assert h.delete(secret["id"])
+
+
+def _retention(h, _secret):
+    h.configure(retention_days=5)
+
+
+def _periodic_prune(h, _secret):
+    h.retention_days = 5
+    assert h.prune()
+
+
+def _size_cap(h, _secret):
+    from voxflow import store
+    h.configure(limit=2)
+    h.add_entry(store.make_entry("a new one", "a new one"))   # the oldest entry falls off the end
+
+
+def _import_replacing(h, _secret):
+    from voxflow import store
+    h.import_entries([store.make_entry(KEPT, KEPT)], replace=True)
+
+
+def _clear(h, _secret):
     h.clear()
-    assert files_with(tmp_path, SECRET) == []
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["dictionary.corrupt.json", "history.json"]
-    h.clear()                                                     # nothing left to delete: no error
+
+
+@pytest.mark.parametrize("deletion", [_delete_one, _retention, _periodic_prune, _size_cap, _import_replacing, _clear])
+def test_any_deletion_also_deletes_the_backup_copies(tmp_path, deletion):
+    h, folder, secret, _kept = migrated_profile(tmp_path)
+    assert all((folder / b).exists() for b in BACKUPS) and h.count() == 2
+    deletion(h, secret)
+    h.flush()                                                     # the app writes within COALESCE_S (0.2 s)
+    assert files_with(folder, SECRET) == [], "deleted text must not survive in a backup copy"
+    assert not any((folder / b).exists() for b in BACKUPS)
+    assert (folder / "dictionary.corrupt.json").exists()
+    if deletion is not _clear:
+        assert files_with(folder, KEPT) == ["history.json"], "what is kept is still saved"
+
+
+def test_adding_or_merging_entries_keeps_the_backup_copies(tmp_path):
+    from voxflow import store
+    h, folder, _secret, _kept = migrated_profile(tmp_path)
+    h.add_entry(store.make_entry("a new one", "a new one"))
+    h.import_entries([store.make_entry("merged", "merged")])
+    h.configure(retention_days=30)                                # nothing old enough to go
+    h.flush()
+    assert all((folder / b).exists() for b in BACKUPS), "nothing was deleted: the copies are still a safety net"
+    assert not h.delete("no-such-id") and all((folder / b).exists() for b in BACKUPS)
+
+
+def test_retention_applied_while_migrating_drops_the_v1_copy(tmp_path):
+    """The migration prunes by retention: once the migrated file is written, the copy of the old file (which
+    still holds the pruned entry) goes as well."""
+    h, folder, _secret, _kept = migrated_profile(tmp_path, retention_days=5)
+    assert [e["text"] for e in h.snapshot()] == [KEPT]
+    assert not (folder / "history.v1.json").exists()
+    assert files_with(folder, SECRET) == ["history.corrupt.json"]  # the test wrote this one after the load
+    h.clear()
+    assert files_with(folder, SECRET) == []
+
+
+def test_backup_copies_stay_until_the_file_without_the_deleted_entry_is_written(tmp_path, monkeypatch):
+    """A failed write leaves the old file (and the deleted text) in place, so the copies stay too; the next write
+    that works removes them."""
+    from voxflow import config as cfgmod, store
+    h, folder, secret, _kept = migrated_profile(tmp_path)
+    real = cfgmod._atomic_write
+
+    def full_disk(path, text):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(cfgmod, "_atomic_write", full_disk)
+    h.delete(secret["id"])
+    h.flush()
+    assert h.last_save_error and all((folder / b).exists() for b in BACKUPS)
+    monkeypatch.setattr(cfgmod, "_atomic_write", real)
+    h.add_entry(store.make_entry("a new one", "a new one"))
+    h.flush()
+    assert not h.last_save_error and not any((folder / b).exists() for b in BACKUPS)
+    assert files_with(folder, SECRET) == []
 
 
 def test_a_backup_copy_that_cannot_be_deleted_is_logged_and_does_not_stop_the_clear(tmp_path, monkeypatch, caplog):
