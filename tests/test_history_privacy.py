@@ -351,7 +351,7 @@ def test_a_failing_cleanup_is_logged_without_the_words(rig, save_history):
 def test_a_failing_pipeline_job_is_logged_without_the_words(rig, monkeypatch, save_history):
     rig.c.set("save_history", save_history)
 
-    def explode(text):
+    def explode(text, *args, **kwargs):
         raise ValueError(f"cannot expand {text!r}")
 
     monkeypatch.setattr(rig.c.snippets, "expand", explode)
