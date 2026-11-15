@@ -675,9 +675,10 @@ class FakeController(QObject):
     def model_status(self, name: str) -> dict:
         return dict(self._models[name])
 
-    def reload_models(self) -> None:
+    def reload_models(self, which=None) -> None:
         for name in self._models:
-            self.demo_set_model(name, "ready", "Running on GPU (CUDA)", None, "cuda")
+            if which is None or name in which:
+                self.demo_set_model(name, "ready", "Running on GPU (CUDA)", None, "cuda")
 
     # ---- devices and the speed check (Controller.device_info)
     def device_info(self) -> dict:

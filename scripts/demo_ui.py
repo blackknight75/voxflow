@@ -439,7 +439,7 @@ def child(args) -> int:
         ctl.set("theme", theme)
         sfx = "" if theme == "dark" else "_light"
         ob = ui.open_onboarding()
-        for i, step in enumerate(("welcome", "mic", "hotkey", "models", "done")):
+        for i, step in enumerate(("welcome", "mic", "models", "hotkey", "done")):
             ob.go(i)
             if step == "mic":
                 pump(1.2)
@@ -801,7 +801,7 @@ def real_screen(args) -> int:
     back.cover(frame(ob))
     ob.raise_()
     ob.activateWindow()
-    for i, step in enumerate(("welcome", "mic", "hotkey", "models", "done")):
+    for i, step in enumerate(("welcome", "mic", "models", "hotkey", "done")):
         ob.go(i)
         pump(0.9 if step == "mic" else 0.45)
         ow, oh, _d = grab(ob.frameGeometry(), f"onboarding_{i + 1}_{step}", ob)

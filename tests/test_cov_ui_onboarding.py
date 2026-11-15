@@ -60,8 +60,13 @@ def step(guide: Onboarding, name: str) -> None:
 
 
 # =========================================================================== navigation
+def test_the_model_step_comes_before_the_hotkey_practice():
+    assert STEPS.index("models") < STEPS.index("hotkey"), "the practice needs a loaded speech model"
+
+
 def test_walking_through_every_step(make_guide):
     guide, c = make_guide()
+    c.demo_set_model("asr", "loading", "Loading the speech model…")
     seen = Signals(finished=guide.finished)
     assert STEPS[guide.index] == "welcome" and guide.btn_next.text() == "Get started"
     assert not guide.btn_back.isVisible() and guide.btn_skip.isVisible() and guide.dots.accessibleName() == "Step 1 of 5"
@@ -71,10 +76,16 @@ def test_walking_through_every_step(make_guide):
         QApplication.processEvents()
         assert STEPS[guide.index] == name and guide.btn_back.isVisible()
         pictures.append(grab_bytes(guide))
+        if name == "models":
+            assert not guide.btn_next.isEnabled(), "Continue waits for the speech model"
+            c.demo_set_model("asr", "ready", "Running on GPU (CUDA)", None, "cuda")
+            assert guide.btn_next.isEnabled()
     assert len(set(pictures)) == 4
     assert guide.btn_next.text() == guide.btn_next.accessibleName() == "Start dictating" and not guide.btn_skip.isVisible()
     guide.btn_back.click()
-    assert STEPS[guide.index] == "models" and guide.btn_next.text() == "Continue" and guide.btn_skip.isVisible()
+    assert STEPS[guide.index] == "hotkey" and guide.btn_next.text() == "Continue" and guide.btn_skip.isVisible()
+    guide.btn_back.click()
+    assert STEPS[guide.index] == "mic", "the model is ready: Back passes over the model step"
     guide.go(-5)
     assert guide.index == 0
     guide.go(99)
@@ -261,7 +272,7 @@ def test_hotkey_can_be_changed_with_qt_keys_in_demo_mode(make_guide, qtbot):
     c.set = real_set
     rec._msg_timer.stop()
     rec.btn.click()
-    step(guide, "models")
+    step(guide, "done")
     assert not rec.capturing, "leaving the step ends a recording in progress"
     c.set("language", "de")                                    # unrelated settings do not touch the guide
     assert guide.caps.combo == "ctrl+j"
@@ -287,15 +298,24 @@ def test_hotkey_capture_goes_through_the_global_hook_outside_demo_mode(make_guid
 
 
 # =========================================================================== models step
+def test_a_model_that_is_already_loaded_costs_no_extra_screen(make_guide):
+    guide, c = make_guide()                                    # the demo models are ready (cached and loaded)
+    step(guide, "mic")
+    guide.btn_next.click()
+    assert STEPS[guide.index] == "hotkey", "straight from the microphone check to the practice"
+
+
 def test_model_progress_and_the_note_below_it(make_guide):
     guide, c = make_guide()
     step(guide, "models")
     asr, cleanup = guide.model_lines["asr"], guide.model_lines["cleanup"]
     assert asr.state.text() == cleanup.state.text() == "Ready" and asr.bar.value == 1.0
     assert guide.models_note.text() == "Everything is downloaded and ready."
+    assert guide.btn_next.isEnabled() and not guide.btn_retry.isVisibleTo(guide)
     c.demo_set_model("asr", "downloading", "42 MB of 600 MB", 0.07)
     assert asr.state.text() == "Downloading 7%" and asr.bar.value == 0.07 and asr.detail.text() == "42 MB of 600 MB"
-    assert guide.models_note.text().startswith("You do not have to wait here.")
+    assert guide.models_note.text().startswith("The hotkey practice opens as soon as")
+    assert not guide.btn_next.isEnabled() and guide.btn_next.toolTip() == "Waiting for speech recognition…"
     c.demo_set_model("asr", "downloading")
     assert asr.state.text() == "Downloading" and asr.bar.value is None and not asr.detail.isVisibleTo(asr)
     c.demo_set_model("asr", "loading")
@@ -304,9 +324,18 @@ def test_model_progress_and_the_note_below_it(make_guide):
     assert cleanup.state.text() == "Basic mode" and cleanup.bar.value == 1.0
     c.demo_set_model("asr", "failed", "Out of memory")
     assert asr.state.text() == "Failed" and asr.bar.value == 0.0
-    assert guide.models_note.text().startswith("A model could not be loaded.")
+    assert guide.models_note.text().startswith("Speech recognition could not be loaded")
+    assert guide.btn_next.text() == "Skip practice" and guide.btn_next.isEnabled() and guide.btn_retry.isVisibleTo(guide)
     c.demo_set_model("asr", "ready")
     assert guide.models_note.text() == "Everything is downloaded and ready."
+    assert guide.btn_next.text() == "Continue" and not guide.btn_retry.isVisibleTo(guide)
+    c.demo_set_model("cleanup", "loading")
+    assert guide.models_note.text().endswith("Smart cleanup keeps loading in the background.")
+    c.demo_set_model("cleanup", "failed", "No GPU memory")
+    assert "Smart cleanup could not be loaded" in guide.models_note.text() and guide.btn_retry.isVisibleTo(guide)
+    assert guide.btn_next.isEnabled(), "a missing cleanup model never blocks the practice"
+    guide.btn_retry.click()                                    # the demo reloads only the failed model
+    assert cleanup.state.text() == "Ready" and guide.models_note.text() == "Everything is downloaded and ready."
     c.model_status_changed.emit("no-such-model", {"state": "ready"})
     guide._on_model("asr", None)
     assert asr.state.text() == "Waiting"
@@ -321,7 +350,40 @@ def test_model_progress_and_the_note_below_it(make_guide):
     step(guide, "welcome")
     step(guide, "models")
     assert asr.state.text() == cleanup.state.text() == "Waiting"
-    assert guide.models_note.text().startswith("You do not have to wait here.")
+    assert guide.models_note.text().startswith("The hotkey practice opens as soon as")
+    step(guide, "done")
+    assert guide.btn_next.isEnabled(), "leaving the model step lifts the wait"
+
+
+def test_a_slow_load_is_explained_and_a_failing_retry_does_not_trap_the_user(make_guide):
+    guide, c = make_guide()
+    c.demo_set_model("asr", "loading", "Loading the speech model…")
+    step(guide, "models")
+    assert guide._slow_timer.isActive() and guide._slow_timer.interval() == ob_mod.SLOW_LOAD_MS
+    guide._slow_timer.timeout.emit()
+    assert guide.models_note.text().startswith("This is taking a while.") and guide.models_note._role == "AMBER"
+    step(guide, "welcome")
+    assert not guide._slow_timer.isActive(), "only the model step waits"
+    guide._on_slow()                                           # a late timeout elsewhere changes nothing
+    step(guide, "models")
+    assert guide.models_note.text().startswith("The hotkey practice opens as soon as"), "a new visit starts afresh"
+
+    c.demo_set_model("asr", "failed", "No internet.")
+    seen: list = []
+
+    def refuse(which=None):
+        seen.append(which)
+        raise RuntimeError("busy")
+
+    c.reload_models = refuse
+    guide.btn_retry.click()
+    assert seen == [["asr"]] and guide.models_note.text() == "That did not work: busy"
+    assert guide.btn_next.isEnabled() and guide.btn_next.text() == "Skip practice"
+    c.reload_models = lambda which=None: c.demo_set_model("asr", "downloading", "", 0.0)
+    guide.btn_retry.click()
+    assert guide._slow_timer.isActive() and not guide.btn_next.isEnabled(), "retrying waits again"
+    guide.skip()
+    assert not guide._slow_timer.isActive()
 
 
 # =========================================================================== last step

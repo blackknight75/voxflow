@@ -1,4 +1,10 @@
-"""First-run setup: welcome -> microphone check -> hotkey practice -> model download -> done.
+"""First-run setup: welcome -> microphone check -> model download -> hotkey practice -> done.
+
+The models start loading the moment the app starts, so they get the welcome and microphone steps as a head start.
+The hotkey practice needs the speech model, so it only opens once that model is ready: the model step waits for it
+(with progress), and is passed over when the model is already loaded (a cached model costs no extra screen). If the
+speech model fails, the model step offers Try again or skipping the practice. Closing the guide never stops a
+download: the models keep loading in the background (Settings > On-device models shows them).
 
 Skippable at every step (Skip, Esc or the close button) and re-openable from Settings > Support.
 """
@@ -14,7 +20,9 @@ from .icons import paint_icon
 from .widgets import (Button, ChoiceButton, HotkeyRecorder, KeyCaps, Label, LevelMeter, ProgressBar, TextArea,
                       paint_logo, painter)
 
-STEPS = ("welcome", "mic", "hotkey", "models", "done")
+STEPS = ("welcome", "mic", "models", "hotkey", "done")
+SLOW_LOAD_MS = 20_000          # after this long on the model step without a ready speech model, say why
+BUSY_STATES = ("pending", "downloading", "loading")
 
 
 class _Feature(QWidget):
@@ -122,6 +130,7 @@ class Onboarding(QWidget):
         self._done = False
         self._heard = 0
         self._practised = False
+        self._slow = False                 # the speech model has kept the user waiting on the model step
 
         root = QVBoxLayout(self)
         root.setContentsMargins(self.M + 36, self.M + 10, self.M + 36, self.M + 22)
@@ -138,7 +147,7 @@ class Onboarding(QWidget):
         root.addLayout(bar)
 
         self.stack = QStackedWidget()
-        for build in (self._welcome, self._mic, self._hotkey, self._models, self._finish_page):
+        for build in (self._welcome, self._mic, self._models, self._hotkey, self._finish_page):
             self.stack.addWidget(build())
         root.addWidget(self.stack, 1)
 
@@ -150,7 +159,7 @@ class Onboarding(QWidget):
         self.dots = _Dots(len(STEPS))
         self.btn_back = Button("Back", "secondary")
         self.btn_back.setObjectName("onboarding_back")
-        self.btn_back.clicked.connect(lambda: self.go(self.index - 1))
+        self.btn_back.clicked.connect(self._back)
         self.btn_next = Button("Get started", "primary")
         self.btn_next.setObjectName("onboarding_next")
         self.btn_next.setMinimumWidth(128)
@@ -170,6 +179,10 @@ class Onboarding(QWidget):
         self._poll = QTimer(self)
         self._poll.setInterval(100)
         self._poll.timeout.connect(self._poll_level)
+        self._slow_timer = QTimer(self)
+        self._slow_timer.setSingleShot(True)
+        self._slow_timer.setInterval(SLOW_LOAD_MS)
+        self._slow_timer.timeout.connect(self._on_slow)
         c = self.ctl
         c.state_changed.connect(self._on_state)
         c.transcript_ready.connect(self._on_transcript)
@@ -258,16 +271,21 @@ class Onboarding(QWidget):
 
     def _models(self) -> QWidget:
         w, lay = self._page("Getting the models ready",
-                            "VoxFlow downloads its speech and cleanup models once (about 1 GB). After that it works "
-                            "completely offline.")
+                            "VoxFlow downloads its speech and cleanup models once (about 5 GB). After that it works "
+                            "completely offline. You can try your hotkey as soon as speech recognition is ready.")
         self.model_lines = {"asr": _ModelLine("Speech recognition"), "cleanup": _ModelLine("Smart cleanup")}
         for name, line in self.model_lines.items():
             line.setObjectName(f"onboarding_model_{name}")
             lay.addWidget(line)
             lay.addSpacing(T.S2)
-        self.models_note = Label("You do not have to wait here. Carry on, and VoxFlow will be ready as soon as the "
-                                 "download finishes.", T.F_SMALL, "TEXT_DIM")
+        self.models_note = Label("", T.F_SMALL, "TEXT_DIM")
+        self.models_note.setObjectName("onboarding_models_note")
         lay.addWidget(self.models_note)
+        self.btn_retry = Button("Try again", "secondary", height=30)
+        self.btn_retry.setObjectName("onboarding_model_retry")
+        self.btn_retry.clicked.connect(self._retry)
+        self.btn_retry.hide()
+        lay.addWidget(self.btn_retry, 0, Qt.AlignmentFlag.AlignLeft)
         lay.addStretch(1)
         return w
 
@@ -303,6 +321,7 @@ class Onboarding(QWidget):
     def go(self, index: int) -> None:
         index = max(0, min(len(STEPS) - 1, index))
         self._leave_step()
+        self._slow_timer.stop()
         self.index = index
         self.stack.setCurrentIndex(index)
         self.dots.set_index(index)
@@ -310,6 +329,8 @@ class Onboarding(QWidget):
         self.btn_skip.setVisible(index < len(STEPS) - 1)
         self.btn_next.setText({0: "Get started", len(STEPS) - 1: "Start dictating"}.get(index, "Continue"))
         self.btn_next.setAccessibleName(self.btn_next.text())
+        self.btn_next.setEnabled(True)
+        self.btn_next.setToolTip("")
         step = STEPS[index]
         if step == "mic":
             self._heard = 0
@@ -320,12 +341,36 @@ class Onboarding(QWidget):
             self._poll.start()
         elif step == "hotkey":
             self.practice.setFocus(Qt.FocusReason.OtherFocusReason)
+            if not self._practised and self._asr_state() != "ready":     # opened directly while it is not ready
+                self.try_status.set_role("AMBER")
+                self.try_status.setText("The speech model is not ready yet, so the hotkey has nothing to type with.")
         elif step == "models":
-            for name, line in self.model_lines.items():
+            self._slow = False
+            for name in self.model_lines:
                 self._on_model(name, self._model_status(name))
+            if self._asr_state() in BUSY_STATES:
+                self._slow_timer.start()
         elif step == "done":
             self._fill_tips()
         self.btn_next.setFocus(Qt.FocusReason.OtherFocusReason) if step != "hotkey" else None
+
+    def _passed_over(self, step: str) -> bool:
+        """Steps that Continue and Back step over: the model step once the speech model is ready (nothing to wait
+        for), and the hotkey practice while it is not (nothing would be typed)."""
+        if step == "models":
+            return self._asr_state() == "ready"
+        if step == "hotkey":
+            return self._asr_state() != "ready"
+        return False
+
+    def _step(self, direction: int) -> None:
+        i = self.index + direction
+        while 0 < i < len(STEPS) - 1 and self._passed_over(STEPS[i]):
+            i += direction
+        self.go(i)
+
+    def _back(self) -> None:
+        self._step(-1)
 
     def _leave_step(self) -> None:
         self._poll.stop()
@@ -337,8 +382,10 @@ class Onboarding(QWidget):
     def _next(self) -> None:
         if self.index >= len(STEPS) - 1:
             self._close(True)
+        elif STEPS[self.index] == "models" and self._asr_state() in BUSY_STATES:
+            return                    # Continue waits for the speech model (also when Enter is pressed)
         else:
-            self.go(self.index + 1)
+            self._step(1)
 
     def skip(self) -> None:
         self._close(False)
@@ -348,6 +395,7 @@ class Onboarding(QWidget):
             return
         self._done = True
         self._leave_step()
+        self._slow_timer.stop()          # only the guide goes away: the models keep loading in the controller
         try:
             self.ctl.set("onboarding_done", True)
         except Exception:
@@ -384,9 +432,12 @@ class Onboarding(QWidget):
 
     def _model_status(self, name: str) -> dict:
         try:
-            return self.ctl.model_status(name)
+            return self.ctl.model_status(name) or {"state": "pending", "detail": ""}
         except Exception:
             return {"state": "pending", "detail": ""}
+
+    def _asr_state(self) -> str:
+        return str(self._model_status("asr").get("state", "pending"))
 
     def _fill_mics(self, mics) -> None:
         cur = self.ctl.get("mic_device")
@@ -448,15 +499,63 @@ class Onboarding(QWidget):
         line = self.model_lines.get(name)
         if line is not None:
             line.set_status(status or {})
-        states = [self._model_status(n).get("state") for n in self.model_lines]
-        if all(s in ("ready", "degraded") for s in states):
-            self.models_note.setText("Everything is downloaded and ready.")
-        elif any(s == "failed" for s in states):
-            self.models_note.setText("A model could not be loaded. You can retry any time from Settings > On-device "
-                                     "models; dictation works as soon as the speech model is ready.")
+        states = {n: str(self._model_status(n).get("state")) for n in self.model_lines}
+        asr = states.get("asr", "pending")
+        failed = [n for n, s in states.items() if s == "failed"]
+        if asr == "failed":
+            note, role = ("Speech recognition could not be loaded, so the hotkey practice has to wait. Try again, or "
+                          "skip the practice and retry later from Settings > On-device models."), "RED"
+        elif all(s in ("ready", "degraded") for s in states.values()):
+            note, role = "Everything is downloaded and ready.", "TEXT_DIM"
+        elif asr == "ready":
+            note, role = ("Speech recognition is ready, so you can try your hotkey now. "
+                          + ("Smart cleanup could not be loaded; you can retry it from Settings > On-device models."
+                             if failed else "Smart cleanup keeps loading in the background.")), "TEXT_DIM"
+        elif self._slow:
+            note, role = ("This is taking a while. A first download can take several minutes, and a first start on "
+                          "a graphics card up to 30 seconds. You can also close this guide: VoxFlow keeps loading in "
+                          "the background, and Settings > On-device models shows the progress."), "AMBER"
         else:
-            self.models_note.setText("You do not have to wait here. Carry on, and VoxFlow will be ready as soon as "
-                                     "the download finishes.")
+            note, role = ("The hotkey practice opens as soon as speech recognition is ready. You can also close this "
+                          "guide: VoxFlow keeps loading in the background."), "TEXT_DIM"
+        self.models_note.set_role(role)
+        self.models_note.setText(note)
+        self.btn_retry.setVisible(bool(failed))
+        if asr not in BUSY_STATES:
+            self._slow_timer.stop()
+        if STEPS[self.index] == "models":
+            self._gate_models_step(asr)
+
+    def _gate_models_step(self, asr: str) -> None:
+        """On the model step Continue waits for the speech model; after a failure it skips the practice instead."""
+        was_waiting = not self.btn_next.isEnabled()
+        busy = asr in BUSY_STATES
+        text = "Skip practice" if asr == "failed" else "Continue"
+        self.btn_next.setEnabled(not busy)
+        self.btn_next.setText(text)
+        self.btn_next.setAccessibleName(text)
+        self.btn_next.setToolTip("Waiting for speech recognition…" if busy else "")
+        if was_waiting and not busy and self.isVisible():
+            self.btn_next.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _on_slow(self) -> None:
+        if STEPS[self.index] == "models" and self._asr_state() in BUSY_STATES:
+            self._slow = True
+            self._on_model("asr", self._model_status("asr"))
+
+    def _retry(self) -> None:
+        failed = [n for n in self.model_lines if self._model_status(n).get("state") == "failed"]
+        try:
+            self.ctl.reload_models(failed or None)
+        except Exception as exc:  # noqa: BLE001 - the guide must never trap the user
+            self.models_note.set_role("RED")
+            self.models_note.setText(f"That did not work: {exc}")
+            return
+        self._slow = False
+        for name in self.model_lines:
+            self._on_model(name, self._model_status(name))
+        if STEPS[self.index] == "models" and self._asr_state() in BUSY_STATES:
+            self._slow_timer.start()
 
     def _on_captured(self, combo: str) -> None:
         if self.recorder.capturing:
