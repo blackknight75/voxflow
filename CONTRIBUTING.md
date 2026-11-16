@@ -33,6 +33,10 @@ The app-update end-to-end tests (`tests/e2e_update`: a local fake GitHub over re
 started for real, the smoke script rehearsed against a fake Inno Setup; about 4 minutes, needs `openssl` from Git
 for Windows and PyInstaller) are skipped unless you set `VOXFLOW_UPDATE_E2E=1`. Add `VOXFLOW_UPDATE_LIVE=1` for
 the two tests that make anonymous GETs to the real GitHub API. They never install VoxFlow.
+With `VOXFLOW_UPDATE_E2E=1` and `VOXFLOW_DESKTOP_TESTS=1`, `tests/e2e_update/test_update_desktop.py` runs the
+update UI on the real desktop (the `windows` Qt platform, the real tray): it acts only through UI Automation
+patterns and in-process Qt events (no synthetic OS input), shows its window without activating it, and saves
+screenshots of VoxFlow's own window to `VOXFLOW_DESKTOP_SHOTS`. Run it once more with `QT_SCALE_FACTOR=1.5`.
 
 Maintainers: the manual pre-release checks and the release steps are in [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md).
 

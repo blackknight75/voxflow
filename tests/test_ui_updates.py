@@ -287,3 +287,97 @@ def test_the_fake_controller_refuses_like_the_real_one():
     c.skip_update()                                        # nothing to skip: no error
     c.demo_set_update(available={**REL, "installer_url": ""})
     assert not c.update_info()["installable"]
+
+
+# =========================================================================== keyboard, screen readers, fit
+def _dialog(demo, monkeypatch):
+    page, _sec = section(demo)
+    demo.c.check_updates()
+    flush()
+    calls = []
+    monkeypatch.setattr(demo.c, "remind_update_later", lambda: calls.append("later"))
+    dlg = page.open_update()
+    flush()
+    return page, dlg, calls
+
+
+def test_the_dialog_opens_on_remind_me_later_and_a_stray_enter_does_not_install(demo, monkeypatch):
+    """Found on the real desktop: it opened focused on Install now, so one Enter restarted VoxFlow."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    page, dlg, calls = _dialog(demo, monkeypatch)
+    win = dlg.window()
+    assert win.focusWidget() is demo.find("update_dialog_later")
+    QTest.keyClick(demo.find("update_notes"), Qt.Key.Key_Return)          # Enter where no button has the focus
+    flush()
+    assert calls == ["later"] and demo.c.update_info()["phase"] == "idle" and not demo.find_all("update_dialog")
+
+
+def test_esc_and_a_click_outside_mean_remind_me_later(demo, monkeypatch):
+    """Esc / a click outside used to just close: the version was never announced again (notified stayed set)."""
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+    page, dlg, calls = _dialog(demo, monkeypatch)
+    QTest.keyClick(dlg.window().focusWidget(), Qt.Key.Key_Escape)
+    flush()
+    assert calls == ["later"] and not demo.find_all("update_dialog")
+    dlg = page.open_update()
+    flush()
+    QTest.mouseClick(dlg, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(3, 3))
+    flush()
+    assert calls == ["later", "later"] and not demo.find_all("update_dialog")
+
+
+def test_enter_on_a_focused_button_presses_that_button(demo, monkeypatch):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    page, dlg, calls = _dialog(demo, monkeypatch)
+    QTest.keyClick(demo.find("update_dialog_skip"), Qt.Key.Key_Return)
+    flush()
+    assert demo.c.update_info()["skipped"] and calls == []
+
+
+def test_a_plain_confirm_dialog_still_closes_on_esc(demo):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from voxflow.ui.components import confirm
+    done = []
+    win = demo.page("settings").win
+    m = win.open_modal(confirm(win.panel, "Delete?", "Sure?", "Delete", lambda: done.append(1)))
+    flush()
+    QTest.keyClick(m, Qt.Key.Key_Escape)
+    flush()
+    assert done == [] and not demo.find_all("confirm")
+
+
+def test_the_dialog_widens_rather_than_squeeze_a_button(demo, monkeypatch):
+    """Found at 150 % scale: the four buttons needed more than 540 px and Install when I quit was squeezed."""
+    from PySide6.QtCore import QSize
+
+    from voxflow.ui import widgets as W
+    real = W.Button.sizeHint
+    monkeypatch.setattr(W.Button, "sizeHint", lambda self: real(self) + QSize(40, 0))   # a wider font
+    page, dlg, _calls = _dialog(demo, monkeypatch)
+    assert dlg.card.width() > 540
+    for b in dlg.findChildren(W.Button):
+        assert b.width() >= b.sizeHint().width(), b.text()
+
+
+def test_dropdowns_tell_screen_readers_the_choice(demo):
+    """The choice and the menu rows are painted: UI Automation reads them from the description / the menu's name."""
+    _page, sec = section(demo)
+    assert sec.mode.accessibleDescription() == "Notify me, I choose"
+    sec.mode.set_value("off")
+    assert sec.mode.accessibleDescription() == "Off (never check)"
+    menu = sec.mode.open_menu()
+    flush()
+    assert menu.accessibleName() == "Off (never check), selected"
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    QTest.keyClick(menu, Qt.Key.Key_Up)
+    assert menu.accessibleName() == "Notify me, I choose"
+    QTest.keyClick(menu, Qt.Key.Key_Return)
+    flush()
+    assert sec.mode.accessibleDescription() == "Notify me, I choose"
+    menu.set_items([{"kind": "choice", "text": "x"}])
+    assert menu.accessibleName() == "Menu"

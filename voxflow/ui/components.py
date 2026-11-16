@@ -723,7 +723,8 @@ class ToastHost(QWidget):
 class Modal(QWidget):
     """Scrim + centred card inside the main window. Esc / click outside cancels; focus stays inside.
 
-    Build the content by adding widgets to ``modal.body``; ``add_buttons`` adds the footer.
+    Build the content by adding widgets to ``modal.body``; ``add_buttons`` adds the footer. Enter clicks
+    ``btn_default`` when set, else ``btn_primary``; Esc and a click outside click ``btn_cancel`` when there is one.
     """
 
     closed = Signal()
@@ -821,16 +822,25 @@ class Modal(QWidget):
             self._fit()
         return False
 
+    def cancel(self) -> None:
+        """Esc / a click outside the card: what the cancel button does (a dialog whose "cancel" is a choice, such
+        as the update dialog's "Remind me later", records it), else just close."""
+        btn = getattr(self, "btn_cancel", None)
+        if btn is not None and btn.isEnabled():
+            btn.click()
+        else:
+            self.close_modal()
+
     def mousePressEvent(self, e):
         if not self.card.geometry().contains(e.position().toPoint()):
-            self.close_modal()
+            self.cancel()
 
     def keyPressEvent(self, e):
         if e.key() == Qt.Key.Key_Escape:
-            self.close_modal()
+            self.cancel()
         elif e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and hasattr(self, "btn_primary") \
                 and not (e.modifiers() & Qt.KeyboardModifier.ShiftModifier):
-            self.btn_primary.click()
+            (getattr(self, "btn_default", None) or self.btn_primary).click()   # a focused button takes Enter itself
         else:
             super().keyPressEvent(e)
 

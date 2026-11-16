@@ -54,7 +54,9 @@ class App:
         self.shell = None
         if ui:
             from voxflow.ui.shell import build_ui
-            self.shell = build_ui(self.c, show_window=True)
+            # ui="tray": on the real desktop, start in the tray (as at login) and let the test show the window
+            # without activating it (test_update_desktop.py), so another app keeps the foreground
+            self.shell = build_ui(self.c, show_window=ui != "tray")
             QApplication.processEvents()
         self.closed = False
 

@@ -1735,7 +1735,7 @@ class SettingsPage(Page):
             self.win.toast("info", "VoxFlow is up to date.")
             return None
         m = update_dialog(self.win, self.ctl, info)
-        return self.win.open_modal(m, focus=m.btn_primary)
+        return self.win.open_modal(m, focus=m.btn_default)
 
     def show_section(self, name: str) -> None:
         """Scroll to the section called ``name`` (an alias such as ``"models"`` or its caption); no-op if unknown."""

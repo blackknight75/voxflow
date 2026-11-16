@@ -232,7 +232,17 @@ def update_dialog(win, ctl, info: dict) -> Modal:
         row.addWidget(page)
         m.btn_primary = page
     m.btn_cancel = later
+    # Opens on, and Enter means, "Remind me later": an Enter typed by accident must not restart VoxFlow (or open
+    # the browser). Esc / a click outside is "Remind me later" too (Modal.cancel), so the reminder comes back
+    # instead of this version going quiet for good.
+    m.btn_default = later
     m.body.addSpacing(T.S1)
     m.body.addLayout(row)
+    # four buttons need about 540 px; with some fonts / scale factors a little more: widen the card rather than
+    # squeeze a button below its text (each button's minimum is its size hint)
+    margins = m.body.contentsMargins()
+    need = row.minimumSize().width() + margins.left() + margins.right()
+    if need > m.card.width():
+        m.card.setFixedWidth(need)
     m.card.setFocusPolicy(Qt.FocusPolicy.NoFocus)
     return m
