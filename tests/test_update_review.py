@@ -202,18 +202,31 @@ def test_r4_the_message_never_raises(monkeypatch, capsys):
     assert sysmod.update_setup_running() is False
 
 
-def test_r4_tell_update_running_shows_a_message_box(monkeypatch):
-    import ctypes
-    shown = []
-
-    class User32:
-        def MessageBoxW(self, hwnd, text, title, flags):    # noqa: N802 - the Win32 name
-            shown.append((text, title, flags))
-
+def test_r4_the_message_box_comes_from_a_helper_so_voxflow_exits_at_once(monkeypatch):
+    """A VoxFlow.exe left open in its own message box keeps files in the install folder locked, and a silent Setup
+    then aborts and rolls the update back (tests/e2e_update; Inno Setup 6.7.3, exit code 5). The box is shown by
+    PowerShell from System32 and VoxFlow returns without waiting."""
+    import subprocess
+    started = []
     monkeypatch.setattr(sysmod.sys, "platform", "win32")
-    monkeypatch.setattr(ctypes, "windll", type("W", (), {"user32": User32()})(), raising=False)
-    sysmod.tell_update_running()
-    assert shown and shown[0][0].startswith("Finishing the update") and shown[0][1] == "VoxFlow"
+    monkeypatch.setenv("_MEIPASS2", "x")
+    sysmod.tell_update_running(popen=lambda cmd, **kw: started.append((cmd, kw)))
+    (cmd, kw), = started
+    root = os.environ.get("SystemRoot") or r"C:\Windows"
+    assert Path(cmd[0]) == Path(root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    assert kw["cwd"] == root, "nothing of the install folder is held, not even as the working folder"
+    assert kw["env"][sysmod.UPDATE_MESSAGE_VAR].startswith("Finishing the update")
+    assert "_MEIPASS2" not in kw["env"] and "MessageBox" in cmd[-1] and sysmod.UPDATE_MESSAGE_VAR in cmd[-1]
+    assert kw["creationflags"] & subprocess.CREATE_NO_WINDOW
+
+
+def test_r4_no_powershell_no_message_and_no_error(monkeypatch):
+    monkeypatch.setattr(sysmod.sys, "platform", "win32")
+
+    def missing(*_a, **_k):
+        raise FileNotFoundError(2, "not found")
+
+    sysmod.tell_update_running(popen=missing)               # logged, not raised
 
 
 def test_r4_setup_holds_the_mutex_and_relaunches_with_after_update_but_not_on_quit():

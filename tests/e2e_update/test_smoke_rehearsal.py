@@ -67,6 +67,12 @@ def test_the_smoke_script_with_the_update_path_passes_against_a_fake_installer(t
                  "PASS  update path (relaunch=1): the Setup log says the install succeeded",
                  "PASS  update path (relaunch=1): Setup closed the running VoxFlow",
                  "PASS  update path (relaunch=1): VoxFlow was started again",
+                 "PASS  update path (relaunch=1): Setup started it with --after-update",
+                 "PASS  update path (relaunch=1): the relaunched VoxFlow keeps running",
+                 "PASS  update path (relaunch=0): Setup holds its mutex (SetupMutex=VoxFlowSetupRunning)",
+                 "PASS  update path (relaunch=0): a VoxFlow started during Setup exits at once",
+                 "PASS  update path (relaunch=0): it said 'Finishing the update' through a helper outside the install folder",
+                 "PASS  update path (relaunch=0): Setup finished",
                  "PASS  update path (relaunch=0): Setup closed the running VoxFlow",
                  "PASS  update path (relaunch=0): VoxFlow was NOT started again",
                  "PASS  update path (relaunch=0): no VoxFlow process is left",
@@ -85,3 +91,12 @@ def test_the_update_path_check_fails_when_setup_does_not_relaunch(tmp_path, fake
     assert r.returncode == 1, out
     assert "FAIL  update path (relaunch=1): VoxFlow was started again" in out, out
     assert "PASS  update path (relaunch=0): VoxFlow was NOT started again" in out, out
+
+
+def test_a_voxflow_that_stays_open_during_setup_is_reported(tmp_path, fake_setup, monkeypatch):
+    """The other side of the second-start check: a VoxFlow that does not exit (as one holding its own message box
+    did) fails it."""
+    monkeypatch.setenv("FAKE_INNO_IGNORE_MUTEX", "1")
+    r, out = run_smoke(tmp_path, fake_setup, "-UpdatePath")
+    assert r.returncode == 1, out
+    assert "FAIL  update path (relaunch=0): a VoxFlow started during Setup exits at once" in out, out

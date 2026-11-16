@@ -57,27 +57,27 @@ def assert_installer_args(record: dict, folder, relaunch: bool):
 
 
 # =========================================================================== 1. Off
-def test_1_off_sends_nothing_on_start_or_on_the_daily_timer(env):
-    app = env.app(mode="off")
+def test_1_off_sends_nothing_on_start_or_on_the_daily_timer_and_check_now_asks_once(env):
+    app = env.app(mode="off", ui=True)
     env.qtbot.wait(1500)                                   # the first automatic check would come after 0.3 s
     assert env.sc.requests == [] and env.gh.dns_lookups == [], "Off must not touch the network"
     assert not app.u._check_timer.isActive()
     app.u._arm_check(first=True)                           # what the daily timer does: it stays unarmed
     assert not app.u._check_timer.isActive()
-    try:
-        started = app.c.check_updates()
-    except ValueError as exc:
-        env.note("off/check-now", f"refused while Off: {exc}")
-        assert "Update checks are off" in str(exc)
-        assert env.sc.requests == []
-    else:                                                  # fix/update allows "Check now" while Off
-        assert started
-        app.idle()
-        assert api_calls(env) == 1, "Check now while Off: exactly one request"
-        env.note("off/check-now", "one request")
-    text, _role = UP.status_text(app.c.update_info())
-    assert "never contacts GitHub" in text
-    # Notify again: the daily check comes back, exactly one request
+    sec = app.shell.window.pages["settings"].updates
+    text = sec.status_row.sub.text()
+    assert "Automatic checks are off" in text and "Check now" in text
+    assert sec.btn_check.isEnabled(), "Check now works while Off"
+    sec.btn_check.click()                                  # the user presses Check now
+    app.wait(lambda: api_calls(env) == 1 and app.u.phase == "idle")
+    assert available(app), "a check the user asked for shows what it found"
+    env.qtbot.wait(1500)
+    assert api_calls(env) == 1, "exactly one request, and Off arms nothing afterwards"
+    assert not app.u._check_timer.isActive()
+    assert "VoxFlow 0.3.0 is available." in sec.status_row.sub.text()
+    env.note("off/check-now", f"one request; Settings: {sec.status_row.sub.text()!r}")
+    # Notify a day later: the daily check comes back (right after Check now it is correctly due in 24 h)
+    env.clock.advance(24 * 3600 + 1)
     app.c.set("update_mode", "notify")
     before = api_calls(env)
     app.wait(lambda: api_calls(env) == before + 1 and app.u.phase == "idle")
@@ -86,7 +86,7 @@ def test_1_off_sends_nothing_on_start_or_on_the_daily_timer(env):
     app.c.set("update_mode", "off")
     env.qtbot.wait(800)
     assert api_calls(env) == before + 1
-    env.note("off", f"{len(env.sc.requests)} requests in total, all after leaving Off")
+    env.note("off", f"{len(env.sc.requests)} requests in total: one Check now while Off, one after Notify")
 
 
 # =========================================================================== 2. Notify
@@ -451,7 +451,7 @@ def test_6_an_inno_install_is_detected_as_one(env, stub_exe):
 
 # =========================================================================== 7. the download folder
 def test_7_the_download_folder_holds_one_installer_and_is_emptied_after_the_update(env, monkeypatch):
-    monkeypatch.setattr(U, "CLEANUP_RETRY_MS", 300)
+    monkeypatch.setattr(U, "TIDY_RETRY_MS", 300)
     app = env.app(mode="notify")
     assert app.u.folder == U.download_folder() and app.u.folder.parent == H.Path(H.tempfile.gettempdir()) \
         if hasattr(H, "tempfile") else True
@@ -482,13 +482,13 @@ def test_7_switching_off_removes_the_download(env):
     app.wait(lambda: available(app))
     app.c.install_update("quit")
     app.wait(lambda: app.u.state.downloaded == "0.3.0")
+    assert app.files() == ["VoxFlow-Setup-0.3.0.exe"]
     app.c.set("update_mode", "off")
+    assert app.files() == [], "deleted at once"
     app.exit(user_quit=True)
     time.sleep(2)
     assert not env.record.exists(), "Off cancels an install on quit"
-    if app.files():
-        env.note("off/cleanup", f"left after Off: {app.files()} (fix/update deletes it)")
-        pytest.xfail("Off does not delete the download on this branch yet (the change is on fix/update)")
+    assert app.files() == [], f"Off deletes the download: {app.files()}"
 
 
 # =========================================================================== 8. persistence
@@ -509,3 +509,85 @@ def test_8_settings_and_choices_survive_a_restart(env):
     info = again.c.update_info()
     assert info["skipped"] and info["mode"] == "auto" and info["time"] == "04:00"
     env.note("persistence", f"config={ {k: cfg[k] for k in ('update_mode', 'update_install_when', 'update_time')} }")
+
+
+# =========================================================================== 9. new on fix/update (merged)
+def test_9_an_all_users_install_only_notifies_and_offers_download(env, stub_exe, monkeypatch):
+    pf = env.tmp / "Program Files"
+    monkeypatch.setenv("ProgramFiles", str(pf))            # where an /ALLUSERS install lives
+    app_dir = pf / "VoxFlow"
+    app_dir.mkdir(parents=True)
+    shutil.copy(stub_exe, app_dir / "VoxFlow.exe")
+    (app_dir / "unins000.exe").write_bytes(b"MZ")
+    kind = U.install_kind(app_dir / "VoxFlow.exe", frozen=True)
+    assert kind == "allusers"
+    app = env.app(mode="auto", kind=kind, ui=True, metered=lambda: False)
+    app.wait(lambda: api_calls(env) == 1 and app.u.phase == "idle")
+    env.qtbot.wait(500)
+    assert env.sc.count(H.ASSET_HOST) == 0 and app.files() == [], "auto mode downloads nothing"
+    info = app.c.update_info()
+    assert not info["installable"] and "installed for all users" in info["managed"]
+    with pytest.raises(ValueError, match="all users"):
+        app.c.install_update("now")
+    _m, _n, buttons = dialog(app)
+    assert set(buttons) >= {"update_dialog_page"} and "update_dialog_now" not in buttons
+    assert buttons["update_dialog_page"].text() == "Download"
+    env.note("all users", f"kind={kind}; button {buttons['update_dialog_page'].text()!r}; {info['managed']}")
+
+
+_ENTRY = """
+import sys, time
+sys.path.insert(0, {root!r})
+from voxflow import system, app
+from voxflow import __main__ as entry
+system.tell_update_running = lambda *a, **k: print("TOLD: Finishing the update", flush=True)
+app.run_app = lambda **kw: print("STARTED", sorted(k for k, v in kw.items() if v), flush=True) or 0
+t = time.perf_counter()
+code = entry.main(sys.argv[1:])
+print("EXIT", code, round((time.perf_counter() - t) * 1000), "ms", flush=True)
+"""
+
+
+def _mutex(name):
+    import ctypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateMutexW.restype = ctypes.c_void_p
+    k32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+    k32.CloseHandle.argtypes = [ctypes.c_void_p]
+    handle = k32.CreateMutexW(None, False, name)
+    assert handle
+    return lambda: k32.CloseHandle(handle)
+
+
+@pytest.mark.parametrize("name", ["VoxFlowSetupRunning", "Global\\VoxFlowSetupRunning"])
+def test_9_a_voxflow_started_while_setup_runs_says_finishing_the_update_and_exits(env, name):
+    """The real entry point in a separate process, the real named mutex as Inno's SetupMutex creates it (only the
+    message box and the app itself are replaced by prints)."""
+    import subprocess
+    import sys
+    root = str(H.HERE.parent.parent)
+    run = lambda *args: subprocess.run([sys.executable, "-c", _ENTRY.format(root=root), *args],
+                                       capture_output=True, text=True, timeout=120, cwd=root)
+    release = _mutex(name)
+    try:
+        plain = run()
+        after = run("--after-update")
+    finally:
+        release()
+    assert "TOLD: Finishing the update" in plain.stdout and "STARTED" not in plain.stdout, plain.stdout + plain.stderr
+    assert "EXIT 0" in plain.stdout
+    assert "STARTED" in after.stdout and "TOLD" not in after.stdout, "Setup's own relaunch is not refused"
+    free = run()
+    assert "STARTED" in free.stdout and "TOLD" not in free.stdout, "no Setup running: VoxFlow starts"
+    env.note(f"setup mutex {name}", plain.stdout.strip().replace("\n", " | "))
+
+
+def test_9_install_on_quit_never_asks_setup_to_relaunch(env):
+    app = env.app(mode="notify")
+    app.wait(lambda: available(app))
+    app.c.install_update("quit")
+    app.wait(lambda: app.u.state.downloaded == "0.3.0")
+    app.exit(user_quit=True)
+    rec = env.ran()
+    assert "/RELAUNCH=0" in rec["argv"] and "/RELAUNCH=1" not in rec["argv"]
+    assert not any(a.startswith("--after-update") for a in rec["argv"])

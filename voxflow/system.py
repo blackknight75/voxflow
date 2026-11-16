@@ -293,19 +293,38 @@ def update_setup_running() -> bool:
     return False
 
 
-def tell_update_running() -> None:
-    """Say why VoxFlow does not start right now (it exits as soon as the message is closed, or Setup closes it)."""
+UPDATE_MESSAGE_VAR = "VOXFLOW_UPDATE_MESSAGE"     # the message box's text, handed to the helper process
+
+
+def tell_update_running(popen=None) -> None:
+    """Say why VoxFlow does not start right now, and return at once.
+
+    The message box is shown by a Windows PowerShell started from System32, not by this process: a VoxFlow.exe that
+    stayed open in its own message box would keep its exe and DLLs in the install folder locked while Setup is
+    replacing them, and a silent Setup then gives up on the locked file and rolls the whole update back (seen with
+    Inno Setup 6.7.3: "DeleteFile: The existing file appears to be in use", then "Defaulting to Abort", exit code 5).
+    Without PowerShell nothing is shown; VoxFlow still exits."""
     message = ("Finishing the update…\n\nVoxFlow is being updated right now. Start it again in a minute, when the "
                "update has finished.")
     log.info("an update is being installed: not starting")
     if sys.platform != "win32":
         print(message)
         return
-    import ctypes
+    import subprocess
+    root = os.environ.get("SystemRoot") or r"C:\Windows"
+    shell = Path(root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    script = ("Add-Type -AssemblyName System.Windows.Forms; [void][System.Windows.Forms.MessageBox]::Show("
+              f"$env:{UPDATE_MESSAGE_VAR}, 'VoxFlow', 'OK', 'Information')")
+    env = {k: v for k, v in os.environ.items() if not k.upper().startswith(("_PYI", "_MEIPASS"))}
+    env[UPDATE_MESSAGE_VAR] = message
     try:
-        ctypes.windll.user32.MessageBoxW(None, message, "VoxFlow", 0x40 | 0x10000)   # information, foreground
-    except (OSError, AttributeError):
-        pass
+        (popen or subprocess.Popen)(
+            [str(shell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
+             "-Command", script], cwd=root, env=env, close_fds=True,
+            creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, ValueError) as exc:
+        log.info("could not show the update message: %s", exc)
 
 
 # =========================================================================== misc

@@ -24,8 +24,12 @@
              /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /RELAUNCH=1|0 /LOG=<file>
          Checked: Setup exits 0 within the timeout and its log says the install succeeded; the running copy was
          closed (Restart Manager, CloseApplications=force); with /RELAUNCH=1 a new VoxFlow.exe from the install
-         folder is running afterwards, with /RELAUNCH=0 none is (for 20 s). Every VoxFlow process this step
-         started is stopped again.
+         folder is running afterwards, started with --after-update (Setup still holds its SetupMutex then) and
+         still running 5 s later; with /RELAUNCH=0 none is (for 20 s). During the /RELAUNCH=0 run, once
+         Setup's mutex VoxFlowSetupRunning exists, VoxFlow.exe is started as a user would: it must exit within
+         15 s with code 0, its "Finishing the update" message must come from a PowerShell helper (not from a
+         process holding files in the install folder), and Setup must still exit 0. Every VoxFlow and helper
+         process this step started is stopped again.
       5. A "VoxFlow" value is written to the HKCU Run key, as the app's "Launch at login" switch would:
            -RunValue Owned    "<install folder>\VoxFlow.exe" --autostart     -> the uninstaller must remove it
            -RunValue Foreign  "<install folder>-other\VoxFlow.exe" --autostart (another copy's entry)
@@ -203,7 +207,51 @@ function Stop-VoxFlowProcesses([string]$ExePath) {
     while ((@(Get-VoxFlowProcesses $ExePath).Count -gt 0) -and ((Get-Date) -lt $deadline)) { Start-Sleep -Milliseconds 500 }
 }
 
-function Test-UpdatePath([bool]$Relaunch) {
+function Test-SecondStart($Setup, $Running, [string]$Tag, [hashtable]$SafeEnv) {
+    # While Setup runs (its SetupMutex exists), the user starts VoxFlow: it must exit at once, with its "Finishing the
+    # update" message shown by a helper outside the install folder, and Setup must still succeed (a VoxFlow that
+    # stayed open would hold files Setup replaces, and a silent Setup aborts on a file in use).
+    $seen = $false
+    $deadline = (Get-Date).AddSeconds(120)
+    while (-not $Setup.HasExited -and (Get-Date) -lt $deadline) {
+        $m = $null
+        # after Restart Manager has closed the running copy: a VoxFlow started before that would just be closed too
+        if ($Running.HasExited -and [System.Threading.Mutex]::TryOpenExisting('VoxFlowSetupRunning', [ref]$m)) {
+            $m.Dispose(); $seen = $true; break
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    Add-Check "update path ($Tag): Setup holds its mutex (SetupMutex=VoxFlowSetupRunning)" $seen 'seen after the running copy was closed'
+    if (-not $seen) { return }
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $exe
+    $psi.UseShellExecute = $false
+    $psi.WorkingDirectory = $env:TEMP
+    $psi.EnvironmentVariables['PATH'] = ('{0}\System32;{0}' -f $env:SystemRoot)
+    foreach ($key in $SafeEnv.Keys) { $psi.EnvironmentVariables[$key] = [string]$SafeEnv[$key] }
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    $second = $null
+    try { $second = [System.Diagnostics.Process]::Start($psi) }
+    catch { Write-Info "the second VoxFlow could not be started (Setup may be replacing VoxFlow.exe): $($_.Exception.Message)" }
+    if ($null -eq $second) { return }
+    $quick = $second.WaitForExit(15000)
+    $detail = "pid $($second.Id), $([math]::Round($watch.Elapsed.TotalSeconds, 1)) s"
+    if ($quick) { $detail += ", exit code $($second.ExitCode)" }
+    Add-Check "update path ($Tag): a VoxFlow started during Setup exits at once" ($quick -and $second.ExitCode -eq 0) $detail
+    if (-not $quick) { try { $second.Kill() } catch { } }
+    # its message box: a Windows PowerShell from System32 (voxflow/system.py tell_update_running)
+    $helpers = @()
+    $until = (Get-Date).AddSeconds(10)
+    while ((Get-Date) -lt $until -and $helpers.Count -eq 0) {
+        $helpers = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+                     Where-Object { $_.CommandLine -and $_.CommandLine -match 'VOXFLOW_UPDATE_MESSAGE' })
+        if ($helpers.Count -eq 0) { Start-Sleep -Milliseconds 250 }
+    }
+    Add-Check "update path ($Tag): it said 'Finishing the update' through a helper outside the install folder" ($helpers.Count -gt 0) "$($helpers.Count) helper(s)"
+    foreach ($h in $helpers) { try { Stop-Process -Id $h.ProcessId -Force -ErrorAction Stop } catch { } }
+}
+
+function Test-UpdatePath([bool]$Relaunch, [bool]$SecondStart = $false) {
     # The in-app update (voxflow/updater.py): Setup runs over a running VoxFlow with the updater's own arguments.
     $flag = 0
     if ($Relaunch) { $flag = 1 }
@@ -234,16 +282,30 @@ function Test-UpdatePath([bool]$Relaunch) {
     }
     $oldPid = $running.Id
 
-    # exactly updater.installer_command(path, relaunch, log_path)
+    # exactly updater.installer_command(path, relaunch, log_path). Started without waiting, so that a second VoxFlow
+    # can be started while Setup runs (it holds SetupMutex; voxflow/system.py update_setup_running)
     $arguments = ('/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /RELAUNCH={0} /LOG="{1}"' -f $flag, $log)
     Write-Info "update path ($tag): $(Split-Path -Leaf $Installer) $arguments"
-    $r = Invoke-Program -File $Installer -Arguments $arguments -TimeoutSec $UpdateTimeoutSec -Bare -ExtraEnv $safeEnv
-    if ($r.TimedOut) {
+    $setupPsi = New-Object System.Diagnostics.ProcessStartInfo
+    $setupPsi.FileName = $Installer
+    $setupPsi.Arguments = $arguments
+    $setupPsi.UseShellExecute = $false
+    $setupPsi.CreateNoWindow = $true
+    $setupPsi.WorkingDirectory = $env:TEMP
+    $setupPsi.EnvironmentVariables['PATH'] = ('{0}\System32;{0}' -f $env:SystemRoot)
+    foreach ($key in $safeEnv.Keys) { $setupPsi.EnvironmentVariables[$key] = [string]$safeEnv[$key] }
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    $setup = [System.Diagnostics.Process]::Start($setupPsi)
+    if ($SecondStart) { Test-SecondStart $setup $running $tag $safeEnv }
+    $finished = $setup.WaitForExit([math]::Max(1, $UpdateTimeoutSec - [int]$watch.Elapsed.TotalSeconds) * 1000)
+    if (-not $finished) {
+        & "$env:SystemRoot\System32\taskkill.exe" /PID $setup.Id /T /F 2>&1 | Out-Null
         Add-Check "update path ($tag): Setup finished" $false "no exit after $UpdateTimeoutSec s; the process tree was killed"
         Stop-VoxFlowProcesses $exe
         return
     }
-    Add-Check "update path ($tag): Setup finished" ($r.ExitCode -eq 0) "exit code $($r.ExitCode) after $($r.Seconds) s"
+    $seconds = [math]::Round($watch.Elapsed.TotalSeconds, 1)
+    Add-Check "update path ($tag): Setup finished" ($setup.ExitCode -eq 0) "exit code $($setup.ExitCode) after $seconds s (5 = aborted and rolled back, e.g. a file in use)"
     $logText = ''
     if (Test-Path -LiteralPath $log) { $logText = [string](Get-Content -LiteralPath $log -Raw) }
     Add-Check "update path ($tag): the Setup log says the install succeeded" ($logText -match 'Installation process succeeded') $log
@@ -266,6 +328,14 @@ function Test-UpdatePath([bool]$Relaunch) {
     $pids = ($new | ForEach-Object { $_.Id }) -join ', '
     if ($Relaunch) {
         Add-Check "update path ($tag): VoxFlow was started again" ($new.Count -gt 0) "new pid(s): '$pids' within $wait s"
+        if ($new.Count -gt 0) {
+            # Setup still holds its mutex when it starts VoxFlow: only --after-update lets that copy run
+            $line = ''
+            try { $line = [string](Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f $new[0].Id)).CommandLine } catch { $line = '' }
+            Add-Check "update path ($tag): Setup started it with --after-update" ($line -match '--after-update') $line
+            Start-Sleep -Seconds 5
+            Add-Check "update path ($tag): the relaunched VoxFlow keeps running" (-not $new[0].HasExited) "pid $($new[0].Id)"
+        }
     }
     else {
         Add-Check "update path ($tag): VoxFlow was NOT started again" ($new.Count -eq 0) "new pid(s): '$pids' within $wait s"
@@ -414,7 +484,7 @@ try {
     # --------------------------------------------------------------------------------------- 4b. the in-app update
     if ($UpdatePath) {
         Test-UpdatePath $true
-        Test-UpdatePath $false
+        Test-UpdatePath $false $true          # install when I quit: no relaunch; a VoxFlow started meanwhile exits
         foreach ($file in @($exe, $console, $uninstaller)) {
             Add-Check "after the update: $(Split-Path -Leaf $file)" (Test-Path -LiteralPath $file -PathType Leaf) $file
         }
