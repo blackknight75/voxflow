@@ -25,6 +25,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 
 from . import __version__, audio as audiomod, config as cfgmod, fakes, langs, modelhub, speedcheck, store, system
 from . import sync as syncmod
+from . import updater as updatermod
 from .command import CommandError, CommandMode
 from .context import AppContext, foreground_app, foreground_hwnd
 from .hotkey import HotkeyListener, hotkey_problem, normalize_hotkey, pretty_hotkey
@@ -76,6 +77,9 @@ class Controller(QObject):
     activate_requested = Signal()
     sync_status_changed = Signal(dict)              # sync_status()
     devices_changed = Signal(dict)                  # device_info()
+    update_changed = Signal(dict)                   # update_info()
+    update_available = Signal(dict)                 # update_info(), when a newer version should be shown to the user
+    restart_requested = Signal()                    # quit now: the update installer runs once VoxFlow has shut down
 
     # ---- private cross-thread plumbing
     _sig_hotkey = Signal(str, str)                  # binding, event
@@ -91,12 +95,16 @@ class Controller(QObject):
 
     def __init__(self, *, demo: bool = False, fake: bool = False, data_dir: str | Path | None = None,
                  install_hook: bool = True, parent=None, modules=None, injector=None, sound_backend=None,
-                 mute_backend=None, context_fn=None, autostart=None, speed_check: bool | None = None):
+                 mute_backend=None, context_fn=None, autostart=None, speed_check: bool | None = None,
+                 updates=None):
         """``modules`` = (RecorderClass, transcriber, cleaner) overrides model/mic construction; ``injector``,
         ``sound_backend``, ``mute_backend``, ``context_fn`` and ``autostart`` replace the desktop back-ends.
         With ``demo`` or ``fake`` every desktop back-end that was not passed in is a harmless fake.
         ``speed_check``: run the automatic speed check (default: only with the real models, and not when
-        ``VOXFLOW_SPEED_CHECK=0``)."""
+        ``VOXFLOW_SPEED_CHECK=0``). ``updates``: an ``updater.Updater`` (or a factory ``(data_dir, get, busy)``
+        returning one) to use, or a bool for the daily update
+        check (default: only the real app, and not when ``VOXFLOW_UPDATES=0``). A fake or demo copy never
+        reaches the network for updates, not even through "Check now"."""
         super().__init__(parent)
         self.is_demo = bool(demo)
         self._fake = bool(fake or demo)
@@ -184,6 +192,24 @@ class Controller(QObject):
             if device:
                 log.info("speed check: %s uses %s on this PC (measured faster than the automatic choice)",
                          "speech recognition" if name == "asr" else "the language model", device)
+
+        # ---- app updates (voxflow/updater.py); the setting "Off" means no update traffic at all
+        self._quit_by_user = False
+        if isinstance(updates, updatermod.Updater):
+            self.updates = updates
+        elif callable(updates):                        # a factory (tests): (data_dir, get, busy) -> Updater
+            self.updates = updates(self.data_dir, self.get, self._update_busy)
+        else:
+            if updates is None:
+                updates = modules is None and not self._fake and os.environ.get("VOXFLOW_UPDATES") != "0"
+            self.updates = updatermod.Updater(
+                self.data_dir, self.get, self._update_busy, automatic=bool(updates),
+                http=None if updates else updatermod.OfflineHttp(),
+                kind=None if updates else "source", parent=self)
+        self.updates.changed.connect(self.update_changed)
+        self.updates.available.connect(self.update_available)
+        self.updates.notice.connect(self.notice)
+        self.updates.restart_requested.connect(self._on_update_restart)
 
         # ---- models and microphone
         self._modules_override = modules
@@ -318,6 +344,7 @@ class Controller(QObject):
             self._mic_count = audiomod.input_device_count()
             self._check_mic(initial=True)
         self._health_timer.start()
+        self.updates.start()
         if self.sync.enabled:
             self._sync_timer.start()
             self._sync_soon.start()
@@ -337,6 +364,7 @@ class Controller(QObject):
         for timer in (self._idle_timer, self._level_timer, self._cap_timer, self._health_timer,
                       self._sync_timer, self._sync_soon, self._speed_timer):
             timer.stop()
+        self.updates.close()
         self._speed.cancel()
         self._speed.join(3.0)                          # its child is killed: nothing keeps running after VoxFlow
         try:
@@ -362,6 +390,10 @@ class Controller(QObject):
         appmod.close_recorder(self._recorder)
         if self._tmp_dir is not None:
             shutil.rmtree(self._tmp_dir, ignore_errors=True)
+        try:                                           # last: everything is saved and released before Setup runs
+            self.updates.on_exit(self._quit_by_user)
+        except Exception:  # noqa: BLE001 - a failed update must never stop VoxFlow from closing
+            log.exception("could not start the update installer")
 
     def _flush_stores(self) -> None:
         for st in (self.dictionary, self.snippets, self.history, self.stats, self.styles):
@@ -480,6 +512,8 @@ class Controller(QObject):
             self.command.timeout_s = float(value)
         elif key in _MODEL_KEYS:
             self.reload_models()
+        elif key in ("update_mode", "update_install_when", "update_time"):
+            self.updates.settings_changed(key)
 
     def reset_settings(self) -> None:
         """Every setting back to its default (stores, onboarding state and window layout are kept)."""
@@ -1027,6 +1061,40 @@ class Controller(QObject):
                          "restart": name == "cleanup" and current in names and target in names and target != current,
                          "options": options}
         return out
+
+    # ================================================================== app updates
+    def update_info(self) -> dict:
+        """Settings > Updates: version, mode, how this copy was installed, last check, the newer release (if any)
+        and what is under way (``phase``: idle, checking, downloading, waiting, restarting)."""
+        return self.updates.info()
+
+    def check_updates(self) -> bool:
+        """"Check now". Raises ValueError while the update setting is Off (Off never touches the network)."""
+        if self.config.update_mode == "off":
+            raise ValueError("Update checks are off. Choose another update setting to check for updates.")
+        return self.updates.check(user=True)
+
+    def install_update(self, when: str = "now") -> None:
+        """``"now"``: download, then restart into the installer as soon as no dictation or command is under way.
+        ``"quit"``: install when VoxFlow is quit. Raises ValueError when this copy cannot update itself."""
+        self.updates.install(when)
+
+    def remind_update_later(self) -> None:
+        self.updates.remind_later()
+
+    def skip_update(self) -> None:
+        self.updates.skip()
+
+    def prepare_quit(self) -> None:
+        """The user chose Quit: an update waiting for "when I quit" may run (not when Windows ends the session)."""
+        self._quit_by_user = True
+
+    def _update_busy(self) -> bool:
+        return self._closed or self._busy() or self._capturing
+
+    def _on_update_restart(self) -> None:
+        self._quit_by_user = True
+        self.restart_requested.emit()
 
     # ================================================================== audio
     def level(self) -> float:

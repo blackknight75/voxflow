@@ -44,7 +44,8 @@ Output goes to `dist\`; `build\` and `dist\` are git-ignored.
 
 * Keep changes focused and add or update tests for behaviour you change.
 * Run the test suite before opening a pull request.
-* VoxFlow is fully local by design: changes must not add network calls beyond the existing model download.
+* VoxFlow is fully local by design: changes must not add network calls beyond the model download and the
+  update check (`voxflow/updater.py`, the only module that may open a connection for updates).
 * Do not commit model files, build output, or personal data (paths, recordings, transcripts).
 
 ## Reporting security issues

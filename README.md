@@ -63,9 +63,10 @@ Good to know before you start:
 ### 1. 100% local
 
 Your voice never leaves your machine. Speech recognition and text cleanup both run on your PC. There is no
-cloud service, no account and no telemetry. The only time VoxFlow uses the network is the one-time model
-download from Hugging Face on first run. The project's end-to-end self-test watches for outgoing connections
-while both models load and run, and counts zero.
+cloud service, no account and no telemetry. VoxFlow uses the network for the one-time model download from
+Hugging Face on first run and, unless you switch it off, for an anonymous once-a-day check for a new version
+(see [Privacy](#privacy)). The project's end-to-end self-test watches for outgoing connections while both
+models load and run, and counts zero.
 
 ### 2. Works offline
 
@@ -231,6 +232,8 @@ is loaded, numbers are clamped to the range shown, and an unreadable file is kep
 | `theme` | `"system"` | `system`, `dark` or `light` |
 | `reduced_motion` | `false` | Turn off decorative animation |
 | `overlay_position` | `null` | Remembered Flow bar position `[x, y]`; `null` = bottom centre of the active screen |
+| `update_mode` | `"notify"` | Updates: `auto` (install automatically), `notify` (tell me, I choose) or `off` (never check) |
+| `update_install_when` / `update_time` | `"quit"` / `"03:00"` | Automatic installs: when you quit VoxFlow, or at that time of day (local, `HH:MM`) when VoxFlow and the PC are idle |
 | `asr_model` / `asr_device` | Parakeet TDT 0.6b v3 / `"auto"` | Advanced; device `auto` (the fastest device the speed check measured, see the [FAQ](#faq-and-troubleshooting)), `cuda` (NVIDIA), `webgpu` (any graphics card, integrated ones included) or `cpu`. A change applies at once |
 | `cleanup_model` | `null` | Advanced; `"repo:file.gguf"` or a path; `null` = built-in default |
 | `cleanup_device` | `"auto"` | Advanced; where the language model runs: `auto`, `cuda`, `vulkan` (any graphics card) or `cpu`. Applies when VoxFlow restarts |
@@ -247,8 +250,16 @@ VoxFlow is built so that there is nothing to trust: audio and text are processed
 
 * The one-time download of the two models from Hugging Face on first run (and again only if you change the
   model in the advanced settings or delete the cache). Hugging Face usage telemetry is switched off.
-* Nothing else. No account, no analytics, no update check, no crash upload. Audio, transcripts, dictionary and
-  settings are never sent anywhere.
+* The update check (Settings > Updates), unless you set it to *Off (never check)*. Once a day, a few minutes
+  after VoxFlow starts, and when you press *Check now*, it sends one anonymous HTTPS request to the GitHub API
+  for the newest published VoxFlow release. The only identifying header is the generic User-Agent
+  `VoxFlow/<version>`: no ID, no cookie, nothing about you or your PC. If you choose to install an update,
+  VoxFlow downloads `VoxFlow-Setup-<version>.exe` and `SHA256SUMS.txt` from that release, only from
+  `github.com/blackknight75/voxflow` and GitHub's download servers over HTTPS, and refuses the installer if its
+  SHA-256 does not match. *Off* means no update traffic at all. A copy installed with Scoop or winget, or run
+  from source, never updates itself: it only tells you that a new version exists.
+* Nothing else. No account, no analytics, no crash upload. Audio, transcripts, dictionary and settings are
+  never sent anywhere.
 
 **What is stored, and where**
 
@@ -260,6 +271,8 @@ VoxFlow is built so that there is nothing to trust: audio and text are processed
 | `%APPDATA%\VoxFlow\logs\` | `voxflow.log` (rotating, 1 MB x 3) and `crash-*.log`. They stay on your PC. |
 | `%APPDATA%\VoxFlow\cuda-cache\` | Compiled GPU kernels, so later starts are fast |
 | `%APPDATA%\VoxFlow\speedcheck.json` | How fast each device ran the models on this PC (the speed check). Never in a backup or the sync folder |
+| `%APPDATA%\VoxFlow\updates.json` | The last update check: when, its result, the newest version seen and your choices (skip, remind later) |
+| `%TEMP%\VoxFlow-update\` | A downloaded update installer, only while one is waiting to be installed |
 | `%USERPROFILE%\.cache\huggingface\hub\` | The downloaded models (the standard Hugging Face cache) |
 | A sync folder, only if you choose one | Dictionary, snippets, styles and settings. Never history or statistics. |
 
@@ -290,7 +303,17 @@ These are numbers from one machine, not a benchmark suite. For recognition accur
 ## FAQ and troubleshooting
 
 **Is it really offline?** Yes, after the first run. The models are downloaded once; from then on no network is
-needed or used.
+needed. The only other request is the daily update check, which you can turn off in Settings > Updates
+(*Off (never check)*); dictation never waits for it.
+
+**How do updates work?** Settings > Updates offers three modes: *Install automatically*, *Notify me, I choose*
+(the default) and *Off (never check)*. When a new version is out you get a notification and a dialog with its
+release notes and four choices: *Install now* (VoxFlow restarts, after any dictation in progress), *Install when
+I quit*, *Remind me later* (tomorrow) and *Skip this version*. In automatic mode VoxFlow downloads the update in
+the background (not on a metered connection) and installs it when you quit, or at a time you set, when VoxFlow
+and the PC have been idle for 10 minutes. It never installs while you dictate. The installer is not code-signed:
+the SHA-256 check proves the file is the one published with the release, not who built it. With Scoop
+(`scoop update voxflow`) or winget (`winget upgrade blackknight75.VoxFlow`), the package manager does the updating.
 
 **Does it work without an NVIDIA GPU?** Yes. On a separate AMD or Intel graphics card with 4 GB or more, speech
 recognition uses the GPU through WebGPU and the language model through Vulkan (both were run on an NVIDIA card

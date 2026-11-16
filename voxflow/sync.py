@@ -38,7 +38,7 @@ PACK_KINDS = ("dictionary", "snippets")
 LOCAL_SETTINGS = frozenset({
     "config_version", "mic_device", "asr_model", "asr_device", "cleanup_model", "cleanup_device",
     "cleanup_timeout_s", "command_timeout_s", "restore_delay_s", "launch_at_login", "start_minimized",
-    "overlay_position", "ui_state", "onboarding_done"})
+    "overlay_position", "ui_state", "onboarding_done", "update_mode", "update_install_when", "update_time"})
 # Interface state: never written to a backup either.
 _NEVER_EXPORTED = frozenset({"config_version", "ui_state", "overlay_position", "onboarding_done"})
 _MAX_FILE_BYTES = 50 * 1024 * 1024

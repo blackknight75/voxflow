@@ -250,7 +250,8 @@ class Spy:
     NAMES = ("state_changed", "level_changed", "transcript_ready", "history_changed", "stats_changed",
              "dictionary_changed", "suggestions_changed", "dictionary_suggestion", "snippets_changed",
              "styles_changed", "config_changed", "status_changed", "model_status_changed", "microphones_changed",
-             "hotkey_captured", "notice", "activate_requested")
+             "hotkey_captured", "notice", "activate_requested", "update_changed", "update_available",
+             "restart_requested")
 
     def __init__(self, controller):
         self.events: list[tuple[str, tuple]] = []

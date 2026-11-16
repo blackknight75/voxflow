@@ -40,7 +40,9 @@ class Shell(QObject):
         self.window.arrange_overlay_requested.connect(self.overlay.set_arranging)
         self.tray = Tray(c)
         self.tray.show_window.connect(lambda page: self.window.present(page or None))
-        self.tray.quit_requested.connect(app.quit)
+        self.tray.quit_requested.connect(self.quit)
+        c.restart_requested.connect(lambda: QApplication.instance().quit())   # the update installs after shutdown
+        c.update_available.connect(self._on_update_available)
 
         c.state_changed.connect(self._on_state)
         c.status_changed.connect(self._on_status)
@@ -103,6 +105,9 @@ class Shell(QObject):
         action = str(action or "")
         if action.startswith("open_settings:"):
             self.window.open_settings(action.split(":", 1)[1])
+        elif action == "update":
+            self.window.open_settings("updates")
+            self.window.pages["settings"].open_update()
         elif action == "retry_save":
             retry = getattr(self.ctl, "retry_saves", None)
             if callable(retry):
@@ -124,6 +129,26 @@ class Shell(QObject):
         if not showing and level != "success":
             self.tray.notify(level, message)
 
+    def _on_update_available(self, info: dict) -> None:
+        """A newer version (once per version, after "Remind me later" only when it is due): a toast with "See
+        update" while the window is up, else a tray notification that opens the dialog when clicked."""
+        rel = info.get("available") or {}
+        if not rel:
+            return
+        message = f"VoxFlow {rel.get('version')} is available."
+        if self.window.isVisible() and not self.window.isMinimized():
+            self.window.toast("info", message, "See update", lambda: self.run_action("update"))
+        else:
+            self.tray.notify("info", message + " Click to see what is new and choose when to install it.",
+                             action="update")
+
+    def quit(self) -> None:
+        """Quit from the tray: the user's own quit, so an update chosen for "when I quit" may install."""
+        prepare = getattr(self.ctl, "prepare_quit", None)
+        if callable(prepare):
+            prepare()
+        QApplication.instance().quit()
+
     def _overlay_moved(self, pos) -> None:
         try:
             self.ctl.set("overlay_position", pos)
@@ -137,6 +162,7 @@ class Shell(QObject):
             return self.onboarding
         ob = Onboarding(self.ctl)
         ob.finished.connect(self._onboarding_finished)
+        ob.settings_requested.connect(self.window.open_settings)
         self.onboarding = ob
         bring_to_front(ob)
         return ob

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- App updates (Settings > Updates): *Install automatically*, *Notify me, I choose* (the default) or *Off (never
+  check)*. When a new version is out, a notification and a dialog show its release notes and offer *Install now*
+  (VoxFlow restarts), *Install when I quit*, *Remind me later* or *Skip this version*. Automatic installs happen
+  when you quit VoxFlow or at a set time when VoxFlow and the PC are idle, never during a dictation, and are not
+  downloaded on a metered connection. The installer is checked against the release's `SHA256SUMS.txt` before it
+  runs. Copies installed with Scoop or winget, or run from source, only notify.
+- The update check is the one new network request: anonymous, once a day, to the GitHub Releases API of this
+  repository, with the User-Agent `VoxFlow/<version>`. *Off* sends nothing.
+
 ### Changed
 
 - The setup guide downloads and loads the speech model before the hotkey practice, which now opens only once the

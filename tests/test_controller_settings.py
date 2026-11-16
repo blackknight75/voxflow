@@ -67,7 +67,8 @@ def test_every_documented_setting_can_be_set_through_the_controller(rig):
         "restore_delay_s": 1.5, "show_idle_pill": True, "theme": "light", "reduced_motion": True,
         "overlay_position": [10, 20], "ui_state": {"page": "history"}, "onboarding_done": True,
         "asr_device": "cpu", "cleanup_device": "vulkan", "cleanup_timeout_s": 6.0, "command_timeout_s": 30.0,
-        "min_record_s": 0.5, "max_record_s": 60.0,
+        "min_record_s": 0.5, "max_record_s": 60.0, "update_mode": "off", "update_install_when": "time",
+        "update_time": "04:30",
     }
     untested = set(cfgmod.defaults()) - set(samples) - {"config_version", "asr_model", "cleanup_model"}
     assert not untested, f"new settings without a controller test: {untested}"

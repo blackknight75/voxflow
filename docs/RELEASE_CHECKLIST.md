@@ -137,6 +137,11 @@ the Hugging Face cache yet. Each script prints its verdict on the last line.
 - [ ] Switch on Settings > General > Launch at login, sign out and in again: VoxFlow starts in the tray.
 - [ ] If an older VoxFlow is installed there: run the new installer over it. Settings, history and dictionary
   are kept.
+- [ ] In-app update, once the release is published (it needs a published release newer than the installed one):
+  with the previous version installed by its installer, Settings > Updates > *Check now* shows the new version and
+  its notes. *Install now* downloads it, VoxFlow quits, Setup runs without any window, and VoxFlow starts again
+  with the new version in Settings > About. `%TEMP%\VoxFlow-update\install.log` is Inno Setup's log of that run.
+  Also try *Install when I quit*: quitting from the tray installs it, and VoxFlow does not start again.
 - [ ] Uninstall from Windows Settings > Apps: the program folder and the login entry are gone,
   `%APPDATA%\VoxFlow` is still there.
 - [ ] Only if the release workflow's installer test was skipped (the run summary says so), run it by hand on

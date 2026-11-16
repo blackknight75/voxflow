@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import os
+import re
 import tempfile
 import time
 from dataclasses import asdict, dataclass, field, fields
@@ -28,6 +29,10 @@ LANGUAGES: list[tuple[str, str]] = [
 LANGUAGE_CODES = tuple(code for code, _ in LANGUAGES)
 THEMES = ("system", "dark", "light")
 HOTKEY_KEYS = ("hotkey", "command_hotkey", "paste_last_hotkey", "undo_hotkey")
+# App updates (voxflow/updater.py): install automatically, notify and let the user choose, or never check.
+UPDATE_MODES = ("auto", "notify", "off")
+DEFAULT_UPDATE_MODE = "notify"      # confirmed by the maintainer; the one place the default is decided
+UPDATE_WHEN = ("quit", "time")      # automatic installs: when VoxFlow is quit, or at update_time when idle
 HOTKEY_LABELS = {"hotkey": "Dictation", "command_hotkey": "Command mode",
                  "paste_last_hotkey": "Paste last transcript", "undo_hotkey": "Undo last paste"}
 
@@ -83,6 +88,10 @@ class Config:
     overlay_position: Any = None      # None or [x, y]
     ui_state: dict = field(default_factory=dict)
     onboarding_done: bool = False
+    # ---- updates (voxflow/updater.py)
+    update_mode: str = DEFAULT_UPDATE_MODE
+    update_install_when: str = "quit"
+    update_time: str = "03:00"        # HH:MM, local time
     # ---- advanced
     asr_model: str = "nemo-parakeet-tdt-0.6b-v3"
     asr_device: str = "auto"          # auto = the speed check's measured choice, else the fixed order
@@ -129,6 +138,11 @@ class Config:
                 return json.loads(json.dumps(value))
             except (TypeError, ValueError):
                 raise ValueError("The interface state must contain only plain values.") from None
+        if key == "update_time":
+            m = re.fullmatch(r"\s*([01]?\d|2[0-3]):([0-5]\d)\s*", value) if isinstance(value, str) else None
+            if not m:
+                raise ValueError("The install time must be a time of day such as 03:00.")
+            return f"{int(m.group(1)):02d}:{m.group(2)}"
         if key in _CHOICES:
             if isinstance(value, str) and value.strip().lower() in _CHOICES[key]:
                 return value.strip().lower()
@@ -176,7 +190,8 @@ class Config:
 
 _DEFAULTS = asdict(Config())
 _CHOICES = {"language": LANGUAGE_CODES, "theme": THEMES, "asr_device": ("auto", "cuda", "webgpu", "cpu"),
-            "cleanup_device": ("auto", "cuda", "vulkan", "cpu")}
+            "cleanup_device": ("auto", "cuda", "vulkan", "cpu"), "update_mode": UPDATE_MODES,
+            "update_install_when": UPDATE_WHEN}
 _RANGES = {
     "sound_volume": (0.0, 1.0), "history_retention_days": (0, 3650), "history_limit": (10, 100000),
     "restore_delay_s": (0.05, 5.0), "cleanup_timeout_s": (0.5, 30.0), "command_timeout_s": (2.0, 120.0),
