@@ -312,7 +312,7 @@ class Onboarding(QWidget):
 
     def _update_text(self) -> str:
         if self.ctl.get("update_mode") == "off":
-            return "Updates: VoxFlow does not check for new versions. You can turn that on in Settings."
+            return "Updates: VoxFlow checks for new versions only when you press Check now in Settings."
         return ("Updates: once a day VoxFlow asks GitHub, anonymously, whether a new version is out"
                 + (" and installs it for you." if self.ctl.get("update_mode") == "auto" else ", and asks you first."))
 

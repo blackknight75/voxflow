@@ -16,6 +16,8 @@ def main(argv=None) -> int:
                     help="started by Windows at login: stay in the tray without opening the window")
     # the app's own background speed check runs each measurement in a child started with this flag
     ap.add_argument("--speed-check", nargs="+", metavar="ARG", help=argparse.SUPPRESS)
+    # Setup starts VoxFlow again with this after an in-app update, while it still holds its mutex
+    ap.add_argument("--after-update", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
     if args.speed_check is not None:
         from .speedcheck import child_main
@@ -23,6 +25,10 @@ def main(argv=None) -> int:
     if args.selftest is not None:
         from .app import selftest
         return selftest(args.selftest or None, fake=args.fake)
+    from . import system
+    if not (args.after_update or args.demo) and system.update_setup_running():
+        system.tell_update_running()          # never start on files Setup is replacing
+        return 0
     from .app import run_app
     return run_app(demo=args.demo, fake=args.fake, open_settings=args.settings, no_hook=args.no_hook,
                    autostart=args.autostart)

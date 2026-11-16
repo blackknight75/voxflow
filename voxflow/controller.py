@@ -205,7 +205,8 @@ class Controller(QObject):
             self.updates = updatermod.Updater(
                 self.data_dir, self.get, self._update_busy, automatic=bool(updates),
                 http=None if updates else updatermod.OfflineHttp(),
-                kind=None if updates else "source", parent=self)
+                kind=None if updates else "source",
+                folder=None if updates else self.data_dir / "update-offline", parent=self)
         self.updates.changed.connect(self.update_changed)
         self.updates.available.connect(self.update_available)
         self.updates.notice.connect(self.notice)
@@ -1069,9 +1070,8 @@ class Controller(QObject):
         return self.updates.info()
 
     def check_updates(self) -> bool:
-        """"Check now". Raises ValueError while the update setting is Off (Off never touches the network)."""
-        if self.config.update_mode == "off":
-            raise ValueError("Update checks are off. Choose another update setting to check for updates.")
+        """"Check now": one check, in every mode. With the setting Off this click is the only way VoxFlow ever asks
+        GitHub (no startup or daily check). False when a check or download is already under way."""
         return self.updates.check(user=True)
 
     def install_update(self, when: str = "now") -> None:

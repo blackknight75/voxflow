@@ -256,8 +256,11 @@ VoxFlow is built so that there is nothing to trust: audio and text are processed
   `VoxFlow/<version>`: no ID, no cookie, nothing about you or your PC. If you choose to install an update,
   VoxFlow downloads `VoxFlow-Setup-<version>.exe` and `SHA256SUMS.txt` from that release, only from
   `github.com/blackknight75/voxflow` and GitHub's download servers over HTTPS, and refuses the installer if its
-  SHA-256 does not match. *Off* means no update traffic at all. A copy installed with Scoop or winget, or run
-  from source, never updates itself: it only tells you that a new version exists.
+  SHA-256 does not match. *Off* means no automatic update traffic at all (no check at start, none daily): VoxFlow
+  then asks GitHub only when you press *Check now*. Switching to *Off* also deletes a downloaded installer and
+  cancels any pending install. A copy installed with Scoop or winget, installed for all users (Program Files), or
+  run from source never updates itself: it only tells you that a new version exists. If you start VoxFlow while
+  an update is being installed, it says "Finishing the update…" and does not start until Setup is done.
 * Nothing else. No account, no analytics, no crash upload. Audio, transcripts, dictionary and settings are
   never sent anywhere.
 
@@ -272,7 +275,7 @@ VoxFlow is built so that there is nothing to trust: audio and text are processed
 | `%APPDATA%\VoxFlow\cuda-cache\` | Compiled GPU kernels, so later starts are fast |
 | `%APPDATA%\VoxFlow\speedcheck.json` | How fast each device ran the models on this PC (the speed check). Never in a backup or the sync folder |
 | `%APPDATA%\VoxFlow\updates.json` | The last update check: when, its result, the newest version seen and your choices (skip, remind later) |
-| `%TEMP%\VoxFlow-update\` | A downloaded update installer, only while one is waiting to be installed |
+| `%TEMP%\VoxFlow-update\` | At most one downloaded update installer, while it waits to be installed. Deleted after the update, when you skip that version or switch updates off |
 | `%USERPROFILE%\.cache\huggingface\hub\` | The downloaded models (the standard Hugging Face cache) |
 | A sync folder, only if you choose one | Dictionary, snippets, styles and settings. Never history or statistics. |
 
@@ -304,7 +307,7 @@ These are numbers from one machine, not a benchmark suite. For recognition accur
 
 **Is it really offline?** Yes, after the first run. The models are downloaded once; from then on no network is
 needed. The only other request is the daily update check, which you can turn off in Settings > Updates
-(*Off (never check)*); dictation never waits for it.
+(*Off (never check)*; *Check now* still works when you ask); dictation never waits for it.
 
 **How do updates work?** Settings > Updates offers three modes: *Install automatically*, *Notify me, I choose*
 (the default) and *Off (never check)*. When a new version is out you get a notification and a dialog with its

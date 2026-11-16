@@ -44,7 +44,11 @@ def test_the_status_line_says_what_is_going_on():
     assert text.startswith("VoxFlow is up to date. Last checked today at ") and role == "TEXT_DIM"
     assert UP.status_text(info(last_check=now, last_ok=False, last_result="GitHub could not be reached (x)."))[1] \
         == "AMBER"
-    assert UP.status_text(info(mode="off")) == ("Update checks are off: VoxFlow never contacts GitHub.", "TEXT_DIM")
+    assert UP.status_text(info(mode="off")) == (
+        "Automatic checks are off: VoxFlow asks GitHub only when you press Check now.", "TEXT_DIM")
+    assert UP.status_text(info(mode="off", last_check=now, last_result="VoxFlow is up to date."))[0].startswith(
+        "Automatic checks are off: VoxFlow asks GitHub only when you press Check now. VoxFlow is up to date. "
+        "Last checked today")
     assert UP.status_text(info())[0] == "Not checked yet."
     assert "You skipped this version." in UP.status_text(info(available=REL, skipped=True))[0]
     assert "when you quit VoxFlow" in UP.status_text(info(available=REL, install_on_quit=True))[0]
@@ -70,7 +74,8 @@ def test_the_section_shows_the_version_the_mode_and_the_last_check(demo):
     assert sec.status_row.sub.text().startswith("VoxFlow is up to date. Last checked today at")
     assert not sec.when_row.isVisible(), "the install timing only applies to automatic mode"
     assert not sec.btn_see.isVisible() and sec.btn_check.isEnabled()
-    assert "anonymous" in sec.mode_row.sub.text() and "Off means no request at all" in sec.mode_row.sub.text()
+    assert "anonymous" in sec.mode_row.sub.text()
+    assert "Off means no automatic request: VoxFlow asks only when you press Check now." in sec.mode_row.sub.text()
     page.show_section("updates")
     demo.render()
 
@@ -93,15 +98,21 @@ def test_automatic_mode_shows_when_to_install_and_a_time_menu(demo):
     assert sec.status_row.sub.text().endswith("Updates are managed by Scoop: run scoop update voxflow.")
 
 
-def test_off_disables_check_now(demo):
+def test_off_keeps_check_now_and_says_it_is_the_only_way_to_ask(demo):
     _page, sec = section(demo)
     sec.mode._pick("off")
     flush()
-    assert demo.c.config.update_mode == "off" and not sec.btn_check.isEnabled()
-    assert sec.btn_check.toolTip() == "Choose another update setting first."
-    assert sec.status_row.sub.text().startswith("Update checks are off")
-    with pytest.raises(ValueError, match="Update checks are off"):
-        demo.c.check_updates()
+    assert demo.c.config.update_mode == "off" and sec.btn_check.isEnabled()
+    assert sec.btn_check.toolTip() == "Asks GitHub once, now. Automatic checks stay off."
+    assert sec.status_row.sub.text().startswith(
+        "Automatic checks are off: VoxFlow asks GitHub only when you press Check now.")
+    sec.btn_check.click()
+    flush()
+    assert demo.c.config.update_mode == "off" and sec.status_row.sub.text().startswith(
+        "Automatic checks are off: VoxFlow asks GitHub only when you press Check now. VoxFlow 0.3.0 is available.")
+    sec.mode._pick("notify")
+    flush()
+    assert sec.btn_check.toolTip() == "Asks GitHub now instead of waiting for the daily check."
 
 
 def test_check_now_finds_the_update_and_offers_the_dialog(demo):
@@ -242,7 +253,7 @@ def test_the_setup_guide_mentions_the_update_check_and_links_to_the_setting(qtbo
     assert ob.update_note.text().endswith("and installs it for you.")
     c.config.update_mode = "off"
     ob._fill_tips()
-    assert "does not check" in ob.update_note.text()
+    assert "only when you press Check now" in ob.update_note.text()
     ob.btn_updates.click()
     assert asked.settings == [("updates",)] and asked.finished == [(True,)] and c.config.onboarding_done
 

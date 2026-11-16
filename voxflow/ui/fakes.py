@@ -433,6 +433,8 @@ _DEMO_RELEASE = {
 _UPDATE_MANAGED = {"scoop": "Updates are managed by Scoop: run scoop update voxflow.",
                    "winget": "Updates are managed by winget: run winget upgrade blackknight75.VoxFlow.",
                    "source": "VoxFlow is running from source: update it with git pull.",
+                   "allusers": "VoxFlow is installed for all users, so it cannot update itself without administrator "
+                               "rights. Download the new version from the releases page.",
                    "portable": "This copy was not installed with the VoxFlow installer, so it cannot update itself. "
                                "Get the new version from the releases page."}
 # what the speed check measured on the preview's PC (an NVIDIA desktop); see Controller.device_info
@@ -850,8 +852,6 @@ class FakeController(QObject):
         self.update_changed.emit(self.update_info())
 
     def check_updates(self) -> bool:
-        if self.config.update_mode == "off":
-            raise ValueError("Update checks are off. Choose another update setting to check for updates.")
         u = self._update
         u.update(last_check=time.time(), last_ok=True, available=copy.deepcopy(_DEMO_RELEASE), error="",
                  last_result=f"VoxFlow {_DEMO_RELEASE['version']} is available.")
