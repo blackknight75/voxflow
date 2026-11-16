@@ -526,7 +526,8 @@ class FakeController(QObject):
         self._speed = {"state": "done", "done": 0, "total": 0, "model": "", "backend": "", "available": True,
                        "measured_at": time.time() - 3 * 86400}
         self._update = {"kind": "installer", "phase": "idle", "progress": None, "error": "",
-                        "last_check": time.time() - 5 * 3600, "last_ok": True, "last_result": "VoxFlow is up to date.",
+                        # a minute ago: "today" at any hour, even just after midnight
+                        "last_check": time.time() - 60, "last_ok": True, "last_result": "VoxFlow is up to date.",
                         "available": None, "skipped": False, "install_on_quit": False, "downloaded": False}
         self.quit_prepared = False
         self._speed_timer = QTimer(self)
