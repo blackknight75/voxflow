@@ -328,7 +328,13 @@ def parse_release(data) -> Release:
 
 _IMAGE_MD = re.compile(r"!\[[^\]]*\]\([^)]*\)")
 _LINK_MD = re.compile(r"\[([^\]]+)\]\((?:[^)\s]+)(?:\s+\"[^\"]*\")?\)")
-_TAG = re.compile(r"<[^>]{0,500}>")
+# real HTML elements only: a placeholder such as "VoxFlow/<version>" is text and stays (the dialog shows plain text,
+# so nothing it keeps is ever rendered)
+_HTML_ELEMENTS = ("a|abbr|audio|b|base|blockquote|body|br|button|canvas|center|code|dd|del|details|div|dl|dt|em|"
+                  "embed|font|form|h[1-6]|head|hr|html|i|iframe|img|input|ins|kbd|li|link|meta|noscript|object|ol|"
+                  "p|picture|pre|q|s|samp|script|section|small|source|span|strike|strong|style|sub|summary|sup|svg|"
+                  "table|tbody|td|template|textarea|tfoot|th|thead|title|tr|tt|u|ul|var|video|wbr")
+_TAG = re.compile(rf"</?(?:{_HTML_ELEMENTS})(?=[\s/>])[^>]{{0,500}}>", re.I)
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f​-‏‪-‮⁦-⁩]")
 
 

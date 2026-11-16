@@ -273,6 +273,13 @@ def test_release_notes_become_plain_text_without_images_html_or_link_targets():
     assert U.plain_notes(None) == ""
 
 
+def test_release_notes_keep_placeholders_that_are_not_html():
+    # v0.2.1's notes said "User-Agent VoxFlow/." because "<version>" was stripped as if it were a tag
+    text = U.plain_notes("with the User-Agent `VoxFlow/<version>`, run <path to exe> /S, a <-> b, 1 < 2 > 0\n"
+                         "<IMG SRC=x><Script>x</SCRIPT><br/><a href='https://e.com'>e</a><svg/onload=1>")
+    assert text == "with the User-Agent VoxFlow/<version>, run <path to exe> /S, a <-> b, 1 < 2 > 0\nxe"
+
+
 def test_checksums_are_read_like_sha256sum_writes_them():
     sums = f"{'A' * 64}  VoxFlow-Setup-1.0.0.exe\n{'b' * 64} *other.exe\n"
     assert U.parse_sums(sums, "VoxFlow-Setup-1.0.0.exe") == "a" * 64
