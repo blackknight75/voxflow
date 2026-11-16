@@ -921,6 +921,7 @@ class PopupMenu(QWidget):
     def set_items(self, items: list[dict]) -> None:
         self._items = items
         self._hover = -1
+        self.setAccessibleName("Menu")
         self._scroll = 0
         self._layout()
 
@@ -986,6 +987,13 @@ class PopupMenu(QWidget):
         if i != self._hover:
             self._hover = i
             self.update()
+            # The rows are painted, not widgets: the menu's accessible name follows the highlighted row, so UI
+            # Automation (a screen reader) reports the choice the arrow keys moved to.
+            it = self._items[i] if 0 <= i < len(self._items) else None
+            text = str(it.get("text") or "") if it else ""
+            if text and it.get("checked"):
+                text += ", selected"
+            self.setAccessibleName(text or "Menu")
 
     def _ensure_visible(self, i: int) -> None:
         if not (0 <= i < len(self._rects)):
@@ -1201,12 +1209,18 @@ class ChoiceButton(_Hover):
 
     def set_options(self, options, value) -> None:
         self.options, self.value = list(options), value
+        self._describe()
         self.updateGeometry()
         self.update()
 
     def set_value(self, value) -> None:
         self.value = value
+        self._describe()
         self.update()
+
+    def _describe(self) -> None:
+        """The current choice is painted; UI Automation (a screen reader) gets it as the description (HelpText)."""
+        self.setAccessibleDescription(self.label())
 
     def label(self) -> str:
         for o in self.options:
@@ -1246,6 +1260,7 @@ class ChoiceButton(_Hover):
 
     def _pick(self, v) -> None:
         self.value = v
+        self._describe()
         self.update()
         self.chosen.emit(v)
 
