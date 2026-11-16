@@ -16,7 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   downloaded on a metered connection. The installer is checked against the release's `SHA256SUMS.txt` before it
   runs. Copies installed with Scoop or winget, or run from source, only notify.
 - The update check is the one new network request: anonymous, once a day, to the GitHub Releases API of this
-  repository, with the User-Agent `VoxFlow/<version>`. *Off* sends nothing.
+  repository, with the User-Agent `VoxFlow/<version>`. *Off* sends nothing by itself; only *Check now* asks.
+  Switching to *Off* or skipping a version deletes the downloaded installer; at most one is ever kept.
 
 ### Changed
 

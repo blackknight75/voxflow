@@ -51,7 +51,7 @@ def status_text(info: dict) -> tuple[str, str]:
         return f"Restarting to install VoxFlow {version}…", "AMBER"
     parts, role = [], "TEXT_DIM"
     if info.get("mode") == "off":
-        parts.append("Update checks are off: VoxFlow never contacts GitHub.")
+        parts.append("Automatic checks are off: VoxFlow asks GitHub only when you press Check now.")
     if rel:
         line = f"VoxFlow {version} is available."
         if info.get("skipped"):
@@ -61,7 +61,7 @@ def status_text(info: dict) -> tuple[str, str]:
         elif info.get("mode") == "auto" and info.get("when") == "time" and info.get("downloaded"):
             line += f" It will be installed at {info.get('time')} when VoxFlow and the PC are idle."
         parts.append(line)
-    elif info.get("last_result") and info.get("mode") != "off":
+    elif info.get("last_result"):
         parts.append(str(info["last_result"]))
         if not info.get("last_ok"):
             role = "AMBER"
@@ -89,7 +89,8 @@ class UpdatesSection(Section):
         self.mode.chosen.connect(lambda v: page._set_or_resync("update_mode", v))
         self.mode_row = self.add(Row(
             "Updates", "VoxFlow asks GitHub once a day whether a new version is out. The request is anonymous: "
-                       "nothing about you or your PC is sent, and Off means no request at all.", self.mode,
+                       "nothing about you or your PC is sent. Off means no automatic request: VoxFlow asks only "
+                       "when you press Check now.", self.mode,
             icon="refresh"))
         box = QWidget()
         lay = QHBoxLayout(box)
@@ -146,8 +147,9 @@ class UpdatesSection(Section):
         text, role = status_text(info)
         self.status_row.set_sub(text, role)
         idle = info["phase"] == "idle"
-        self.btn_check.setEnabled(info["mode"] != "off" and idle)
-        self.btn_check.setToolTip("Choose another update setting first." if info["mode"] == "off" else "")
+        self.btn_check.setEnabled(idle)
+        self.btn_check.setToolTip("Asks GitHub once, now. Automatic checks stay off." if info["mode"] == "off"
+                                  else "Asks GitHub now instead of waiting for the daily check.")
         self.btn_see.setVisible(bool(info.get("available")))
         downloading = info["phase"] == "downloading"
         self.bar.setVisible(downloading)

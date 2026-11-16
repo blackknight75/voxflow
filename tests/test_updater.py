@@ -524,33 +524,44 @@ def settle(up, timeout=3000):
     up.qtbot.waitUntil(lambda: up.phase in ("idle", "waiting", "restarting"), timeout=timeout)
 
 
-def test_off_means_no_update_traffic_at_all(tmp_path, qtbot, no_sockets):
-    up = U.Updater(tmp_path, {"update_mode": "off", "update_install_when": "quit", "update_time": "03:00"}.__getitem__,
-                   lambda: False, kind="installer", folder=tmp_path / "dl")       # the real Http class
+def test_off_means_no_update_traffic_unless_check_now_is_clicked(tmp_path, qtbot, no_sockets):
+    settings = {"update_mode": "off", "update_install_when": "quit", "update_time": "03:00"}
+    up = U.Updater(tmp_path, settings.__getitem__, lambda: False, kind="installer",
+                   folder=tmp_path / "dl")                                  # the real Http class
     up.start()
-    assert not up._check_timer.isActive() and not up._slot_timer.isActive()
-    assert up.check(user=True) is False and up.phase == "idle"
+    assert not up._check_timer.isActive() and not up._slot_timer.isActive(), "no startup or daily check"
+    assert up.check(user=False) is False and up.phase == "idle", "an automatic check never runs while Off"
     up._check_timer.timeout.emit()                     # even a timer that fired anyway does nothing
     qtbot.wait(50)
     assert no_sockets == [] and up.state.last_check == 0
+    # the click is the user asking: exactly one request, to the API, and Off stays off afterwards
+    up._http = http = github()
+    assert up.check(user=True) is True
+    qtbot.waitUntil(lambda: up.phase == "idle", timeout=3000)
+    assert http.urls() == [API] and up.info()["available"]["version"] == "0.3.0"
+    assert not up._check_timer.isActive(), "a manual check arms no automatic one"
+    assert [u for u in http.urls() if "Setup" in u or "SHA256" in u] == [], "nothing is downloaded by itself"
+    assert no_sockets == []
     up.close()
 
 
-def test_off_through_the_controller_refuses_check_now_and_starts_no_timer(tmp_path, qtbot, monkeypatch, no_sockets):
+def test_off_through_the_controller_checks_only_on_click(tmp_path, qtbot, monkeypatch, no_sockets):
     from tests.controller_rig import make_rig
     http = github()
     rig = make_rig(tmp_path, qtbot, monkeypatch, config={"update_mode": "off"},
                    updates=lambda d, get, busy: U.Updater(d, get, busy, http=http, kind="installer",
                                                           folder=tmp_path / "dl"))
     try:
-        with pytest.raises(ValueError, match="Update checks are off"):
-            rig.c.check_updates()
+        assert not rig.c.updates._check_timer.isActive() and http.requests == []
+        assert rig.c.check_updates() is True               # "Check now"
+        rig.wait(lambda: rig.c.update_info()["phase"] == "idle")
+        assert http.urls() == [API] and rig.spy.of("update_available")
         assert not rig.c.updates._check_timer.isActive()
         rig.c.set("update_mode", "notify")             # on again: a check is armed (after the startup delay)
         assert rig.c.updates._check_timer.isActive() and rig.c.updates._check_timer.interval() >= 90_000
         rig.c.set("update_mode", "off")
         assert not rig.c.updates._check_timer.isActive()
-        assert http.requests == [] and no_sockets == []
+        assert http.urls() == [API] and no_sockets == []
     finally:
         rig.close()
 
@@ -1145,3 +1156,99 @@ def test_a_release_date_that_cannot_be_read_is_left_out():
     from voxflow.ui import updates as UP
     assert UP._published({"published": "soon"}) == ""
     assert UP._published({"published": "2026-12-01T10:00:00Z"}) == " Released December 1, 2026."
+
+
+# =========================================================================== Off and Skip delete; the folder stays bounded
+def _downloaded(tmp_path, qtbot, **kw):
+    up = make(tmp_path, qtbot, **kw)
+    up.check()
+    settle(up)
+    up.install("quit")
+    qtbot.waitUntil(lambda: up.info()["downloaded"], timeout=3000)
+    return up
+
+
+def test_switching_to_off_deletes_the_download_and_cancels_every_pending_install(tmp_path, qtbot):
+    up = _downloaded(tmp_path, qtbot, busy=True)
+    up.install("now")
+    assert up.phase == "waiting" and up.info()["install_on_quit"]
+    up.settings["update_mode"] = "off"
+    up.settings_changed("update_mode")
+    info = up.info()
+    assert list((tmp_path / "dl").iterdir()) == [], "deleted at once"
+    assert not info["downloaded"] and not info["install_on_quit"] and info["phase"] == "idle"
+    assert not up._install_timer.isActive() and not up._slot_timer.isActive()
+    up.flags["busy"] = False
+    up._install_tick()
+    assert up.events["restart"] == 0 and up.on_exit(user_quit=True) is False and up.launched == []
+    again = make(tmp_path, qtbot, mode="off")             # and nothing comes back after a restart
+    assert not again.info()["downloaded"] and again.on_exit(user_quit=True) is False
+    up.close()
+    again.close()
+
+
+def test_switching_to_off_during_a_download_leaves_no_part_behind(tmp_path, qtbot):
+    up, gate = gated(tmp_path, qtbot)
+    up.install("quit")
+    assert up.phase == "downloading"
+    up.settings["update_mode"] = "off"
+    up.settings_changed("update_mode")
+    gate.release()
+    qtbot.waitUntil(lambda: up.phase == "idle", timeout=3000)
+    assert not (tmp_path / "dl").exists() or list((tmp_path / "dl").iterdir()) == []
+    assert not up.info()["downloaded"] and not up.info()["install_on_quit"]
+    up.close()
+
+
+def test_skipping_deletes_the_file_of_that_version(tmp_path, qtbot):
+    up = _downloaded(tmp_path, qtbot)
+    up.skip()
+    assert list((tmp_path / "dl").iterdir()) == [] and not up.info()["downloaded"]
+    up.close()
+
+
+def test_the_download_folder_keeps_at_most_the_current_installer(tmp_path, qtbot):
+    up = _downloaded(tmp_path, qtbot)
+    up.close()
+    folder = tmp_path / "dl"
+    for junk in ("VoxFlow-Setup-0.2.5.exe", "VoxFlow-Setup-0.2.9.exe.part", "install.log", "random.tmp"):
+        (folder / junk).write_bytes(b"x" * 100)
+    (folder / "leftover").mkdir()
+    again = make(tmp_path, qtbot)                         # VoxFlow starts again: the folder is swept
+    assert sorted(p.name for p in folder.iterdir()) == ["VoxFlow-Setup-0.3.0.exe"]
+    assert again.info()["downloaded"] and again.info()["install_on_quit"]
+    again.close()
+
+
+def test_a_newer_release_replaces_an_older_download(tmp_path, qtbot):
+    up = _downloaded(tmp_path, qtbot)
+    up._http = github("0.4.0")
+    up.check(user=False)
+    settle(up)
+    assert up.info()["available"]["version"] == "0.4.0"
+    assert list((tmp_path / "dl").iterdir()) == [], "the 0.3.0 installer is gone"
+    assert not up.info()["downloaded"] and not up.info()["install_on_quit"]
+    up.install("quit")
+    qtbot.waitUntil(lambda: up.info()["downloaded"], timeout=3000)
+    assert sorted(p.name for p in (tmp_path / "dl").iterdir()) == ["VoxFlow-Setup-0.4.0.exe"]
+    up.close()
+
+
+def test_after_the_update_even_setups_log_is_removed(tmp_path, qtbot):
+    up = _downloaded(tmp_path, qtbot)
+    assert up.on_exit(user_quit=True)
+    (tmp_path / "dl" / "install.log").write_text("Setup log", encoding="utf-8")   # what Setup writes
+    up.close()
+    after = make(tmp_path, qtbot, version="0.3.0")
+    assert list((tmp_path / "dl").iterdir()) == []
+    after.close()
+
+
+def test_a_fake_controller_never_touches_the_real_download_folder(tmp_path, qtbot, monkeypatch):
+    from tests.controller_rig import make_rig
+    rig = make_rig(tmp_path, qtbot, monkeypatch)
+    try:
+        assert rig.c.updates.folder == rig.data_dir / "update-offline"
+        assert rig.c.updates.folder != U.download_folder()
+    finally:
+        rig.close()

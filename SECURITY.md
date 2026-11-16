@@ -14,9 +14,10 @@ VoxFlow runs fully on your PC. Audio, transcripts, the dictionary, snippets and 
 (under `%APPDATA%\VoxFlow`); there is no account, no telemetry and no cloud service. The only network access
 is downloading the speech and language models from Hugging Face the first time they are needed (and, if you
 opt in, the GPU runtime packages from PyPI), plus the update check: an anonymous daily HTTPS request to the
-GitHub Releases API of this repository, which can be switched off (Settings > Updates > Off). An update installer
-is only accepted from this repository's releases over HTTPS and only when its SHA-256 matches the release's
-`SHA256SUMS.txt`. The installer is not code-signed, so that check proves integrity, not origin.
+GitHub Releases API of this repository, which can be switched off (Settings > Updates > Off: then only an
+explicit *Check now* contacts GitHub). An update installer is only accepted from this repository's releases over
+HTTPS and only when its SHA-256 matches the release's `SHA256SUMS.txt`. The installer is not code-signed, so
+that check proves integrity, not origin.
 
 Things that are especially relevant to report:
 

@@ -2,7 +2,7 @@
 
 The one network call VoxFlow makes besides the model download. It is an anonymous HTTPS GET with the generic
 User-Agent ``VoxFlow/<version>``: no ids, no cookies, no telemetry. With the setting "Off" nothing here touches
-the network at all.
+the network by itself (no check at start, none daily): only a click on "Check now" asks GitHub, once.
 
 * Source: ``https://api.github.com/repos/blackknight75/voxflow/releases/latest`` (GitHub returns the newest
   *published* release only: drafts and pre-releases are never offered).
@@ -750,10 +750,32 @@ class Updater(QObject):
         """After an update the old installer (and any reminder about it) is no longer needed."""
         st = self.state
         if st.downloaded and not is_newer(st.downloaded, self.version):
-            clean_downloads(self.folder)
             st.downloaded = st.sha256 = ""
         if st.install_on_quit and not is_newer(st.install_on_quit, self.version):
             st.install_on_quit = ""
+        self._tidy()
+
+    def _tidy(self, keep_latest: bool = True) -> None:
+        """Keep the download folder bounded: at most the installer of the newest release (and its ``.part`` while it
+        downloads). Everything else, such as an older installer, Setup's log of an earlier run or a file whose release
+        was skipped, is deleted."""
+        rel = self.latest()
+        keep = set()
+        if keep_latest and rel is not None and rel.installer and self.state.skipped != rel.version:
+            keep = {rel.installer, rel.installer + ".part"}
+        if self.state.downloaded and (rel is None or self.state.downloaded != rel.version or not keep):
+            self.state.downloaded = self.state.sha256 = ""
+        if self.folder.is_dir():
+            for item in self.folder.iterdir():
+                if item.name not in keep:
+                    _remove(item)
+
+    def _drop_download(self) -> None:
+        """Cancel a download under way and delete what was downloaded (Off, Skip this version)."""
+        if self.phase == "downloading":
+            self._cancel.set()                         # the thread stops at the next block; see _on_download_failed
+        clean_downloads(self.folder)
+        self.state.downloaded = self.state.sha256 = ""
 
     # ------------------------------------------------------------------ lifecycle
     def start(self) -> None:
@@ -779,12 +801,14 @@ class Updater(QObject):
 
     def settings_changed(self, key: str) -> None:
         if key == "update_mode":
-            if self.mode == "off":                     # Off: no network, nothing armed
-                self._cancel.set()
+            if self.mode == "off":                     # Off: no automatic traffic, nothing pending, nothing kept
+                self._drop_download()
                 self._install_timer.stop()
+                self._slot_timer.stop()
                 if self.phase == "waiting":
                     self.phase = "idle"
                 self.state.install_on_quit = ""
+                self._pending_launch = None
                 self._save()
             self._arm_check(first=True)
         if key in ("update_mode", "update_install_when", "update_time"):
@@ -795,8 +819,9 @@ class Updater(QObject):
 
     # ------------------------------------------------------------------ check
     def check(self, user: bool = True) -> bool:
-        """Ask GitHub for the newest release in the background. False when not started (Off, or already busy)."""
-        if self._closed or self.mode == "off":
+        """Ask GitHub for the newest release in the background. ``user``: "Check now" was clicked, which works in
+        every mode; an automatic check (``user=False``) never runs while the mode is Off. False when not started."""
+        if self._closed or (self.mode == "off" and not user):
             return False
         if self.phase != "idle":
             if not user and self._automatic:           # the daily check came during a download: look again later
@@ -831,6 +856,7 @@ class Updater(QObject):
         st = self.state
         st.last_check, st.last_ok = self._clock(), True
         st.latest = rel.to_dict()
+        self._tidy()                                   # a newer release replaces an older download
         newer = is_newer(rel.version, self.version)
         st.last_result = f"VoxFlow {rel.version} is available." if newer else "VoxFlow is up to date."
         log.info("update check: newest release %s, running %s", rel.version, self.version)
@@ -880,10 +906,7 @@ class Updater(QObject):
             return
         st = self.state
         st.skipped, st.install_on_quit = rel.version, ""
-        if self.phase == "downloading":
-            self._cancel.set()
-        clean_downloads(self.folder)
-        st.downloaded = st.sha256 = ""
+        self._drop_download()
         self._install_timer.stop()
         if self.phase == "waiting":
             self.phase = "idle"
@@ -955,6 +978,8 @@ class Updater(QObject):
         self.phase, self.progress = "idle", None
         if isinstance(exc, Cancelled):
             self._after_download = ""
+            self._tidy(keep_latest=self.mode != "off")  # Off or Skip: nothing of it is kept (nor the .part)
+            self._save()
             self._emit()
             return
         self.error = str(exc) if isinstance(exc, UpdateError) else "The update could not be downloaded."
