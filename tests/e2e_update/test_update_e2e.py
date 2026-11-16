@@ -6,6 +6,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import os
 import shutil
 import time
 
@@ -227,6 +228,24 @@ def test_3_auto_on_a_metered_connection_waits(env):
     env.qtbot.wait(500)
     assert env.sc.count(H.ASSET_HOST) == 0 and app.files() == []
     assert "metered" in app.c.update_info()["error"]
+
+
+@pytest.mark.skipif(os.environ.get("VOXFLOW_REAL_METERED") not in ("on", "off"),
+                    reason="set VOXFLOW_REAL_METERED=on after marking the network connection metered in Windows "
+                           "Settings (=off after switching it back) to test with the real INetworkCostManager")
+def test_3_auto_with_the_real_metered_setting(env):
+    expect = os.environ["VOXFLOW_REAL_METERED"] == "on"
+    assert U.connection_metered() is expect, "Windows does not report the connection the way the variable says"
+    app = env.app(mode="auto", when="quit")                 # metered=None: the real Windows API decides
+    app.wait(lambda: api_calls(env) == 1 and app.u.phase == "idle")
+    env.qtbot.wait(500)
+    if expect:
+        assert env.sc.count(H.ASSET_HOST) == 0 and app.files() == []
+        assert "metered" in app.c.update_info()["error"]
+    else:
+        app.wait(lambda: any(f.endswith(".exe") for f in app.files()), timeout=60000)
+    env.note("real metered", f"connection_metered()={expect}: "
+             + ("no download, told the user" if expect else "downloaded by itself"))
 
 
 def test_3_auto_at_a_set_time_only_when_idle_and_not_dictating(env, monkeypatch):
