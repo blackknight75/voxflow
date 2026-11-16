@@ -218,12 +218,23 @@ def tray_dialog(env, app, w, quiet):
     title, message = shown[0][0], shown[0][1]
     assert title == "VoxFlow" and message.startswith("VoxFlow 0.3.0 is available.")
     assert not w.isVisible(), "the window was hidden: the notification went to the tray"
-    found = D.uia("toast", "VoxFlow 0.3.0 is available", timeout_ms=7000, invoke=True)
-    how = "UIA Invoke on the Windows notification" if found.get("done") else ""
-    if how:
+    code, state = D.notification_state()
+    found = {}
+    if code == 5:                                          # QUNS_ACCEPTS_NOTIFICATIONS: the shell shows it
+        found = D.uia("toast", "VoxFlow 0.3.0 is available", timeout_ms=7000, invoke=False)
+        if found.get("found"):
+            rect = found["element"].get("rect")
+            pic = D.shot_rect(f"tray-notification{TAG}", rect) if rect else None
+            found = D.uia("toast", "VoxFlow 0.3.0 is available", timeout_ms=3000, invoke=True)
+            found["shot"] = str(pic)
+    if found.get("done"):
+        how = f"UIA Invoke on the Windows notification ({found['element'].get('name')!r}; shot {found.get('shot')})"
         app.wait(lambda: w._modal is not None, 8000)
+    elif code != 5:
+        how = f"messageClicked emitted: Windows is not showing notifications now: {state}"
+        tray.icon.messageClicked.emit()
     else:
-        how = (f"messageClicked emitted (Windows exposed no notification to UIA; windows scanned: "
+        how = (f"messageClicked emitted ({state}, but no notification was exposed to UIA; windows scanned: "
                f"{found.get('scanned_classes')}; found={found.get('found')})")
         tray.icon.messageClicked.emit()
     app.wait(lambda: w._modal is not None and w._modal.isVisible())

@@ -113,7 +113,11 @@ switch ($Action) {
         $hit = $null
         $scanned = @()
         do {
-            foreach ($w in @($A::RootElement.FindAll($TS::Children, $True_))) {
+            # the toast host (a Windows.UI.Core.CoreWindow "New notification" of the shell) first: a notification is
+            # up for about 5 s, and a full scan of a browser's tree can take longer than that
+            $all = @($A::RootElement.FindAll($TS::Children, $True_))
+            $hosts = @($all | Where-Object { $_.Current.ClassName -in @('Windows.UI.Core.CoreWindow', 'XamlWindow') })
+            foreach ($w in @($hosts + @($all | Where-Object { $hosts -notcontains $_ }))) {
                 try {
                     if ($w.Current.ProcessId -eq $ProcessId) { continue }
                     if (-not ($scanned -contains $w.Current.ClassName)) { $scanned += $w.Current.ClassName }
