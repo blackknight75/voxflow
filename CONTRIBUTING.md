@@ -29,6 +29,11 @@ test that reaches the real clipboard, keyboard, microphone, registry or `%APPDAT
 `scripts/` that use real hardware (`mic_check.py`, `e2e_selftest.py`, `live_e2e.py`, ...) are optional and are
 described in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
+The app-update end-to-end tests (`tests/e2e_update`: a local fake GitHub over real TLS, a stub installer exe
+started for real, the smoke script rehearsed against a fake Inno Setup; about 4 minutes, needs `openssl` from Git
+for Windows and PyInstaller) are skipped unless you set `VOXFLOW_UPDATE_E2E=1`. Add `VOXFLOW_UPDATE_LIVE=1` for
+the two tests that make anonymous GETs to the real GitHub API. They never install VoxFlow.
+
 Maintainers: the manual pre-release checks and the release steps are in [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md).
 
 ## Building the installer

@@ -72,6 +72,8 @@ IDLE_BEFORE_SCHEDULED_S = 600                # ...and only after 10 minutes with
 INSTALL_POLL_MS = 2000                       # "Install now" looks this often whether VoxFlow is idle yet
 SCHEDULE_POLL_MS = 60_000
 RETRY_BUSY_MS = 15 * 60_000                  # a daily check that found a download under way tries again this soon
+CLEANUP_RETRY_MS = 60_000                    # the installer that just ran may still be locked when the new version starts
+CLEANUP_TRIES = 30
 ASSET_HOSTS = ("objects.githubusercontent.com", "release-assets.githubusercontent.com")
 SUMS_NAME = "SHA256SUMS.txt"
 STATE_FILE = "updates.json"
@@ -455,11 +457,17 @@ def _remove(path: Path) -> None:
         log.warning("could not delete %s: %s", path.name, exc.strerror or exc)
 
 
-def clean_downloads(folder: Path) -> None:
-    """Delete everything an earlier update left behind (after a skip, or once the new version runs)."""
+def clean_downloads(folder: Path) -> bool:
+    """Delete everything an earlier update left behind (after a skip, or once the new version runs). False when
+    something could not be deleted (e.g. the installer is still running and Windows keeps its file locked)."""
     if folder.is_dir():
         for item in folder.iterdir():
             _remove(item)
+        try:
+            return not any(folder.iterdir())
+        except OSError:
+            return False
+    return True
 
 
 # =========================================================================== how this copy was installed
@@ -707,6 +715,11 @@ class Updater(QObject):
         self._slot_timer = QTimer(self)
         self._slot_timer.setInterval(SCHEDULE_POLL_MS)
         self._slot_timer.timeout.connect(self._slot_tick)
+        self._cleanup_timer = QTimer(self)
+        self._cleanup_timer.setSingleShot(True)
+        self._cleanup_timer.setInterval(CLEANUP_RETRY_MS)
+        self._cleanup_timer.timeout.connect(self._forget_installed)
+        self._cleanup_tries = 0
         self._sig.connect(self._on_thread)
         self._forget_installed()
 
@@ -749,9 +762,15 @@ class Updater(QObject):
     def _forget_installed(self) -> None:
         """After an update the old installer (and any reminder about it) is no longer needed."""
         st = self.state
-        if st.downloaded and not is_newer(st.downloaded, self.version):
-            clean_downloads(self.folder)
-            st.downloaded = st.sha256 = ""
+        if st.downloaded and not is_newer(st.downloaded, self.version) and self.phase != "downloading":
+            # Inno Setup starts the new VoxFlow while its own exe (in the download folder) is still running, so
+            # the file is often locked right now: keep the note and try again a little later.
+            if clean_downloads(self.folder):
+                st.downloaded = st.sha256 = ""
+                self._save()
+            elif not self._closed and self._cleanup_tries < CLEANUP_TRIES:
+                self._cleanup_tries += 1
+                self._cleanup_timer.start()
         if st.install_on_quit and not is_newer(st.install_on_quit, self.version):
             st.install_on_quit = ""
 
@@ -763,7 +782,7 @@ class Updater(QObject):
 
     def close(self) -> None:
         self._closed = True
-        for t in (self._check_timer, self._install_timer, self._slot_timer):
+        for t in (self._check_timer, self._install_timer, self._slot_timer, self._cleanup_timer):
             t.stop()
         self._cancel.set()
 

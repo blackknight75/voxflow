@@ -224,7 +224,7 @@ jobs:
       #   1 of 2  an entry that belongs to ANOTHER copy of VoxFlow must be left alone;
       #   2 of 2  the entry of THIS install must be removed.
       # Windows PowerShell 5.1 ("powershell"), the shell a spare PC has, so the script runs here as it does by hand.
-      - name: Installer test 1 of 2 (install, run the installed app, uninstall; a foreign login entry is kept)
+      - name: Installer test 1 of 2 (install, run the installed app, update it in place, uninstall; a foreign login entry is kept)
         if: env.INSTALLER_TEST == 'run'
         shell: powershell
         timeout-minutes: 50
@@ -234,7 +234,7 @@ jobs:
           MIN_BUILD: ${{ steps.winver.outputs.min_build }}
         run: |
           & .github\scripts\installer_smoke.ps1 -Installer "dist\$env:INSTALLER" -ExpectedVersion $env:VERSION `
-            -MinBuild $env:MIN_BUILD -RunValue Foreign -HubCheck `
+            -MinBuild $env:MIN_BUILD -RunValue Foreign -HubCheck -UpdatePath `
             -LogDir "$env:RUNNER_TEMP\installer-test\1-foreign" -IUnderstandThisInstalls
           exit $LASTEXITCODE
 

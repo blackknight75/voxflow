@@ -1145,3 +1145,50 @@ def test_a_release_date_that_cannot_be_read_is_left_out():
     from voxflow.ui import updates as UP
     assert UP._published({"published": "soon"}) == ""
     assert UP._published({"published": "2026-12-01T10:00:00Z"}) == " Released December 1, 2026."
+
+
+def test_a_still_running_installer_is_deleted_once_windows_releases_it(tmp_path, qtbot, monkeypatch):
+    """Found by tests/e2e_update: Inno Setup's [Run] entry starts the new VoxFlow while Setup (the downloaded exe)
+    is still running, so the first delete fails. The note must survive and the delete must be retried."""
+    monkeypatch.setattr(U, "CLEANUP_RETRY_MS", 50)
+    folder = tmp_path / "dl"
+    folder.mkdir()
+    exe = folder / "VoxFlow-Setup-0.3.0.exe"
+    exe.write_bytes(b"MZ")
+    U.UpdateState(downloaded="0.3.0", sha256="ab" * 32).save(tmp_path / "data" / U.STATE_FILE) \
+        if (tmp_path / "data").mkdir() is None else None
+    locked = {"on": True}
+    real_unlink = Path.unlink
+
+    def unlink(self, missing_ok=False):
+        if locked["on"] and self.name == exe.name:
+            raise PermissionError(32, "The process cannot access the file because it is being used")
+        return real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    assert U.clean_downloads(folder) is False
+    up = make(tmp_path, qtbot, version="0.3.0")            # the new version starts while Setup still runs
+    assert exe.exists() and up.state.downloaded == "0.3.0", "not forgotten while the file is still there"
+    assert U.UpdateState.load(tmp_path / "data" / U.STATE_FILE).downloaded == "0.3.0"
+    locked["on"] = False                                   # Setup has exited
+    qtbot.waitUntil(lambda: not exe.exists(), timeout=3000)
+    assert up.state.downloaded == "" and U.UpdateState.load(tmp_path / "data" / U.STATE_FILE).downloaded == ""
+    assert U.clean_downloads(folder) is True and U.clean_downloads(tmp_path / "missing") is True
+
+
+def test_the_cleanup_retry_never_touches_a_download_under_way(tmp_path, qtbot, monkeypatch):
+    (tmp_path / "data").mkdir()
+    U.UpdateState(downloaded="0.2.0").save(tmp_path / "data" / U.STATE_FILE)
+    monkeypatch.setattr(U, "clean_downloads", lambda folder: False)
+    up = make(tmp_path, qtbot, version="0.2.0")
+    assert up._cleanup_timer.isActive()
+    calls = []
+    monkeypatch.setattr(U, "clean_downloads", lambda folder: calls.append(folder) or True)
+    up.phase = "downloading"                               # a newer version is being fetched into the folder
+    up._forget_installed()
+    assert calls == [] and up.state.downloaded == "0.2.0"
+    up.phase = "idle"
+    up._forget_installed()
+    assert calls and up.state.downloaded == ""
+    up.close()
+    assert not up._cleanup_timer.isActive()

@@ -17,6 +17,15 @@
          The keyboard hook and the clipboard need an interactive desktop, so their result is reported and
          only fails the run with -StrictDesktop. -HubCheck adds the app's own tiny download from the model
          hub (VOXFLOW_SELFTEST_HUB=1: TLS and the cache folder as in a first run; needs internet).
+      4b. -UpdatePath: the in-app update, as voxflow/updater.py runs it. Twice: the installed VoxFlow is started
+         (--fake --no-hook, a temp APPDATA, HF_HUB_OFFLINE=1, VOXFLOW_UPDATES=0: no download, no update check)
+         and, while it runs, the SAME installer is run again with exactly the arguments
+         updater.installer_command(path, relaunch) builds:
+             /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /RELAUNCH=1|0 /LOG=<file>
+         Checked: Setup exits 0 within the timeout and its log says the install succeeded; the running copy was
+         closed (Restart Manager, CloseApplications=force); with /RELAUNCH=1 a new VoxFlow.exe from the install
+         folder is running afterwards, with /RELAUNCH=0 none is (for 20 s). Every VoxFlow process this step
+         started is stopped again.
       5. A "VoxFlow" value is written to the HKCU Run key, as the app's "Launch at login" switch would:
            -RunValue Owned    "<install folder>\VoxFlow.exe" --autostart     -> the uninstaller must remove it
            -RunValue Foreign  "<install folder>-other\VoxFlow.exe" --autostart (another copy's entry)
@@ -33,6 +42,10 @@
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File .github\scripts\installer_smoke.ps1 `
         -Installer dist\VoxFlow-Setup-0.2.0.exe -RunValue Owned -IUnderstandThisInstalls
+
+.EXAMPLE
+    powershell -ExecutionPolicy Bypass -File .github\scripts\installer_smoke.ps1 `
+        -Installer dist\VoxFlow-Setup-0.2.0.exe -RunValue Foreign -UpdatePath -IUnderstandThisInstalls
 #>
 [CmdletBinding()]
 param(
@@ -48,6 +61,9 @@ param(
     [switch]$HubCheck,
     [switch]$StrictDesktop,
     [switch]$SkipSelftest,
+    [switch]$UpdatePath,
+    [int]$UpdateTimeoutSec = 1800,
+    [int]$RelaunchWaitSec = 120,
     [switch]$IUnderstandThisInstalls,
     # The real locations. Only a rehearsal of this script against a fake installer changes them.
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\VoxFlow'),
@@ -165,6 +181,97 @@ function Get-SelftestSteps([string]$Text) {
         elseif ($line -match '^\[FAIL\] (.+?): (.*)$') { $steps[$Matches[1]] = $Matches[2] }
     }
     return $steps
+}
+
+function Get-VoxFlowProcesses([string]$ExePath) {
+    # the VoxFlow.exe processes started from $ExePath (the install folder), not other copies
+    $found = @()
+    foreach ($p in @(Get-Process -Name 'VoxFlow' -ErrorAction SilentlyContinue)) {
+        $path = $null
+        try { $path = $p.Path } catch { $path = $null }
+        if ($path -and ($path -ieq $ExePath)) { $found += $p }
+    }
+    return $found
+}
+
+function Stop-VoxFlowProcesses([string]$ExePath) {
+    foreach ($p in (Get-VoxFlowProcesses $ExePath)) {
+        try { Stop-Process -Id $p.Id -Force -ErrorAction Stop }
+        catch { Write-Info "could not stop VoxFlow ($($p.Id)): $($_.Exception.Message)" }
+    }
+    $deadline = (Get-Date).AddSeconds(30)
+    while ((@(Get-VoxFlowProcesses $ExePath).Count -gt 0) -and ((Get-Date) -lt $deadline)) { Start-Sleep -Milliseconds 500 }
+}
+
+function Test-UpdatePath([bool]$Relaunch) {
+    # The in-app update (voxflow/updater.py): Setup runs over a running VoxFlow with the updater's own arguments.
+    $flag = 0
+    if ($Relaunch) { $flag = 1 }
+    $tag = "relaunch=$flag"
+    $log = Join-Path $LogDir ("update-relaunch{0}.log" -f $flag)
+    $appData = Join-Path $LogDir ("update-appdata-{0}" -f $flag)
+    New-Item -ItemType Directory -Force -Path $appData | Out-Null
+    # what the running copy and (through Setup) the relaunched one get: nothing downloads, nothing checks GitHub
+    $safeEnv = @{ APPDATA = $appData; HF_HUB_CACHE = (Join-Path $LogDir 'hf-cache'); HF_HUB_OFFLINE = '1'
+                  HF_HUB_DISABLE_TELEMETRY = '1'; VOXFLOW_UPDATES = '0'; VOXFLOW_SPEED_CHECK = '0'
+                  PYINSTALLER_RESET_ENVIRONMENT = '1' }
+    Stop-VoxFlowProcesses $exe
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $exe
+    $psi.Arguments = '--fake --no-hook'
+    $psi.UseShellExecute = $false
+    $psi.WorkingDirectory = $env:TEMP
+    $psi.EnvironmentVariables['PATH'] = ('{0}\System32;{0}' -f $env:SystemRoot)
+    foreach ($key in $safeEnv.Keys) { $psi.EnvironmentVariables[$key] = [string]$safeEnv[$key] }
+    $running = [System.Diagnostics.Process]::Start($psi)
+    Start-Sleep -Seconds 15                                   # past the start-up: the tray, the lock file
+    $alive = -not $running.HasExited
+    Add-Check "update path ($tag): the installed VoxFlow is running before the update" $alive "pid $($running.Id)"
+    if (-not $alive) {
+        Write-Info "VoxFlow exited early with code $($running.ExitCode); see $appData\VoxFlow\logs"
+        return
+    }
+    $oldPid = $running.Id
+
+    # exactly updater.installer_command(path, relaunch, log_path)
+    $arguments = ('/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /RELAUNCH={0} /LOG="{1}"' -f $flag, $log)
+    Write-Info "update path ($tag): $(Split-Path -Leaf $Installer) $arguments"
+    $r = Invoke-Program -File $Installer -Arguments $arguments -TimeoutSec $UpdateTimeoutSec -Bare -ExtraEnv $safeEnv
+    if ($r.TimedOut) {
+        Add-Check "update path ($tag): Setup finished" $false "no exit after $UpdateTimeoutSec s; the process tree was killed"
+        Stop-VoxFlowProcesses $exe
+        return
+    }
+    Add-Check "update path ($tag): Setup finished" ($r.ExitCode -eq 0) "exit code $($r.ExitCode) after $($r.Seconds) s"
+    $logText = ''
+    if (Test-Path -LiteralPath $log) { $logText = [string](Get-Content -LiteralPath $log -Raw) }
+    Add-Check "update path ($tag): the Setup log says the install succeeded" ($logText -match 'Installation process succeeded') $log
+    $shown = [string](Get-ItemProperty -LiteralPath $UninstallKey).DisplayVersion
+    Add-Check "update path ($tag): DisplayVersion is the release version" ($shown -eq $ExpectedVersion) "'$shown'"
+
+    $closed = $running.WaitForExit(30000)
+    Add-Check "update path ($tag): Setup closed the running VoxFlow" $closed "pid $oldPid"
+
+    # Setup starts VoxFlow ("nowait") just before it exits: give it time to appear
+    $wait = $RelaunchWaitSec
+    if (-not $Relaunch) { $wait = 20 }
+    $deadline = (Get-Date).AddSeconds($wait)
+    $new = @()
+    while ((Get-Date) -lt $deadline) {
+        $new = @(Get-VoxFlowProcesses $exe | Where-Object { $_.Id -ne $oldPid })
+        if ($Relaunch -and $new.Count -gt 0) { break }
+        Start-Sleep -Milliseconds 500
+    }
+    $pids = ($new | ForEach-Object { $_.Id }) -join ', '
+    if ($Relaunch) {
+        Add-Check "update path ($tag): VoxFlow was started again" ($new.Count -gt 0) "new pid(s): '$pids' within $wait s"
+    }
+    else {
+        Add-Check "update path ($tag): VoxFlow was NOT started again" ($new.Count -eq 0) "new pid(s): '$pids' within $wait s"
+    }
+    Stop-VoxFlowProcesses $exe
+    Add-Check "update path ($tag): no VoxFlow process is left" (@(Get-VoxFlowProcesses $exe).Count -eq 0)
 }
 
 # ------------------------------------------------------------------------------------------- may this run?
@@ -304,6 +411,15 @@ try {
         }
     }
 
+    # --------------------------------------------------------------------------------------- 4b. the in-app update
+    if ($UpdatePath) {
+        Test-UpdatePath $true
+        Test-UpdatePath $false
+        foreach ($file in @($exe, $console, $uninstaller)) {
+            Add-Check "after the update: $(Split-Path -Leaf $file)" (Test-Path -LiteralPath $file -PathType Leaf) $file
+        }
+    }
+
     # --------------------------------------------------------------------------------------- 5. the login entry
     if ($RunValue -eq 'Owned') { $target = $exe }
     else { $target = Join-Path ($InstallDir.TrimEnd('\') + '-other') 'VoxFlow.exe' }
@@ -363,6 +479,7 @@ catch {
 }
 finally {
     # put back what this script itself added (never anything else)
+    try { Stop-VoxFlowProcesses $exe } catch { Write-Host "WARN  could not stop VoxFlow: $($_.Exception.Message)" }
     try {
         if ($null -ne $wroteRun -and (Get-RunCommand) -eq $wroteRun) {
             Remove-ItemProperty -LiteralPath $RunKey -Name $RunName -ErrorAction SilentlyContinue
