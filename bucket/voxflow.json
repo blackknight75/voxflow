@@ -12,7 +12,7 @@
     "architecture": {
         "64bit": {
             "url": "https://github.com/blackknight75/voxflow/releases/download/v0.2.1/VoxFlow-Setup-0.2.1.exe",
-            "hash": "0000000000000000000000000000000000000000000000000000000000000000"
+            "hash": "613a90e4d14cc60ac1785fa9e0151be9d8d7c406c579b53e0822ba64f9f982c0"
         }
     },
     "innosetup": true,
