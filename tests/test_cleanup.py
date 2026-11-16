@@ -122,7 +122,10 @@ def test_timeout_falls_back():
 def real():
     if __import__("os").environ.get("VOXFLOW_SKIP_MODEL_TESTS") == "1":
         pytest.skip("model tests skipped by VOXFLOW_SKIP_MODEL_TESTS=1")
-    c = Cleaner()
+    # These tests check what the model writes, not how fast: with the app's 4 s per-call limit a slow CI runner
+    # turned a timed-out call into a rules-only "wrong answer" (v0.2.1 release run). test_real_latency still holds
+    # the 4 s CPU budget, and with this limit a slow call fails it instead of passing as a fast rules-only result.
+    c = Cleaner(timeout_s=30.0)
     try:
         c.load()
     except Exception as e:  # pragma: no cover

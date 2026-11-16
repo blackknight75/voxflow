@@ -104,6 +104,13 @@ MIN_GPU_MEMORY_MB = 3500      # the default model needs about 3 GB on the GPU: a
 # 31 ms per word, judged on the GPU's own recent calls. Measured: about 50-110 ms per such line on an RTX 5080 (CUDA).
 # The CPU never gets the pass, so CPU-only PCs keep the old latency. 0 switches the pass off.
 PUNCTUATION_PASS_MAX_MS = 400
+# The load's warm-up runs the whole 562-token few-shot prompt once (it primes the KV cache that every later call
+# reuses). On a GPU a CPU fallback follows, so a GPU that needs more than a minute is given up. The CPU is the last
+# resort: giving up there leaves the session on rules only, so a slow CPU gets far longer. Measured: 7 s on a
+# desktop CPU limited to 4 cores (24 s on 1 core); on the 4-vCPU GitHub runner the whole load took 65 s in the v0.2.0
+# release run and the warm-up passed the old 60 s limit in the v0.2.1 run (same code path, slower runner).
+WARMUP_GPU_S = 60.0
+WARMUP_CPU_S = 600.0
 _PASS_MIN_WORDS = 8           # short lines cost a fixed overhead: judge them as if they had this many words
 
 
@@ -1656,10 +1663,14 @@ class Cleaner:
             for gpu in attempts:
                 try:
                     self._ms_per_word, self._learn_speed, self.punctuation_pass = None, False, False
+                    warmup_s = WARMUP_GPU_S if gpu else WARMUP_CPU_S
+                    # a GPU warm-up that timed out may still be unwinding: let it finish before the CPU attempt
+                    # (it would otherwise fail at once with "previous generation still running")
+                    self._wait_unwound(warmup_s)
                     self._llm = self._build(path, gpu)
                     self.backend = (libs or "cuda") if gpu else "cpu"
                     # warm up (also primes the KV cache with the constant few-shot prefix)
-                    self._llm_clean("um so what is the capital of france", max_ms=60000)
+                    self._llm_clean("um so what is the capital of france", max_ms=warmup_s * 1000)
                     if gpu and libs is not None:
                         # a GPU that loads the model but cannot keep up would make every dictation time out
                         # (basic clean-up only): time one sentence and prefer the CPU if it is that slow
@@ -1761,6 +1772,12 @@ class Cleaner:
         if "err" in box:
             raise box["err"]
         return box["out"]
+
+    def _wait_unwound(self, limit_s: float) -> None:
+        """Wait (at most ``limit_s``) for an abandoned generation to finish."""
+        end = time.monotonic() + limit_s
+        while self._abandoned.is_set() and time.monotonic() < end:
+            time.sleep(0.05)
 
     def _llm_clean(self, text: str, max_ms: float | None = None) -> str:
         assert self._llm is not None
