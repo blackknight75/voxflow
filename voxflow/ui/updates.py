@@ -191,7 +191,7 @@ def update_dialog(win, ctl, info: dict) -> Modal:
     m.body.addWidget(lead)
     m.body.addWidget(m.error)
 
-    def done(fn, message: str = ""):
+    def done(fn, message: str):
         def go():
             try:
                 fn()
@@ -199,8 +199,7 @@ def update_dialog(win, ctl, info: dict) -> Modal:
                 m.show_error(str(exc))
                 return
             m.close_modal()
-            if message:
-                win.toast("info", message)
+            win.toast("info", message)                 # every choice says what happens next
         return go
 
     row = QHBoxLayout()
