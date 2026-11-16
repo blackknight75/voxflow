@@ -15,6 +15,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from PySide6.QtCore import QPoint
 from PySide6.QtGui import QFontMetricsF
 from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
@@ -56,6 +57,41 @@ def uia(action: str, name: str = "", timeout_ms: int = 5000, wait: float = 90.0,
     if p.returncode != 0 or not text.strip():
         raise RuntimeError(f"uia {action} {name!r} failed ({p.returncode}): {err}")
     return json.loads(text)
+
+
+QUNS = {1: "QUNS_NOT_PRESENT (locked, screen saver or another user)", 2: "QUNS_BUSY (a full-screen app)",
+        3: "QUNS_RUNNING_D3D_FULL_SCREEN (a full-screen game)", 4: "QUNS_PRESENTATION_MODE",
+        5: "QUNS_ACCEPTS_NOTIFICATIONS", 6: "QUNS_QUIET_TIME (the first hour after a new user's first sign-in)",
+        7: "QUNS_APP (an app in full-screen 'do not disturb')"}
+
+
+def notification_state() -> tuple[int, str]:
+    """What the shell says about showing notifications now (SHQueryUserNotificationState, read only). Windows drops a
+    tray balloon (Shell_NotifyIcon NIF_INFO, what QSystemTrayIcon.showMessage uses) unless this is
+    QUNS_ACCEPTS_NOTIFICATIONS: there is then nothing for UI Automation to find."""
+    import ctypes
+    state = ctypes.c_int(0)
+    hr = ctypes.windll.shell32.SHQueryUserNotificationState(ctypes.byref(state))
+    if hr != 0:
+        return 0, f"unknown (HRESULT {hr & 0xFFFFFFFF:#x})"
+    return state.value, QUNS.get(state.value, f"unknown state {state.value}")
+
+
+def shot_rect(name: str, rect) -> Path:
+    """A PNG of one screen rectangle in physical pixels as UIA reports it (x, y, w, h), e.g. a Windows notification.
+    Only that rectangle is captured."""
+    x, y, w, h = rect
+    screen = QApplication.screenAt(QPoint(0, 0)) or QApplication.primaryScreen()
+    for sc in QApplication.screens():
+        g, dpr = sc.geometry(), sc.devicePixelRatio()
+        if g.x() * dpr <= x < (g.x() + g.width()) * dpr and g.y() * dpr <= y < (g.y() + g.height()) * dpr:
+            screen = sc
+            break
+    g, dpr = screen.geometry(), screen.devicePixelRatio()
+    pix = screen.grabWindow(0, round(x / dpr) - g.x(), round(y / dpr) - g.y(), round(w / dpr), round(h / dpr))
+    path = shots_dir() / f"{name}.png"
+    assert not pix.isNull() and pix.save(str(path), "PNG"), path
+    return path
 
 
 def pump(ms: int) -> None:

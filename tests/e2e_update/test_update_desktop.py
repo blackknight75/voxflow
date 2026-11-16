@@ -18,6 +18,7 @@ from __future__ import annotations
 import ctypes
 import os
 import shutil
+import time
 
 import pytest
 from PySide6.QtCore import QPoint, Qt
@@ -218,12 +219,23 @@ def tray_dialog(env, app, w, quiet):
     title, message = shown[0][0], shown[0][1]
     assert title == "VoxFlow" and message.startswith("VoxFlow 0.3.0 is available.")
     assert not w.isVisible(), "the window was hidden: the notification went to the tray"
-    found = D.uia("toast", "VoxFlow 0.3.0 is available", timeout_ms=7000, invoke=True)
-    how = "UIA Invoke on the Windows notification" if found.get("done") else ""
-    if how:
+    code, state = D.notification_state()
+    found = {}
+    if code == 5:                                          # QUNS_ACCEPTS_NOTIFICATIONS: the shell shows it
+        found = D.uia("toast", "VoxFlow 0.3.0 is available", timeout_ms=7000, invoke=False)
+        if found.get("found"):
+            rect = found["element"].get("rect")
+            pic = D.shot_rect(f"tray-notification{TAG}", rect) if rect else None
+            found = D.uia("toast", "VoxFlow 0.3.0 is available", timeout_ms=3000, invoke=True)
+            found["shot"] = str(pic)
+    if found.get("done"):
+        how = f"UIA Invoke on the Windows notification ({found['element'].get('name')!r}; shot {found.get('shot')})"
         app.wait(lambda: w._modal is not None, 8000)
+    elif code != 5:
+        how = f"messageClicked emitted: Windows is not showing notifications now: {state}"
+        tray.icon.messageClicked.emit()
     else:
-        how = (f"messageClicked emitted (Windows exposed no notification to UIA; windows scanned: "
+        how = (f"messageClicked emitted ({state}, but no notification was exposed to UIA; windows scanned: "
                f"{found.get('scanned_classes')}; found={found.get('found')})")
         tray.icon.messageClicked.emit()
     app.wait(lambda: w._modal is not None and w._modal.isVisible())
@@ -368,6 +380,58 @@ def test_3_keyboard_tab_order_enter_and_esc(env, quiet):
     assert app.u.state.skipped == "0.3.0"
     env.note("desktop/keyboard", f"tab {order}; shift+tab {back}; Enter on notes = remind later; Esc = remind later; "
                                  f"Enter on Skip = skip; opened by: {how}")
+
+
+# --------------------------------------------------------------------------------------------------- 4. human click
+CLICK_BANNER = """
+##########################################################################
+##                                                                      ##
+##            CLICK THE VOXFLOW NOTIFICATION NOW                        ##
+##                                                                      ##
+##   (the banner bottom right; if none, press Win+N and click the       ##
+##    "VoxFlow 0.3.0 is available" notification there; not the icon)   ##
+##   waiting up to {s} s                                                ##
+##########################################################################
+"""
+
+
+@pytest.mark.skipif(os.environ.get("VOXFLOW_HUMAN_CLICK") != "1",
+                    reason="manual: a person clicks the real notification (set VOXFLOW_HUMAN_CLICK=1, run with -s)")
+def test_4_human_clicks_the_real_notification(env, quiet, capsys):
+    """The real update notification from the real tray icon; NOT emitted by the test: a person clicks it (the banner,
+    or the entry in the notification centre: Qt reports both as messageClicked) and the update dialog must open."""
+    wait_s = int(os.environ.get("VOXFLOW_HUMAN_CLICK_WAIT", "180"))
+    app, w = start(env, mode="notify")
+    tray = app.shell.tray
+    shown, clicks, icon_clicks = [], [], []
+    real = tray.icon.showMessage
+    tray.icon.showMessage = lambda *a: (shown.append(a), real(*a))[-1]
+    tray.icon.messageClicked.connect(lambda: clicks.append(time.monotonic()))
+    tray.icon.activated.connect(lambda r: icon_clicks.append(str(r)))
+    app.wait(lambda: shown, 15000)
+    t0 = time.monotonic()
+    assert shown[0][1].startswith("VoxFlow 0.3.0 is available.") and not w.isVisible()
+    code, state = D.notification_state()
+    with capsys.disabled():
+        print(CLICK_BANNER.format(s=wait_s), flush=True)
+    found = D.uia("toast", "VoxFlow 0.3.0 is available", timeout_ms=4000) if code == 5 else {}
+    pic = None
+    if found.get("found") and found["element"].get("rect"):
+        pic = D.shot_rect(f"tray-notification-human{TAG}", found["element"]["rect"])
+    end = t0 + wait_s
+    while not clicks and time.monotonic() < end:
+        D.pump(100)
+    banner = (f"banner exposed to UIA ({found['element'].get('name')!r}, rect {found['element'].get('rect')}, "
+              f"shot {pic})" if found.get("found") else f"banner NOT exposed to UIA ({state})")
+    env.note("desktop/human-click", f"{banner}; messageClicked from a person after "
+                                    f"{(clicks[0] - t0) if clicks else None} s; tray icon activations {icon_clicks}")
+    assert clicks, f"nobody clicked the notification within {wait_s} s ({banner}; icon activations {icon_clicks})"
+    app.wait(lambda: w._modal is not None and w._modal.isVisible(), 8000)
+    focus = w.focusWidget()
+    assert focus is not None and focus.objectName() == "update_dialog_later"
+    with capsys.disabled():
+        print(f"\nOK: the update dialog opened after a human click ({clicks[0] - t0:.1f} s). {banner}\n", flush=True)
+    D.shot(f"update-dialog-human{TAG}", w)
 
 
 # --------------------------------------------------------------------------------------------------- 6. metered
