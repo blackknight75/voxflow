@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-15
+
 ### Added
 
 - App updates (Settings > Updates): *Install automatically*, *Notify me, I choose* (the default) or *Off (never
@@ -210,5 +212,6 @@ Interface and system
 - **No automatic updates:** install a newer version by running its installer.
 - Features that would need a cloud service, an account or a phone app are out of scope by design.
 
-[Unreleased]: https://github.com/blackknight75/voxflow/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/blackknight75/voxflow/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/blackknight75/voxflow/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/blackknight75/voxflow/releases/tag/v0.2.0

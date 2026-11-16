@@ -1,5 +1,5 @@
 {
-    "version": "0.2.0",
+    "version": "0.2.1",
     "description": "Local push-to-talk dictation for Windows. Speech recognition and cleanup run on your own PC.",
     "homepage": "https://github.com/blackknight75/voxflow",
     "license": "MIT",
@@ -11,7 +11,7 @@
     ],
     "architecture": {
         "64bit": {
-            "url": "https://github.com/blackknight75/voxflow/releases/download/v0.2.0/VoxFlow-Setup-0.2.0.exe",
+            "url": "https://github.com/blackknight75/voxflow/releases/download/v0.2.1/VoxFlow-Setup-0.2.1.exe",
             "hash": "0000000000000000000000000000000000000000000000000000000000000000"
         }
     },

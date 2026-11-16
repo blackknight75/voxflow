@@ -38,7 +38,7 @@ repository (a few hundred MB with its history) and `scoop update` pulls it.
 ## The hash, and releases
 
 Builds are not reproducible, so the installer's SHA-256 is only known once the Release workflow has built it.
-Until the first release is published, `bucket/voxflow.json` carries version `0.2.0` with the placeholder hash
+Until the first release is published, `bucket/voxflow.json` carries version `0.2.1` with the placeholder hash
 `0000...0000` (64 zeros). That is never a real install: before publishing, the download URL does not exist; after
 publishing, Scoop downloads the file, compares the hash and refuses it (`Hash check failed!`).
 

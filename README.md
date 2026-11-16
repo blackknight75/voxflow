@@ -37,7 +37,7 @@ scoop install voxflow/voxflow
 ```
 
 (The winget command works once the package submission has been accepted into the winget community repository;
-the Scoop commands once v0.2.0 is published. Until then, use the installer from the Releases page. Scoop unpacks
+the Scoop commands once v0.2.1 is published. Until then, use the installer from the Releases page. Scoop unpacks
 the app into its own folder instead of running the installer: details in
 [packaging/scoop/README.md](packaging/scoop/README.md).)
 
