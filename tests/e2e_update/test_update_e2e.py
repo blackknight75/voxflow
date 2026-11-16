@@ -13,6 +13,7 @@ import hashlib
 import pytest
 from PySide6.QtWidgets import QApplication
 
+import voxflow
 from tests.e2e_update import harness as H
 from voxflow import updater as U
 from voxflow.ui import updates as UP
@@ -98,7 +99,7 @@ def test_2_notify_shows_a_notification_and_a_plain_text_dialog(env, caplog):
     assert info["available"]["version"] == "0.3.0" and info["installable"]
     # the window is up: a toast with "See update" (tray otherwise; see the next assertion)
     req = [r for r in env.sc.requests if r["host"] == H.API_HOST][0]
-    assert req["headers"]["User-Agent"] == "VoxFlow/0.2.0" and req["tls"]
+    assert req["headers"]["User-Agent"] == f"VoxFlow/{voxflow.__version__}" and req["tls"]   # the package version
     assert "Cookie" not in req["headers"] and "Authorization" not in req["headers"]
     modal, notes, buttons = dialog(app)
     text = notes.toPlainText()
