@@ -70,7 +70,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The cleanup model's homophone fixes and "send it to Mark, no wait, send it to Lisa" corrections are no longer
   thrown away by its safety checks. A half-written spoken e-mail address ("anna.dot.lee") is now rejected.
 
-## [0.2.0] - 2026-11-14
+## 0.2.0 - 2026-11-14 (never published: its changes first shipped in 0.2.1)
 
 First public release. VoxFlow is a push-to-talk dictation app for Windows 11 that runs entirely on your PC:
 hold **Ctrl + Win**, speak, release, and clean text is pasted into the app you are using.
@@ -213,5 +213,4 @@ Interface and system
 - Features that would need a cloud service, an account or a phone app are out of scope by design.
 
 [Unreleased]: https://github.com/blackknight75/voxflow/compare/v0.2.1...HEAD
-[0.2.1]: https://github.com/blackknight75/voxflow/compare/v0.2.0...v0.2.1
-[0.2.0]: https://github.com/blackknight75/voxflow/releases/tag/v0.2.0
+[0.2.1]: https://github.com/blackknight75/voxflow/releases/tag/v0.2.1
