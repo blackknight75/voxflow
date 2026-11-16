@@ -124,7 +124,8 @@ def real():
         pytest.skip("model tests skipped by VOXFLOW_SKIP_MODEL_TESTS=1")
     # These tests check what the model writes, not how fast: with the app's 4 s per-call limit a slow CI runner
     # turned a timed-out call into a rules-only "wrong answer" (v0.2.1 release run). test_real_latency still holds
-    # the 4 s CPU budget, and with this limit a slow call fails it instead of passing as a fast rules-only result.
+    # the 4 s CPU budget, and with this limit a slow call fails it instead of passing as a fast rules-only result
+    # (which _best_llm_seconds also refuses).
     c = Cleaner(timeout_s=30.0)
     try:
         c.load()
@@ -164,14 +165,61 @@ def _gpu_busy() -> bool:
         return False
 
 
+def _best_llm_seconds(c, text, runs=3):
+    """Best wall time of ``runs`` clean() calls, each of which the language model must have answered.
+
+    A rules fallback is not a latency sample. In v0.2.0's release run this budget "passed" on the CPU because of
+    one: the first call hit the 4 s limit, and the timed calls then failed fast (~0 s) while that generation
+    unwound. The fallback's text equals the model's for this sentence, so only last_info tells them apart."""
+    c.clean(text)
+    best = 1e9
+    for _ in range(runs):                   # best of three: another program on the GPU only ever makes a run slower
+        t0 = time.perf_counter()
+        c.clean(text)
+        took = time.perf_counter() - t0
+        info = c.last_info
+        assert info["llm"] and not info["rules_only"], f"answered by the rules fallback in {took:.2f} s: {info}"
+        best = min(best, took)
+    return best
+
+
+class _SlowStream:
+    """A Llama stand-in whose chat completion takes ``seconds`` before it streams its answer."""
+    def __init__(self, seconds):
+        self.seconds = seconds
+
+    def tokenize(self, *a, **k):
+        return [1, 2, 3]
+
+    def create_chat_completion(self, **k):
+        time.sleep(self.seconds)
+        return iter([{"choices": [{"delta": {"content": "So we should move the meeting."}}]}])
+
+
+def test_latency_measure_rejects_a_rules_fallback():
+    """v0.2.0's shape: one call past the per-call limit, then instant fallbacks. The old best-of-three read ~0 s."""
+    c = Cleaner(timeout_s=0.3)
+    c._ready, c._llm, c.backend = True, _SlowStream(0.5), "cpu"
+    t = "so we should uh move the meeting"
+    c.clean(t)
+    t0 = time.perf_counter()
+    c.clean(t)
+    assert time.perf_counter() - t0 < 0.1 and c.last_info["rules_only"]    # the old measure saw a fast "pass"
+    time.sleep(0.4)                                                         # let the abandoned generation unwind
+    with pytest.raises(AssertionError, match="rules fallback"):
+        _best_llm_seconds(c, t)
+
+
+def test_latency_measure_times_model_answers():
+    c = Cleaner(timeout_s=2.0)
+    c._ready, c._llm, c.backend = True, _SlowStream(0.05), "cpu"
+    best = _best_llm_seconds(c, "so we should uh move the meeting")
+    assert 0.04 < best < 1.0 and c.last_info["llm"] and not c.last_info["rules_only"]
+
+
 def test_real_latency(real):
     t = "so um i was thinking that we should uh move the deployment to next week because the QA team found regressions"
-    real.clean(t)
-    best = 1e9
-    for _ in range(3):                      # best of three: another program on the GPU only ever makes a run slower
-        t0 = time.perf_counter()
-        real.clean(t)
-        best = min(best, time.perf_counter() - t0)
+    best = _best_llm_seconds(real, t)
     limit = 0.6 if real.backend == "cuda" else 4.0
     if best >= limit and real.backend == "cuda" and _gpu_busy():
         pytest.skip(f"the GPU is busy with another program (best {best:.2f} s); the budget needs an idle GPU")
