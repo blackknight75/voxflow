@@ -227,7 +227,7 @@ def update_dialog(win, ctl, info: dict) -> Modal:
         row.addWidget(now)
         m.btn_primary = now
     else:
-        page = Button("Releases page", "primary")
+        page = Button("Download" if info.get("kind") in ("allusers", "portable") else "Releases page", "primary")
         page.setObjectName("update_dialog_page")
         page.clicked.connect(lambda: (QDesktopServices.openUrl(QUrl(info.get("releases_page"))), m.close_modal()))
         row.addWidget(page)

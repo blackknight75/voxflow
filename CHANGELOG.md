@@ -14,7 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (VoxFlow restarts), *Install when I quit*, *Remind me later* or *Skip this version*. Automatic installs happen
   when you quit VoxFlow or at a set time when VoxFlow and the PC are idle, never during a dictation, and are not
   downloaded on a metered connection. The installer is checked against the release's `SHA256SUMS.txt` before it
-  runs. Copies installed with Scoop or winget, or run from source, only notify.
+  runs, and kept locked from that check until Setup has started. Copies installed with Scoop or winget, for all
+  users (Program Files), or run from source only notify. Starting VoxFlow while an update is being installed
+  shows "Finishing the update…" instead of starting on half-replaced files.
 - The update check is the one new network request: anonymous, once a day, to the GitHub Releases API of this
   repository, with the User-Agent `VoxFlow/<version>`. *Off* sends nothing by itself; only *Check now* asks.
   Switching to *Off* or skipping a version deletes the downloaded installer; at most one is ever kept.

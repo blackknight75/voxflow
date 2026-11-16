@@ -433,6 +433,8 @@ _DEMO_RELEASE = {
 _UPDATE_MANAGED = {"scoop": "Updates are managed by Scoop: run scoop update voxflow.",
                    "winget": "Updates are managed by winget: run winget upgrade blackknight75.VoxFlow.",
                    "source": "VoxFlow is running from source: update it with git pull.",
+                   "allusers": "VoxFlow is installed for all users, so it cannot update itself without administrator "
+                               "rights. Download the new version from the releases page.",
                    "portable": "This copy was not installed with the VoxFlow installer, so it cannot update itself. "
                                "Get the new version from the releases page."}
 # what the speed check measured on the preview's PC (an NVIDIA desktop); see Controller.device_info

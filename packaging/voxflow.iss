@@ -56,6 +56,9 @@ DisableReadyPage=yes
 CloseApplications=force
 CloseApplicationsFilter=*.exe,*.dll,*.pyd
 RestartApplications=no
+; Held while Setup runs: a VoxFlow started meanwhile (e.g. right after "Install when I quit") sees it and exits with
+; "Finishing the update..." instead of running from half-replaced files (voxflow/system.py, SETUP_MUTEX).
+SetupMutex=VoxFlowSetupRunning,Global\VoxFlowSetupRunning
 VersionInfoVersion={#AppVersion}
 VersionInfoProductName=VoxFlow
 VersionInfoDescription=VoxFlow installer
@@ -77,7 +80,8 @@ Name: "{autodesktop}\VoxFlow"; Filename: "{app}\VoxFlow.exe"; WorkingDir: "{app}
 Filename: "{app}\VoxFlow.exe"; Description: "Launch VoxFlow"; Flags: nowait postinstall skipifsilent
 ; The in-app updater (voxflow/updater.py) runs Setup with /VERYSILENT /SUPPRESSMSGBOXES /NORESTART after VoxFlow has
 ; quit, and with /RELAUNCH=1 when the user chose "Install now" (or a scheduled install): VoxFlow then starts again.
-Filename: "{app}\VoxFlow.exe"; Flags: nowait; Check: RelaunchAfterUpdate
+; --after-update: Setup still holds its mutex at this point, so VoxFlow must not wait for it to go.
+Filename: "{app}\VoxFlow.exe"; Parameters: "--after-update"; Flags: nowait; Check: RelaunchAfterUpdate
 
 [UninstallDelete]
 ; written by CurStepChanged below for a winget install
@@ -106,7 +110,9 @@ begin
   if CurStep <> ssPostInstall then
     Exit;
   if Lowercase(ExpandConstant('{param:MANAGEDBY|}')) = 'winget' then
-    SaveStringToFile(ExpandConstant('{app}\managed-by.txt'), 'winget', False);
+    SaveStringToFile(ExpandConstant('{app}\managed-by.txt'), 'winget', False)
+  else
+    DeleteFile(ExpandConstant('{app}\managed-by.txt'));   // installed by hand over a winget install: ours now
 end;
 
 // "Launch at login" is written by the app, so the uninstall log knows nothing about it: without this, an entry

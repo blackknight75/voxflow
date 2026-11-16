@@ -258,8 +258,9 @@ VoxFlow is built so that there is nothing to trust: audio and text are processed
   `github.com/blackknight75/voxflow` and GitHub's download servers over HTTPS, and refuses the installer if its
   SHA-256 does not match. *Off* means no automatic update traffic at all (no check at start, none daily): VoxFlow
   then asks GitHub only when you press *Check now*. Switching to *Off* also deletes a downloaded installer and
-  cancels any pending install. A copy installed with Scoop or winget, or run
-  from source, never updates itself: it only tells you that a new version exists.
+  cancels any pending install. A copy installed with Scoop or winget, installed for all users (Program Files), or
+  run from source never updates itself: it only tells you that a new version exists. If you start VoxFlow while
+  an update is being installed, it says "Finishing the update…" and does not start until Setup is done.
 * Nothing else. No account, no analytics, no crash upload. Audio, transcripts, dictionary and settings are
   never sent anywhere.
 

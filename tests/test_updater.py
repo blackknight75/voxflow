@@ -1069,7 +1069,7 @@ def test_on_exit_does_not_run_an_unreadable_file(tmp_path, qtbot, monkeypatch):
     settle(up)
     up.install("quit")
     qtbot.waitUntil(lambda: up.info()["downloaded"], timeout=3000)
-    monkeypatch.setattr(U, "sha256_file", _raiser(OSError("locked")))
+    monkeypatch.setattr(U, "open_exclusive", _raiser(OSError("locked")))
     assert up.on_exit(user_quit=True) is False and up.launched == []
     up.close()
 

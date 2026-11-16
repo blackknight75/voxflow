@@ -17,6 +17,7 @@ RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE = "VoxFlow"
 AUTOSTART_FLAG = "--autostart"
 RUN_VALUE_LIMIT = 260        # Windows silently ignores longer Run entries
+SETUP_MUTEX = "VoxFlowSetupRunning"     # held by VoxFlow's Setup while it runs (SetupMutex in packaging/voxflow.iss)
 
 
 # =========================================================================== launch at login
@@ -268,6 +269,43 @@ def install_crash_handler(data_dir: str | Path, on_crash=None) -> None:
             faulthandler.enable(_fault_file)
     except (OSError, RuntimeError, ValueError) as exc:
         log.debug("faulthandler not enabled: %s", exc)
+
+
+# =========================================================================== an update being installed
+def update_setup_running() -> bool:
+    """True while VoxFlow's Setup is running (it holds ``SETUP_MUTEX``), e.g. an update the user chose to install
+    when quitting. A VoxFlow started then would run from half-replaced files, and Setup would close it anyway."""
+    if sys.platform != "win32":
+        return False
+    import ctypes
+    try:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)       # a private copy: argtypes set here stay here
+        k32.OpenMutexW.restype = ctypes.c_void_p
+        k32.OpenMutexW.argtypes = [ctypes.c_ulong, ctypes.c_bool, ctypes.c_wchar_p]
+        k32.CloseHandle.argtypes = [ctypes.c_void_p]
+        for name in (SETUP_MUTEX, "Global\\" + SETUP_MUTEX):
+            handle = k32.OpenMutexW(0x00100000, False, name)       # SYNCHRONIZE: only asks whether it exists
+            if handle:
+                k32.CloseHandle(handle)
+                return True
+    except (OSError, AttributeError):
+        pass
+    return False
+
+
+def tell_update_running() -> None:
+    """Say why VoxFlow does not start right now (it exits as soon as the message is closed, or Setup closes it)."""
+    message = ("Finishing the update…\n\nVoxFlow is being updated right now. Start it again in a minute, when the "
+               "update has finished.")
+    log.info("an update is being installed: not starting")
+    if sys.platform != "win32":
+        print(message)
+        return
+    import ctypes
+    try:
+        ctypes.windll.user32.MessageBoxW(None, message, "VoxFlow", 0x40 | 0x10000)   # information, foreground
+    except (OSError, AttributeError):
+        pass
 
 
 # =========================================================================== misc
