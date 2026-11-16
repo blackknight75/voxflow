@@ -302,6 +302,7 @@ avoids that wait, but then the raw transcript is pasted with no cleanup at all.
 | `voxflow/langs.py` | language packs (es, fr, de, it, pt, nl) and the neutral fallback: rules, prompts, guardrails, number formatting |
 | `voxflow/command.py` | command mode: prompt, token budget, guardrails |
 | `voxflow/sync.py` | backups, shareable packs, sync folder (one file per device, last writer wins per entry, tombstones); no network code |
+| `voxflow/updater.py` | app updates: the daily GitHub Releases check, version compare, URL allow-list, resumable and SHA-256-verified installer download, Scoop / winget / source detection, the silent Inno Setup run after VoxFlow quits (`Updater`, owned by the controller); `VOXFLOW_UPDATES=0` turns the automatic check off |
 | `voxflow/inject.py` | clipboard snapshot -> set text -> `SendInput` Ctrl+V -> restore; typed fallback; selection grab |
 | `voxflow/store.py` | dictionary, snippets, history, stats, styles (JSON, atomic writes) |
 | `voxflow/sounds.py`, `system.py`, `context.py`, `modelhub.py` | cues + media mute, autostart / logging / crash handler, foreground app, model cache |

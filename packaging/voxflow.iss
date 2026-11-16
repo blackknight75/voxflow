@@ -56,6 +56,9 @@ DisableReadyPage=yes
 CloseApplications=force
 CloseApplicationsFilter=*.exe,*.dll,*.pyd
 RestartApplications=no
+; Held while Setup runs: a VoxFlow started meanwhile (e.g. right after "Install when I quit") sees it and exits with
+; "Finishing the update..." instead of running from half-replaced files (voxflow/system.py, SETUP_MUTEX).
+SetupMutex=VoxFlowSetupRunning,Global\VoxFlowSetupRunning
 VersionInfoVersion={#AppVersion}
 VersionInfoProductName=VoxFlow
 VersionInfoDescription=VoxFlow installer
@@ -75,6 +78,14 @@ Name: "{autodesktop}\VoxFlow"; Filename: "{app}\VoxFlow.exe"; WorkingDir: "{app}
 
 [Run]
 Filename: "{app}\VoxFlow.exe"; Description: "Launch VoxFlow"; Flags: nowait postinstall skipifsilent
+; The in-app updater (voxflow/updater.py) runs Setup with /VERYSILENT /SUPPRESSMSGBOXES /NORESTART after VoxFlow has
+; quit, and with /RELAUNCH=1 when the user chose "Install now" (or a scheduled install): VoxFlow then starts again.
+; --after-update: Setup still holds its mutex at this point, so VoxFlow must not wait for it to go.
+Filename: "{app}\VoxFlow.exe"; Parameters: "--after-update"; Flags: nowait; Check: RelaunchAfterUpdate
+
+[UninstallDelete]
+; written by CurStepChanged below for a winget install
+Type: files; Name: "{app}\managed-by.txt"
 
 [UninstallRun]
 ; A running copy keeps its files locked and would survive the uninstall half-deleted: stop it first.
@@ -86,6 +97,24 @@ Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM VoxFlow.exe /IM VoxFlow-cons
 ; of its own: there is no Registry section, and Setup never writes to the Run key.
 
 [Code]
+// The in-app updater asks for a restart with /RELAUNCH=1 (a normal silent install, e.g. winget's, never starts the app).
+function RelaunchAfterUpdate: Boolean;
+begin
+  Result := WizardSilent and (ExpandConstant('{param:RELAUNCH|0}') = '1');
+end;
+
+// winget's manifest (packaging/winget/*.installer.yaml) passes /MANAGEDBY=winget. The file tells VoxFlow that winget
+// owns its updates, so it never replaces itself (voxflow/updater.py, install_kind). Any other value is ignored.
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep <> ssPostInstall then
+    Exit;
+  if Lowercase(ExpandConstant('{param:MANAGEDBY|}')) = 'winget' then
+    SaveStringToFile(ExpandConstant('{app}\managed-by.txt'), 'winget', False)
+  else
+    DeleteFile(ExpandConstant('{app}\managed-by.txt'));   // installed by hand over a winget install: ours now
+end;
+
 // "Launch at login" is written by the app, so the uninstall log knows nothing about it: without this, an entry
 // pointing at the deleted VoxFlow.exe would stay behind. This event exists only in the uninstaller, so an install or
 // an upgrade over an older version never runs it and the user's setting survives upgrades. The entry is removed only

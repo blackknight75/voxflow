@@ -13,6 +13,9 @@ InstallModes:
 - silent
 - silentWithProgress
 UpgradeBehavior: install
+InstallerSwitches:
+  # packaging/voxflow.iss: marks the install as winget's, so VoxFlow leaves its updates to winget
+  Custom: /MANAGEDBY=winget
 ProductCode: '{6C0B0B5E-5A9E-4C57-9F1D-4F4F0E2A7B31}_is1'
 AppsAndFeaturesEntries:
 - DisplayName: VoxFlow

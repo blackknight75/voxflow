@@ -13,6 +13,7 @@ from . import dialogs
 from . import theme as T
 from .components import (BarChart, Card, EmptyState, Modal, Row, Section, StatCard, TranscriptList, app_label,
                          confirm, fmt_count, fmt_duration)
+from .updates import UpdatesSection, update_dialog
 from .widgets import (Button, Caption, CheckBox, ChoiceButton, HotkeyRecorder, IconButton, KeyCaps, Label, LevelMeter, LineEdit,
                       PopupMenu, ProgressBar, ScrollArea, SearchField, Segmented, Slider, TextArea, Toggle, painter)
 
@@ -1625,6 +1626,10 @@ class SettingsPage(Page):
         sec.add(self._toggle("start_minimized", "Start in the tray", "Open quietly without showing this window."))
         self.body.addWidget(sec)
 
+        # ---- updates
+        self.updates = UpdatesSection(self)
+        self.body.addWidget(self.updates)
+
         # ---- models
         sec = Section("On-device models")
         self.models = {"asr": _ModelRow(self, "asr", "Speech recognition"),
@@ -1721,7 +1726,16 @@ class SettingsPage(Page):
         self.body.insertWidget(0, self.no_match)
 
     _SECTION_ALIASES = {"microphone": "Microphone", "models": "On-device models", "hotkeys": "Hotkeys",
-                        "privacy": "History and privacy", "sync": "Backup and sync"}
+                        "privacy": "History and privacy", "sync": "Backup and sync", "updates": "Updates"}
+
+    def open_update(self) -> Modal | None:
+        """The "new version" dialog, when there is a newer version (else a toast saying VoxFlow is up to date)."""
+        info = self.ctl.update_info()
+        if not info.get("available"):
+            self.win.toast("info", "VoxFlow is up to date.")
+            return None
+        m = update_dialog(self.win, self.ctl, info)
+        return self.win.open_modal(m, focus=m.btn_primary)
 
     def show_section(self, name: str) -> None:
         """Scroll to the section called ``name`` (an alias such as ``"models"`` or its caption); no-op if unknown."""
@@ -1750,6 +1764,8 @@ class SettingsPage(Page):
             sec.setVisible(bool(shown))
             any_shown = any_shown or bool(shown)
         self.no_match.setVisible(bool(q) and not any_shown)
+        if not q:
+            self.updates.refresh()                   # rows that only apply to one update mode hide again
 
     # ---- builders
     def _toggle(self, key: str, title: str, sub: str, icon: str | None = None) -> Row:

@@ -17,6 +17,7 @@ RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE = "VoxFlow"
 AUTOSTART_FLAG = "--autostart"
 RUN_VALUE_LIMIT = 260        # Windows silently ignores longer Run entries
+SETUP_MUTEX = "VoxFlowSetupRunning"     # held by VoxFlow's Setup while it runs (SetupMutex in packaging/voxflow.iss)
 
 
 # =========================================================================== launch at login
@@ -268,6 +269,62 @@ def install_crash_handler(data_dir: str | Path, on_crash=None) -> None:
             faulthandler.enable(_fault_file)
     except (OSError, RuntimeError, ValueError) as exc:
         log.debug("faulthandler not enabled: %s", exc)
+
+
+# =========================================================================== an update being installed
+def update_setup_running() -> bool:
+    """True while VoxFlow's Setup is running (it holds ``SETUP_MUTEX``), e.g. an update the user chose to install
+    when quitting. A VoxFlow started then would run from half-replaced files, and Setup would close it anyway."""
+    if sys.platform != "win32":
+        return False
+    import ctypes
+    try:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)       # a private copy: argtypes set here stay here
+        k32.OpenMutexW.restype = ctypes.c_void_p
+        k32.OpenMutexW.argtypes = [ctypes.c_ulong, ctypes.c_bool, ctypes.c_wchar_p]
+        k32.CloseHandle.argtypes = [ctypes.c_void_p]
+        for name in (SETUP_MUTEX, "Global\\" + SETUP_MUTEX):
+            handle = k32.OpenMutexW(0x00100000, False, name)       # SYNCHRONIZE: only asks whether it exists
+            if handle:
+                k32.CloseHandle(handle)
+                return True
+    except (OSError, AttributeError):
+        pass
+    return False
+
+
+UPDATE_MESSAGE_VAR = "VOXFLOW_UPDATE_MESSAGE"     # the message box's text, handed to the helper process
+
+
+def tell_update_running(popen=None) -> None:
+    """Say why VoxFlow does not start right now, and return at once.
+
+    The message box is shown by a Windows PowerShell started from System32, not by this process: a VoxFlow.exe that
+    stayed open in its own message box would keep its exe and DLLs in the install folder locked while Setup is
+    replacing them, and a silent Setup then gives up on the locked file and rolls the whole update back (seen with
+    Inno Setup 6.7.3: "DeleteFile: The existing file appears to be in use", then "Defaulting to Abort", exit code 5).
+    Without PowerShell nothing is shown; VoxFlow still exits."""
+    message = ("Finishing the update…\n\nVoxFlow is being updated right now. Start it again in a minute, when the "
+               "update has finished.")
+    log.info("an update is being installed: not starting")
+    if sys.platform != "win32":
+        print(message)
+        return
+    import subprocess
+    root = os.environ.get("SystemRoot") or r"C:\Windows"
+    shell = Path(root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    script = ("Add-Type -AssemblyName System.Windows.Forms; [void][System.Windows.Forms.MessageBox]::Show("
+              f"$env:{UPDATE_MESSAGE_VAR}, 'VoxFlow', 'OK', 'Information')")
+    env = {k: v for k, v in os.environ.items() if not k.upper().startswith(("_PYI", "_MEIPASS"))}
+    env[UPDATE_MESSAGE_VAR] = message
+    try:
+        (popen or subprocess.Popen)(
+            [str(shell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
+             "-Command", script], cwd=root, env=env, close_fds=True,
+            creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, ValueError) as exc:
+        log.info("could not show the update message: %s", exc)
 
 
 # =========================================================================== misc

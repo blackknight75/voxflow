@@ -115,6 +115,7 @@ class _ModelLine(QWidget):
 
 class Onboarding(QWidget):
     finished = Signal(bool)        # True = went through to the end, False = skipped
+    settings_requested = Signal(str)   # after finishing: open Settings at this section ("updates")
 
     M = 14
     W, H = 640, 490
@@ -297,7 +298,27 @@ class Onboarding(QWidget):
         self._tips_box.setSpacing(10)
         lay.addLayout(self._tips_box)
         lay.addStretch(1)
+        row = QHBoxLayout()
+        row.setSpacing(T.S2)
+        self.update_note = Label("", T.F_SMALL, "TEXT_DIM")      # the one network call besides the models
+        self.update_note.setObjectName("onboarding_update_note")
+        self.btn_updates = Button("Update settings", "ghost", height=28)
+        self.btn_updates.setObjectName("onboarding_update_settings")
+        self.btn_updates.clicked.connect(self._open_update_settings)
+        row.addWidget(self.update_note, 1)
+        row.addWidget(self.btn_updates, 0, Qt.AlignmentFlag.AlignVCenter)
+        lay.addLayout(row)
         return w
+
+    def _update_text(self) -> str:
+        if self.ctl.get("update_mode") == "off":
+            return "Updates: VoxFlow checks for new versions only when you press Check now in Settings."
+        return ("Updates: once a day VoxFlow asks GitHub, anonymously, whether a new version is out"
+                + (" and installs it for you." if self.ctl.get("update_mode") == "auto" else ", and asks you first."))
+
+    def _open_update_settings(self) -> None:
+        self._close(True)
+        self.settings_requested.emit("updates")
 
     def _fill_tips(self) -> None:
         while self._tips_box.count():
@@ -316,6 +337,7 @@ class Onboarding(QWidget):
         tips.append(("book", "Teach it your words", "Add names and jargon in Dictionary; build shortcuts in Snippets."))
         for icon, title, sub in tips:
             self._tips_box.addWidget(_Feature(icon, title, sub))
+        self.update_note.setText(self._update_text())
 
     # ------------------------------------------------------------------ navigation
     def go(self, index: int) -> None:

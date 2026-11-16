@@ -22,7 +22,8 @@ DOCUMENTED_DEFAULTS = {            # the documented config defaults
     "mute_media": False, "launch_at_login": False, "start_minimized": False, "save_history": True,
     "history_retention_days": 0, "history_limit": 5000, "restore_clipboard": True, "restore_delay_s": 0.5,
     "show_idle_pill": False, "theme": "system", "reduced_motion": False, "overlay_position": None, "ui_state": {},
-    "onboarding_done": False, "asr_model": "nemo-parakeet-tdt-0.6b-v3", "asr_device": "auto",
+    "onboarding_done": False, "update_mode": "notify", "update_install_when": "quit", "update_time": "03:00",
+    "asr_model": "nemo-parakeet-tdt-0.6b-v3", "asr_device": "auto",
     "cleanup_model": None, "cleanup_device": "auto", "cleanup_timeout_s": 4.0, "command_timeout_s": 20.0,
     "min_record_s": 0.3, "max_record_s": 120.0, "config_version": 2,
 }

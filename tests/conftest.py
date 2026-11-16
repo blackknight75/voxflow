@@ -9,7 +9,9 @@ Everything here runs BEFORE any ``voxflow`` module is imported, so no test can r
   instead of silently typing into / copying over / registering something on the developer's desktop.
 * Tests that genuinely need the desktop are marked ``@pytest.mark.desktop`` and only run with
   ``VOXFLOW_DESKTOP_TESTS=1``. Tests that need the real models are marked ``@pytest.mark.model`` and are skipped
-  with ``VOXFLOW_SKIP_MODEL_TESTS=1`` (they skip themselves when the weights are not cached).
+  with ``VOXFLOW_SKIP_MODEL_TESTS=1`` (they skip themselves when the weights are not cached). The live update
+  end-to-end tests (``tests/e2e_update``, a local fake GitHub, a real exe started) are marked
+  ``@pytest.mark.update_e2e`` and only run with ``VOXFLOW_UPDATE_E2E=1``.
 * ``VOXFLOW_SPEED_CHECK=0``: no controller starts the background speed check's child processes; the tests of
   the speed check fake the child or ask for it explicitly.
 * At the end of the session the real ``%APPDATA%\\VoxFlow`` folder and the real autostart registry value are
@@ -26,6 +28,7 @@ import pytest
 
 DESKTOP = os.environ.get("VOXFLOW_DESKTOP_TESTS") == "1"
 SKIP_MODELS = os.environ.get("VOXFLOW_SKIP_MODEL_TESTS") == "1"
+UPDATE_E2E = os.environ.get("VOXFLOW_UPDATE_E2E") == "1"
 
 REAL_APPDATA = os.environ.get("VOXFLOW_REAL_APPDATA") or os.environ.get("APPDATA") or ""
 os.environ.setdefault("VOXFLOW_REAL_APPDATA", REAL_APPDATA)        # survives into subprocess drivers
@@ -126,12 +129,17 @@ def pytest_configure(config):
                                        "runs only with VOXFLOW_DESKTOP_TESTS=1")
     config.addinivalue_line("markers", "model: loads the real ASR / cleanup models (slow, needs cached weights)")
     config.addinivalue_line("markers", "bug(id): regression test for a tracked bug id")
+    config.addinivalue_line("markers", "update_e2e: live updater end-to-end test (local fake GitHub over TLS, a real "
+                                       "exe is started); runs only with VOXFLOW_UPDATE_E2E=1")
 
 
 def pytest_collection_modifyitems(config, items):
     skip_desktop = pytest.mark.skip(reason="desktop test: set VOXFLOW_DESKTOP_TESTS=1 to run")
     skip_model = pytest.mark.skip(reason="model test skipped by VOXFLOW_SKIP_MODEL_TESTS=1")
+    skip_update = pytest.mark.skip(reason="update end-to-end test: set VOXFLOW_UPDATE_E2E=1 to run")
     for item in items:
+        if "update_e2e" in item.keywords and not UPDATE_E2E:
+            item.add_marker(skip_update)
         if "desktop" in item.keywords and not DESKTOP:
             item.add_marker(skip_desktop)
         if "model" in item.keywords and SKIP_MODELS:

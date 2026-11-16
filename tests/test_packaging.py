@@ -30,7 +30,10 @@ def test_the_installer_is_per_user_with_a_stable_id_and_keeps_the_profile():
     assert "PrivilegesRequired=lowest" in iss
     assert r"{localappdata}\Programs\VoxFlow" in iss
     assert re.search(r"AppId=\{\{[0-9A-F-]{36}\}", iss)
-    assert "[UninstallDelete]" not in iss and "{userappdata}" not in iss        # profile and models are never removed
+    assert "{userappdata}" not in iss                                           # profile and models are never removed
+    deletes = iss.split("\n[UninstallDelete]\n", 1)[1].split("\n[", 1)[0]
+    entries = [ln for ln in deletes.splitlines() if ln.strip() and not ln.lstrip().startswith(";")]
+    assert entries == [r'Type: files; Name: "{app}\managed-by.txt"'], "only the winget marker, in the app folder"
     assert 'Description: "Launch VoxFlow"' in iss and "postinstall" in iss
 
 
@@ -51,11 +54,30 @@ def test_the_installer_adds_no_autostart_entry_and_the_uninstaller_removes_the_a
     assert iss.count("CurrentVersion\\Run") == 1
     # removal happens in the uninstaller only (an upgrade keeps the user's setting), on HKCU, for that one value
     events = re.findall(r"^(?:procedure|function)\s+(\w+)", code, re.M)
-    assert events == ["CurUninstallStepChanged"]
+    assert events == ["RelaunchAfterUpdate", "CurStepChanged", "CurUninstallStepChanged"]
     assert "CurUninstallStep <> usUninstall" in code
     assert code.count("RegDeleteValue(HKEY_CURRENT_USER, '{#RunKey}', '{#RunValue}')") == 1
     assert len(re.findall(r"RegDelete\w+", code)) == 1                          # nothing else is deleted
     assert "ExpandConstant('{app}')" in code            # ... and only when the entry starts this install's exe
+
+
+def test_the_installer_relaunches_only_for_the_in_app_updater_and_marks_winget_installs():
+    """voxflow/updater.py runs Setup silently with /RELAUNCH=1 (Install now) or 0 (when I quit); winget passes
+    /MANAGEDBY=winget, which leaves managed-by.txt for updater.install_kind."""
+    from voxflow import updater
+    iss = (ROOT / "packaging" / "voxflow.iss").read_text("utf-8")
+    run = iss.split("\n[Run]\n", 1)[1].split("\n[", 1)[0]
+    lines = [ln for ln in run.splitlines() if ln.startswith("Filename:")]
+    assert len(lines) == 2 and "skipifsilent" in lines[0] and "Check: RelaunchAfterUpdate" in lines[1]
+    code = iss.split("\n[Code]\n", 1)[1]
+    assert "WizardSilent and (ExpandConstant('{param:RELAUNCH|0}') = '1')" in code
+    assert "ExpandConstant('{param:MANAGEDBY|}')) = 'winget'" in code and updater.MANAGED_MARKER in code
+    assert "CurStep <> ssPostInstall" in code
+    cmd = updater.installer_command(Path("C:/t/VoxFlow-Setup-1.0.0.exe"), True)
+    assert cmd[1:] == ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/RELAUNCH=1"]
+    manifest = (ROOT / "packaging" / "winget" / "blackknight75.VoxFlow.installer.yaml").read_text("utf-8")
+    assert re.search(r"^InstallerSwitches:\n(?:  #.*\n)*  Custom: /MANAGEDBY=winget$", manifest, re.M)
+    assert "CloseApplications=force" in iss            # Setup also closes a VoxFlow that is still exiting
 
 
 def test_the_app_writes_its_login_entry_with_a_path_inside_the_install_folder(monkeypatch):

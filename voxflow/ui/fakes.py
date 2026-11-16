@@ -419,8 +419,24 @@ _DEFAULTS = dict(
     launch_at_login=False, start_minimized=False, save_history=True, history_retention_days=0,
     history_limit=5000, restore_clipboard=True, restore_delay_s=0.5, show_idle_pill=False, theme="system",
     reduced_motion=False, overlay_position=None, ui_state={}, onboarding_done=False, sync_folder="",
+    update_mode="notify", update_install_when="quit", update_time="03:00",
     asr_model="nemo-parakeet-tdt-0.6b-v3", asr_device="auto", cleanup_model=None, cleanup_device="auto",
     cleanup_timeout_s=4.0, command_timeout_s=20.0, min_record_s=0.3, max_record_s=120.0, config_version=2)
+# the release the preview "finds" (see Controller.update_info)
+_DEMO_RELEASE = {
+    "version": "0.3.0", "tag": "v0.3.0", "title": "VoxFlow 0.3.0", "published": "2026-12-01T10:00:00Z",
+    "page": "https://github.com/blackknight75/voxflow/releases/tag/v0.3.0", "installer": "VoxFlow-Setup-0.3.0.exe",
+    "installer_url": "https://github.com/blackknight75/voxflow/releases/download/v0.3.0/VoxFlow-Setup-0.3.0.exe",
+    "size": 1_800_000_000, "sums_url": "https://github.com/blackknight75/voxflow/releases/download/v0.3.0/SHA256SUMS.txt",
+    "notes": "Added\n• App updates: install automatically, or be told and choose when.\n\nFixed\n"
+             "• The setup guide waits for the speech model before the hotkey practice."}
+_UPDATE_MANAGED = {"scoop": "Updates are managed by Scoop: run scoop update voxflow.",
+                   "winget": "Updates are managed by winget: run winget upgrade blackknight75.VoxFlow.",
+                   "source": "VoxFlow is running from source: update it with git pull.",
+                   "allusers": "VoxFlow is installed for all users, so it cannot update itself without administrator "
+                               "rights. Download the new version from the releases page.",
+                   "portable": "This copy was not installed with the VoxFlow installer, so it cannot update itself. "
+                               "Get the new version from the releases page."}
 # what the speed check measured on the preview's PC (an NVIDIA desktop); see Controller.device_info
 _DEVICE_BACKENDS = {"asr": ("cuda", "webgpu", "cpu"), "cleanup": ("cuda", "vulkan", "cpu")}
 _DEVICE_RESULTS = {"asr": {"cuda": {"ms": 29.0}, "webgpu": {"ms": 65.0}, "cpu": {"ms": 257.0}},
@@ -473,6 +489,9 @@ class FakeController(QObject):
     activate_requested = Signal()
     sync_status_changed = Signal(dict)
     devices_changed = Signal(dict)
+    update_changed = Signal(dict)
+    update_available = Signal(dict)
+    restart_requested = Signal()
 
     is_demo = True
     version = "0.2.0"
@@ -506,6 +525,10 @@ class FakeController(QObject):
         self._forced = ""
         self._speed = {"state": "done", "done": 0, "total": 0, "model": "", "backend": "", "available": True,
                        "measured_at": time.time() - 3 * 86400}
+        self._update = {"kind": "installer", "phase": "idle", "progress": None, "error": "",
+                        "last_check": time.time() - 5 * 3600, "last_ok": True, "last_result": "VoxFlow is up to date.",
+                        "available": None, "skipped": False, "install_on_quit": False, "downloaded": False}
+        self.quit_prepared = False
         self._speed_timer = QTimer(self)
         self._speed_timer.setInterval(250)
         self._speed_timer.timeout.connect(self._speed_step)
@@ -574,6 +597,9 @@ class FakeController(QObject):
             raise ValueError("History can be kept for at most 10 years.")
         if key == "theme" and value not in ("system", "dark", "light"):
             raise ValueError("Unknown theme.")
+        if key in ("update_mode", "update_install_when", "update_time"):
+            from .. import config as cfgmod
+            value = cfgmod.Config.validate(key, value)       # the same sentences as the real controller
         if key == "sync_folder" and value and not Path(str(value)).is_dir():
             raise ValueError("That folder does not exist any more. Choose another one.")
         if key in ("asr_device", "cleanup_device") and value not in ("auto",) + _DEVICE_BACKENDS[key[:-7]]:
@@ -806,6 +832,63 @@ class FakeController(QObject):
 
     def start(self) -> None:
         self.status_changed.emit(self.status())
+
+    # ---- app updates (Controller.update_info); nothing is downloaded or installed in the preview
+    def update_info(self) -> dict:
+        u = self._update
+        kind = u["kind"]
+        rel = copy.deepcopy(u["available"]) if u["available"] else None
+        return {"version": self.version, "mode": self.config.update_mode, "when": self.config.update_install_when,
+                "time": self.config.update_time, "kind": kind, "can_install": kind == "installer",
+                "managed": _UPDATE_MANAGED.get(kind, ""), "phase": u["phase"], "progress": u["progress"],
+                "error": u["error"], "last_check": u["last_check"], "last_ok": u["last_ok"],
+                "last_result": u["last_result"], "available": rel,
+                "installable": bool(rel and kind == "installer" and rel.get("installer_url")),
+                "skipped": bool(rel and u["skipped"]), "install_on_quit": bool(rel and u["install_on_quit"]),
+                "downloaded": bool(rel and u["downloaded"]),
+                "releases_page": rel["page"] if rel else "https://github.com/blackknight75/voxflow/releases"}
+
+    def _update_emit(self) -> None:
+        self.update_changed.emit(self.update_info())
+
+    def check_updates(self) -> bool:
+        u = self._update
+        u.update(last_check=time.time(), last_ok=True, available=copy.deepcopy(_DEMO_RELEASE), error="",
+                 last_result=f"VoxFlow {_DEMO_RELEASE['version']} is available.")
+        self._update_emit()
+        self.update_available.emit(self.update_info())
+        return True
+
+    def install_update(self, when: str = "now") -> None:
+        info = self.update_info()
+        if when not in ("now", "quit"):
+            raise ValueError("Choose to install now or when you quit VoxFlow.")
+        if info["available"] is None:
+            raise ValueError("There is no newer version to install.")
+        if not info["can_install"]:
+            raise ValueError(info["managed"])
+        self._update.update(skipped=False, downloaded=True, install_on_quit=when == "quit",
+                            phase="waiting" if when == "now" else "idle")
+        self._update_emit()
+        self.notice.emit("info", "The preview does not install anything.")
+
+    def remind_update_later(self) -> None:
+        self._update_emit()
+
+    def skip_update(self) -> None:
+        if self._update["available"]:
+            self._update.update(skipped=True, install_on_quit=False, downloaded=False)
+            self._update_emit()
+
+    def prepare_quit(self) -> None:
+        self.quit_prepared = True
+
+    def demo_set_update(self, available: bool | dict = True, **fields) -> None:
+        """Pose Settings > Updates: ``available`` (True = the demo release, a dict = that release, False = none) and
+        any update_info field (``kind``, ``phase``, ``progress``, ``error``, ``last_ok``, ``last_result``...)."""
+        rel = copy.deepcopy(_DEMO_RELEASE) if available is True else (dict(available) if available else None)
+        self._update.update(available=rel, **fields)
+        self._update_emit()
 
     def shutdown(self) -> None:
         self._idle_timer.stop()
