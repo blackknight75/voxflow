@@ -164,3 +164,38 @@ def test_the_import_toast_reports_new_and_updated_entries(make_demo, monkeypatch
         monkeypatch.setattr(c.dictionary, "import_", lambda _p, r=result: r)
         page.do_import()
         assert demo.toasts()[-1] == toast
+
+
+# =========================================================================== D11
+def test_alias_conflicts_of_an_import_are_shown(make_demo, monkeypatch, tmp_path):
+    from voxflow.ui import dialogs
+    from voxflow.ui import pages as P
+    one = [{"alias": "cube", "term": "Kubernetes", "owner": "Cuba"}]
+    assert P.aliases_left_out(one) == "“cube” was left out of Kubernetes: Cuba already uses it."
+    four = [{"alias": f"a{i}", "term": "T", "owner": f"O{i}"} for i in range(4)]
+    assert P.aliases_left_out(four) == ("4 sounds-like spellings were left out because another word already uses "
+                                        "them: “a0” (O0); “a1” (O1); “a2” (O2); ….")
+    demo = make_demo(empty=True)
+    page, c = demo.page("dictionary"), demo.c
+    path = tmp_path / "team.voxpack"
+    monkeypatch.setattr(dialogs, "ask_open_path", lambda *a, **k: str(path))
+    c.inspect_pack = lambda p: {"kind": "dictionary", "name": "Team", "description": "", "count": 1, "created": 0,
+                                "skipped": 0}
+    c.import_pack = lambda p, mode: {"added": 1, "updated": 0, "removed": 0, "skipped": 0, "aliases_skipped": one}
+    page.do_import()
+    demo.find("pack_import").btn_primary.click()
+    assert demo.toasts()[-2:] == ["Pack imported: 1 added.", "“cube” was left out of Kubernetes: Cuba already uses it."]
+
+
+def test_alias_conflicts_of_a_backup_are_shown(make_demo, monkeypatch, tmp_path):
+    from voxflow.ui import dialogs
+    demo = make_demo(empty=True)
+    page, c = demo.page("settings"), demo.c
+    monkeypatch.setattr(dialogs, "ask_open_path", lambda *a, **k: str(tmp_path / "b.voxbackup"))
+    c.inspect_backup = lambda p: {"counts": {"dictionary": 1}, "includes": ["dictionary"], "device": "",
+                                  "same_device": False, "created": 0, "skipped": 0}
+    c.import_backup = lambda p, mode, keys: {"counts": {"dictionary": 1}, "aliases_skipped": [
+        {"alias": "cube", "term": "Kubernetes", "owner": "Cuba"}]}
+    page.import_backup().btn_primary.click()
+    assert demo.toasts()[-2:] == ["Backup merged: 1 word added.",
+                                  "“cube” was left out of Kubernetes: Cuba already uses it."]

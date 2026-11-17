@@ -643,8 +643,8 @@ class Dictionary(_JsonStore):
             term = self._stored_term(raw)
             if term is None:
                 self._skipped += 1
-            elif term.lower() not in seen:
-                seen.add(term.lower())
+            elif _match_key(term) not in seen:
+                seen.add(_match_key(term))
                 self._entries.append({"id": str(raw.get("id") or _new_id()), "term": term,
                                       "aliases": self._clean_aliases(term, _alias_list(raw.get("aliases")))})
         for raw in _rows(data, "suggestions"):
@@ -670,8 +670,9 @@ class Dictionary(_JsonStore):
 
     # ---- helpers (call with the lock held)
     def _find_term(self, term: str) -> dict | None:
-        low = term.lower()
-        return next((e for e in self._entries if e["term"].lower() == low), None)
+        """The entry for ``term`` as it is matched in dictation: any letter case, a hyphen = a space."""
+        key = _match_key(term)
+        return next((e for e in self._entries if _match_key(e["term"]) == key), None)
 
     def _find_id(self, entry_id: str) -> dict:
         entry = next((e for e in self._entries if e["id"] == entry_id), None)
@@ -771,10 +772,14 @@ class Dictionary(_JsonStore):
             self._notify("dictionary")
         return removed
 
-    def apply_changes(self, upserts=(), removals=()) -> int:
+    def apply_changes(self, upserts=(), removals=(), conflicts: list | None = None) -> int:
         """Bulk change used by sync and profile import: ``upserts`` are ``{term, aliases}`` rows that replace
         the entry with the same term (any letter case) or are added; ``removals`` are terms to delete.
-        Lenient on purpose (invalid rows are skipped, nothing raises) and saved once. Returns #changes."""
+        Lenient on purpose (invalid rows are skipped, nothing raises) and saved once. Returns #changes.
+
+        With a ``conflicts`` list (imports), a sounds-like spelling that another entry already uses is left out,
+        as when it is typed by hand, and ``{"alias", "term", "owner"}`` is appended to the list for the user.
+        Sync passes none: there the other device's entry wins as it is."""
         changed = 0
         with self._lock:
             for term in removals:
@@ -782,6 +787,11 @@ class Dictionary(_JsonStore):
                 if entry is not None:
                     self._entries.remove(entry)
                     changed += 1
+            taken: dict[str, set[str]] = {}
+            alias_of: dict[str, set[str]] = {}
+            if conflicts is not None:
+                for e in self._entries:
+                    _index_entry(e, taken, alias_of)
             for row in upserts:
                 try:
                     term = self._clean_term(row.get("term"))
@@ -789,13 +799,30 @@ class Dictionary(_JsonStore):
                     continue
                 aliases = self._clean_aliases(term, row.get("aliases") or [])
                 entry = self._find_term(term)
+                if conflicts is not None:
+                    own = entry["id"] if entry else None
+                    usable = []
+                    for a in aliases:
+                        others = taken.get(a.lower(), set()) - {own}
+                        if others:
+                            owner = next(e["term"] for e in self._entries if e["id"] in others)
+                            conflicts.append({"alias": a, "term": term, "owner": owner})
+                        else:
+                            usable.append(a)
+                    aliases = usable
+                    if entry is not None:
+                        _index_entry(entry, taken, alias_of, remove=True)
                 if entry is None:
-                    self._entries.append({"id": _new_id(), "term": term, "aliases": aliases})
+                    entry = {"id": _new_id(), "term": term, "aliases": aliases}
+                    self._entries.append(entry)
                     self._drop_suggestions_for(term)
                 elif entry["term"] != term or entry["aliases"] != aliases:
                     entry["term"], entry["aliases"] = term, aliases
                 else:
+                    _index_entry(entry, taken, alias_of)
                     continue
+                if conflicts is not None:
+                    _index_entry(entry, taken, alias_of)
                 changed += 1
             if changed:
                 self._changed()
@@ -915,7 +942,7 @@ class Dictionary(_JsonStore):
         with self._lock:
             # who uses which spelling, built once: checking every alias against every entry was O(n²) under the
             # lock (5,000 entries took 10 s, with the window frozen and dictations waiting for the lock)
-            by_term = {e["term"].lower(): e for e in self._entries}
+            by_term = {_match_key(e["term"]): e for e in self._entries}
             taken: dict[str, set[str]] = {}            # term or alias (lower case) -> ids of the entries using it
             alias_of: dict[str, set[str]] = {}         # alias (lower case) -> ids
             for e in self._entries:
@@ -925,7 +952,7 @@ class Dictionary(_JsonStore):
                     term = self._clean_term(term)
                 except ValueError:
                     continue
-                existing = by_term.get(term.lower())
+                existing = by_term.get(_match_key(term))
                 target_id = existing["id"] if existing else None
                 if alias_of.get(term.lower(), set()) - {target_id}:
                     continue                           # the term is another entry's sounds-like spelling
@@ -940,7 +967,7 @@ class Dictionary(_JsonStore):
                     continue
                 entry = {"id": _new_id(), "term": term, "aliases": usable}
                 self._entries.append(entry)
-                by_term[term.lower()] = entry
+                by_term[_match_key(term)] = entry
                 _index_entry(entry, taken, alias_of)
                 self._drop_suggestions_for(term)
                 added += 1

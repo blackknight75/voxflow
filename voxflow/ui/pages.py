@@ -618,6 +618,16 @@ def merge_or_replace(win, title: str, facts: list[str], merge_text: str, replace
     return win.open_modal(m)
 
 
+def aliases_left_out(items: list[dict]) -> str:
+    """The sounds-like spellings an import left out because another word already uses them (one word must own a
+    spelling, or it would never fire): '“cube” was left out of Kubernetes: Cuba already uses it.'"""
+    if len(items) == 1:
+        it = items[0]
+        return f"“{it['alias']}” was left out of {it['term']}: {it['owner']} already uses it."
+    shown = "; ".join(f"“{it['alias']}” ({it['owner']})" for it in items[:3]) + ("; …" if len(items) > 3 else "")
+    return f"{len(items)} sounds-like spellings were left out because another word already uses them: {shown}."
+
+
 class _ImportExport:
     """Shared import/export plumbing for the Dictionary and Snippets pages: plain files and shareable packs."""
 
@@ -706,6 +716,8 @@ class _ImportExport:
             if int(res.get("skipped") or 0):
                 self.win.toast("warning", f"{plural(int(res['skipped']), 'damaged entry', 'damaged entries')} in the "
                                           "pack could not be read and was left out.")
+            if res.get("aliases_skipped"):
+                self.win.toast("warning", aliases_left_out(res["aliases_skipped"]))
             return True
 
         return merge_or_replace(
@@ -2073,6 +2085,8 @@ class SettingsPage(Page):
             if unusable:
                 self.win.toast("warning", f"{plural(unusable, 'damaged entry', 'damaged entries')} in the backup "
                                           "could not be read and was left out.")
+            if res.get("aliases_skipped"):
+                self.win.toast("warning", aliases_left_out(res["aliases_skipped"]))
             self.refresh()
             return True
 

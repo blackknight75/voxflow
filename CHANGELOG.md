@@ -33,6 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Imports say what they changed: "Imported 3 new dictionary entries and updated 2 you already had." Importing a
   snippets file updates the text of snippets you already have (as a pack import does) instead of silently keeping
   the old text.
+- Backups and packs recognise a snippet or a word said another way: a *merge* backup no longer replaces your "zoom
+  link 2" with the backup's "zoom link two", a pack preview counts "sign-off" as already in your list when you have
+  "Sign off", and "wi fi" is the same dictionary word as "Wi-Fi".
+- Importing a pack or a backup no longer gives a word a sounds-like spelling that another word already uses (it would
+  never fire); the import says which spellings were left out.
+- A backup that includes a large history can be restored: backups may be up to 1 GB (packs stay at 50 MB), and
+  exporting refuses a backup that would be too large to import again.
 
 ## [0.2.1] - 2026-11-15
 
