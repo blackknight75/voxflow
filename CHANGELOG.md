@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   start says "VoxFlow closed unexpectedly last time" with *Open log folder*.
 - On a PC without a microphone, VoxFlow no longer restarts the audio system and writes a log line every 2 seconds.
   It tries again once a minute, or at once when a device is plugged in, and logs each problem once.
+- A read-only `config.json` no longer freezes the window for 3.6 seconds on every settings change. The save fails
+  at once and the notice says which file is read-only and where.
 - VoxFlow uses about 480 MB less memory: numpy no longer reserves a buffer for every CPU thread at start.
 
 ## [0.2.1] - 2026-11-15

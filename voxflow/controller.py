@@ -491,8 +491,10 @@ class Controller(QObject):
         except OSError as exc:
             log.warning("could not save settings: %s", exc)
             self._settings_unsaved = True
-            self._notice_action("warning", "Your change is active, but it could not be saved to disk and will be "
-                                           "lost when VoxFlow closes.", "retry_save", "Try again")
+            why = cfgmod.write_problem(self._config_path)       # say why and where when it is the file itself
+            reason = (f" ({why}, in {self._config_path.parent})" if why else "")
+            self._notice_action("warning", f"Your change is active, but it could not be saved to disk{reason} and "
+                                           "will be lost when VoxFlow closes.", "retry_save", "Try again")
             return
         self._settings_unsaved = False
 

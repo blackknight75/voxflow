@@ -606,3 +606,110 @@ def test_r1_a_recorder_of_a_damaged_install_says_to_reinstall(tmp_path, qtbot, m
         assert rig.c.status()["detail"].startswith("VoxFlow's installation is damaged")
     finally:
         rig.close()
+
+
+# =========================================================================== R6: a read-only config.json
+def test_r6_a_read_only_settings_file_fails_at_once_and_says_why(tmp_path, qtbot, monkeypatch):
+    import os
+    import stat
+    import time
+    from tests.controller_rig import make_rig
+    rig = make_rig(tmp_path, qtbot, monkeypatch)
+    cfg = rig.data_dir / "config.json"
+    os.chmod(cfg, stat.S_IREAD)                                   # the read-only attribute
+    try:
+        t = time.perf_counter()
+        rig.c.set("sounds_enabled", not rig.c.get("sounds_enabled"))
+        took = time.perf_counter() - t
+        assert took < 0.5, f"the window froze for {took:.2f} s"
+        notices = [m for lvl, m in rig.spy.notices() if lvl == "warning"]
+        assert notices and "config.json is read-only, in " in notices[-1] and str(rig.data_dir) in notices[-1]
+    finally:
+        os.chmod(cfg, stat.S_IREAD | stat.S_IWRITE)
+        rig.close()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows ACLs and sharing")
+def test_r6_permissions_that_deny_writing_fail_at_once(tmp_path):
+    import getpass
+    import subprocess
+    import time
+    from voxflow import config as cfgmod
+    path = tmp_path / "config.json"
+    cfgmod.save_config(Config(), path)
+    user = getpass.getuser()
+    subprocess.run(["icacls", str(path), "/deny", f"{user}:(W,D)"], check=True, capture_output=True)
+    real = cfgmod.os.replace
+
+    def denied(src, dst):
+        err = PermissionError(13, "Access is denied")
+        err.winerror = 5
+        raise err
+
+    try:
+        assert cfgmod.write_problem(path) == "Windows does not allow VoxFlow to change config.json"
+        cfgmod.os.replace = denied
+        t = time.perf_counter()
+        with pytest.raises(PermissionError):
+            cfgmod.save_config(Config(theme="dark"), path)
+        assert time.perf_counter() - t < 0.5
+    finally:
+        cfgmod.os.replace = real
+        subprocess.run(["icacls", str(path), "/remove:d", user], check=True, capture_output=True)
+    assert cfgmod.write_problem(tmp_path / "missing.json") == ""
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows sharing rules")
+def test_r6_a_reader_holding_the_file_is_still_waited_out(tmp_path):
+    import threading
+    from voxflow import config as cfgmod
+    path = tmp_path / "config.json"
+    cfgmod.save_config(Config(), path)
+    fh = open(path, "rb")                                        # a reader: the rename fails with "access denied"
+    assert cfgmod.write_problem(path) == "", "the file itself can be written: wait for the reader"
+    threading.Timer(0.15, fh.close).start()
+    cfgmod.save_config(Config(theme="dark"), path)
+    assert cfgmod.load_config(path).theme == "dark"
+
+
+def test_r6_sharing_violations_are_retried_without_probing(tmp_path, monkeypatch):
+    import os
+    from voxflow import config as cfgmod
+    path = tmp_path / "config.json"
+    cfgmod.save_config(Config(), path)
+    real, fails = os.replace, [2]
+
+    def flaky(src, dst):
+        if fails[0]:
+            fails[0] -= 1
+            err = PermissionError(13, "sharing violation")
+            err.winerror = 32
+            raise err
+        real(src, dst)
+
+    monkeypatch.setattr(cfgmod.os, "replace", flaky)
+    monkeypatch.setattr(cfgmod, "write_problem", lambda p: pytest.fail("not asked for a sharing violation"))
+    cfgmod.save_config(Config(theme="light"), path)
+    assert fails == [0] and cfgmod.load_config(path).theme == "light"
+
+
+def test_r6_off_windows_only_the_read_only_attribute_is_checked(tmp_path, monkeypatch):
+    from voxflow import config as cfgmod
+    path = tmp_path / "x.json"
+    path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(cfgmod.sys, "platform", "linux")
+    assert cfgmod.write_problem(path) == ""
+
+
+def test_r6_a_save_failure_that_is_not_about_the_file_keeps_the_general_message(tmp_path, qtbot, monkeypatch):
+    from tests.controller_rig import make_rig
+    from voxflow import config as cfgmod
+    rig = make_rig(tmp_path, qtbot, monkeypatch)
+    try:
+        monkeypatch.setattr(cfgmod, "save_config", lambda *a, **k: (_ for _ in ()).throw(OSError(28, "disk full")))
+        rig.c.set("sounds_enabled", not rig.c.get("sounds_enabled"))
+        notices = [m for lvl, m in rig.spy.notices() if lvl == "warning"]
+        assert notices[-1] == ("Your change is active, but it could not be saved to disk and will be lost when "
+                               "VoxFlow closes.")
+    finally:
+        rig.close()

@@ -6,6 +6,8 @@ import logging
 import math
 import os
 import re
+import stat
+import sys
 import tempfile
 import time
 from dataclasses import asdict, dataclass, field, fields
@@ -254,17 +256,49 @@ def migrate(data: dict) -> dict:
     return out
 
 
+_SHARING_ERRORS = (32, 33)        # ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION: someone has the file open
+
+
+def write_problem(path: Path) -> str:
+    """Why ``path`` cannot be written at all ("" if it can, or if it does not exist): a rename onto it would keep
+    failing, so waiting only freezes the caller. Checks the read-only attribute and, on Windows, whether the
+    file's permissions allow writing (opening it for writing, sharing everything, changes nothing)."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return ""
+    if getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_READONLY:
+        return f"{Path(path).name} is read-only"
+    if sys.platform != "win32":
+        return ""
+    import ctypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)          # a private copy: argtypes set here stay here
+    k32.CreateFileW.restype = ctypes.c_void_p
+    k32.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+                                ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+    k32.CloseHandle.argtypes = [ctypes.c_void_p]
+    # GENERIC_WRITE, FILE_SHARE_READ | WRITE | DELETE, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL
+    handle = k32.CreateFileW(str(path), 0x40000000, 7, None, 3, 0x80, None)
+    if handle is None or handle == ctypes.c_void_p(-1).value:
+        return f"Windows does not allow VoxFlow to change {Path(path).name}" if ctypes.get_last_error() == 5 else ""
+    k32.CloseHandle(handle)
+    return ""
+
+
 def _replace(tmp: str, path: Path) -> None:
     """os.replace that waits out a reader. On Windows the rename fails with PermissionError while another
     thread, a sync tool, a backup program or a virus scanner has the target open for reading; that is over
-    in milliseconds, so retry for up to ~2 s instead of losing the save."""
+    in milliseconds, so retry for up to ~2 s instead of losing the save. A file that cannot be written at all
+    (read-only, permissions) fails at once: waiting for it froze the window for 3.6 s per change (QA R6)."""
     delay = 0.005
     for attempt in range(40):  # pragma: no branch - the last attempt returns or re-raises
         try:
             os.replace(tmp, path)
             return
-        except PermissionError:
+        except PermissionError as exc:
             if attempt == 39:
+                raise
+            if getattr(exc, "winerror", None) not in _SHARING_ERRORS and write_problem(path):
                 raise
             time.sleep(delay)
             delay = min(delay * 2, 0.1)
