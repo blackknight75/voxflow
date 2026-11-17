@@ -31,7 +31,8 @@ def _real_controller(tmp_path, **kw):
 
 # =========================================================================== R1: no demo stand-ins in the real app
 def test_r1_a_broken_speech_module_fails_to_load_instead_of_pasting_the_demo_sentence(tmp_path, qtbot, monkeypatch):
-    patch_os(monkeypatch)
+    patch_os(monkeypatch)                                           # says the model is cached...
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))       # ...but the cache is empty, as on the CI runner
     TRecorder.reset()
     real = app._real
     monkeypatch.setitem(sys.modules, "voxflow.asr", None)          # "import voxflow.asr" raises ImportError
@@ -44,6 +45,7 @@ def test_r1_a_broken_speech_module_fails_to_load_instead_of_pasting_the_demo_sen
         qtbot.waitUntil(lambda: c.model_status("asr")["state"] == "failed", timeout=5000)
         detail = c.model_status("asr")["detail"]
         assert detail == "VoxFlow's installation is damaged (ModuleNotFoundError in asr.py). Reinstall VoxFlow."
+        assert c._damaged == {}, "broken code is not blamed on the model files (no re-download on Retry)"
         assert c.status()["level"] == "error" and c.status()["title"] == "Speech model unavailable"
         assert c.model_status("asr")["backend"] != "demo"
         with pytest.raises(app.DamagedInstall):

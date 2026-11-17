@@ -1029,6 +1029,9 @@ class Controller(QObject):
         """A message for a load that failed because of the model's files: the disk is full (unfinished downloads
         are removed), or the cached files are damaged (Retry downloads them again). "" for anything else.
         Runs on the loading thread: checking the files reads them all (about 3 s for both default models)."""
+        from .app import DamagedInstall
+        if isinstance(exc, DamagedInstall):      # VoxFlow's own code is broken, not the model: no re-download
+            return ""
         what = self._MODEL_WORDS[name]
         if modelhub.disk_full(exc):
             if repo:
