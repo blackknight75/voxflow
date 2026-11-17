@@ -149,7 +149,12 @@ class CommandMode:
         messages = build_messages(instruction, selection, tone=tone, terms=terms, language=language)
         try:
             raw = self.cleaner.generate(messages, max_tokens=max_tokens, timeout_s=self.timeout_s)
-        except TimeoutError:
+        except TimeoutError as exc:
+            from .cleanup import LlmBusy
+            if isinstance(exc, LlmBusy):            # an earlier generation was still running: this one never ran
+                # (no "language model" in the words: that would offer the model settings, and nothing is broken)
+                raise CommandError("The model is still finishing an earlier request. Try again in a moment. "
+                                   "Nothing was changed.") from None
             raise CommandError("Command mode took too long and was stopped. Nothing was changed.") from None
         except Exception as exc:  # noqa: BLE001
             log.warning("command generation failed: %s", redacted_exc(exc))

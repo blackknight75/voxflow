@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- After one dictation timed out in the language model, the next dictations got the basic clean-up at once, and
+  command mode said it "took too long", even when the model was free again a moment later. They now wait for it,
+  within their own time limit. Command mode says the model is still busy when that is the reason.
+
 ## [0.2.1] - 2026-11-15
 
 ### Added

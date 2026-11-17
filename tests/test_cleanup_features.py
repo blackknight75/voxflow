@@ -403,10 +403,11 @@ def test_timeout_abandons_the_generation_then_recovers():
     assert c.clean("i pushed the the branch to get hub") == "I pushed the the branch to get hub."
     assert time.perf_counter() - t0 < 2.0, "the timeout is a hard bound for the caller"
     assert c.last_info["timeout"] is True and c._abandoned.is_set()
-    # while the abandoned generation is still unwinding, new calls fall back at once instead of queueing up
+    # while the abandoned generation is still unwinding, a new call waits at most its own budget, then falls back
     t0 = time.perf_counter()
     assert c.clean("we we should deploy it") == "We we should deploy it."
-    assert time.perf_counter() - t0 < 0.1
+    assert time.perf_counter() - t0 < 0.15 + 0.2
+    assert c.last_info["skipped_busy"] is True and "timeout" not in c.last_info
     llm.release.set()                                        # the old generation finishes
     deadline = time.time() + 3
     while c._abandoned.is_set() and time.time() < deadline:

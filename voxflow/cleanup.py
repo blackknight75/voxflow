@@ -1579,6 +1579,10 @@ def smart_format(text: str) -> str:
 _NO_REPORT = {"llm": False, "rejected": False, "rules_only": False, "ms": 0.0}
 
 
+class LlmBusy(TimeoutError):
+    """The model was not asked at all: an earlier, abandoned generation was still running for the whole budget."""
+
+
 class Cleaner:
     """Dictation clean-up: rule pass + guarded local LLM.
 
@@ -1602,6 +1606,9 @@ class Cleaner:
         self._lock = threading.Lock()
         self._handoff = threading.Lock()     # makes "generation finished" vs "caller gave up" atomic
         self._abandoned = threading.Event()  # set while a timed-out generation is still unwinding
+        self._idle = threading.Event()       # its opposite, for waiting on the unwinding without polling
+        self._idle.set()
+        self._waited_s = 0.0                 # how long the latest call waited for such an unwinding
         self._terms: list[str] | None = None  # preferred spellings for the clean() call in progress
         self._ready = False
         self.backend = "none"
@@ -1741,9 +1748,14 @@ class Cleaner:
 
     def _run_bounded(self, job, budget: float, what: str) -> str:
         """Run ``job(abort)`` in a worker thread and abandon it at the deadline (a prompt prefill cannot be
-        interrupted). While an abandoned generation is still unwinding, new calls fail fast."""
+        interrupted). While an abandoned generation is still unwinding, the call waits for it inside its own
+        ``budget`` (the wait is deducted) and raises ``LlmBusy`` if it is still running when the budget is gone."""
         if self._abandoned.is_set():
-            raise TimeoutError("previous LLM generation still running")
+            started = time.monotonic()
+            if not self._idle.wait(budget):
+                raise LlmBusy("previous LLM generation still running")
+            self._waited_s = time.monotonic() - started
+            budget -= self._waited_s
         abort, done = threading.Event(), threading.Event()
         box: dict = {}
 
@@ -1757,6 +1769,7 @@ class Cleaner:
                     done.set()
                     if box.get("abandoned"):
                         self._abandoned.clear()
+                        self._idle.set()
 
         th = threading.Thread(target=work, name="voxflow-cleanup-llm", daemon=True)
         th.start()
@@ -1765,6 +1778,7 @@ class Cleaner:
                 timed_out = not done.is_set()
                 if timed_out:
                     box["abandoned"] = True
+                    self._idle.clear()
                     self._abandoned.set()
                     abort.set()
             if timed_out:
@@ -1775,9 +1789,8 @@ class Cleaner:
 
     def _wait_unwound(self, limit_s: float) -> None:
         """Wait (at most ``limit_s``) for an abandoned generation to finish."""
-        end = time.monotonic() + limit_s
-        while self._abandoned.is_set() and time.monotonic() < end:
-            time.sleep(0.05)
+        if self._abandoned.is_set():
+            self._idle.wait(limit_s)
 
     def _llm_clean(self, text: str, max_ms: float | None = None) -> str:
         assert self._llm is not None
@@ -1905,6 +1918,9 @@ class Cleaner:
                 else:
                     self.last_info["rejected"] = True
                     out_lines.append(line)
+            except LlmBusy:
+                self.last_info["skipped_busy"] = self.last_info["rules_only"] = True
+                out_lines.append(line)
             except TimeoutError:
                 self.last_info["timeout"] = self.last_info["rules_only"] = True
                 out_lines.append(line)
@@ -1945,11 +1961,15 @@ class Cleaner:
             try:
                 self.last_info["llm"] = True
                 t_call = time.perf_counter()
+                self._waited_s, ran = 0.0, True
                 try:
                     res = self._llm_clean(body, max_ms=remaining * 1000)
+                except LlmBusy:
+                    ran = False                          # the model never ran: nothing to learn about its speed
+                    raise
                 finally:
-                    if self._learn_speed:
-                        self._note_speed(body, time.perf_counter() - t_call)
+                    if self._learn_speed and ran:        # the time spent waiting for an earlier call is not its own
+                        self._note_speed(body, time.perf_counter() - t_call - self._waited_s)
                 res = res.strip().strip('"').strip()
                 if res[:2] in ("- ", "* ") or res[:1] == "•":
                     res = ""  # model invented a bullet
@@ -1964,6 +1984,9 @@ class Cleaner:
                     self.last_info["rejected"] = True
                     salv = _salvage_case(body, res) if res else body
                     out_lines.append(("- " if bullet else "") + salv)
+            except LlmBusy:
+                self.last_info["skipped_busy"] = self.last_info["rules_only"] = True
+                out_lines.append(line)
             except TimeoutError:
                 self.last_info["timeout"] = self.last_info["rules_only"] = True
                 out_lines.append(line)
