@@ -32,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The microphone step hides the "No movement?" help once your microphone is heard.
 - The status in the sidebar shows up to three lines and the tray menu two, so a microphone or model problem is no
   longer cut off mid-sentence. The status can be reached with Tab; Enter, Space or a click shows its full text.
+- VoxFlow follows Windows' accessibility settings: with *Animation effects* off (Settings > Accessibility >
+  Visual effects) motion is reduced as if *Reduce motion* were on, and with a contrast theme on the window, the
+  setup guide and the menus use that theme's colours (solid surfaces and lines, no glow). Both follow changes
+  while VoxFlow runs. The Flow bar keeps its own dark look.
 
 ## [0.2.1] - 2026-11-15
 

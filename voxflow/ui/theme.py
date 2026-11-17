@@ -9,10 +9,12 @@ All sizes are logical pixels: Qt 6 scales them per monitor, so 100 / 150 / 200 %
 """
 from __future__ import annotations
 
+import ctypes
 import math
+from types import SimpleNamespace
 
 from PySide6.QtCore import QEasingCurve, QObject, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QGuiApplication, QLinearGradient, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QLinearGradient, QPainter, QPainterPath, QPalette, QPen
 
 
 # --------------------------------------------------------------------------- palettes
@@ -79,7 +81,10 @@ CYAN = VIOLET = MAGENTA = GREEN = RED = AMBER = TEXT = TEXT_DIM = TEXT_FAINT = B
 BLOOM = 0.13
 MODE = "dark"            # the requested mode: dark | light | system
 RESOLVED = "dark"        # what is actually showing
-REDUCED_MOTION = False
+REDUCED_MOTION = False   # in effect: the app's own switch, or Windows' "Animation effects" being off
+HIGH_CONTRAST = False    # a Windows contrast theme is on: the tokens are its system colours
+_user_reduced = False    # the app's own "Reduce motion" switch
+_system = (False, False)  # (reduced motion, high contrast) as Windows last asked for them
 
 # --------------------------------------------------------------------------- scale
 S1, S2, S3, S4, S5, S6, S8, S10 = 4, 8, 12, 16, 20, 24, 32, 40        # spacing
@@ -124,23 +129,90 @@ def _on_system_scheme(*_a) -> None:
         apply_theme("system")
 
 
+SPI_GETCLIENTAREAANIMATION = 0x1042
+
+
+def _user32():
+    return ctypes.WinDLL("user32", use_last_error=True)
+
+
+def _windows_animations_off(app) -> bool:
+    """Windows Settings > Accessibility > Visual effects > Animation effects is off (read on the real desktop
+    only; Qt's own motion preference may not report it)."""
+    if app.platformName() != "windows":
+        return False
+    on = ctypes.c_int(1)
+    return bool(_user32().SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, ctypes.byref(on), 0)) and not on.value
+
+
+def _system_prefs() -> tuple[bool, bool]:
+    """(reduced motion, high contrast) as Windows asks for them."""
+    app = QGuiApplication.instance()
+    if app is None:
+        return False, False
+    style = app.styleHints()                       # held: the accessibility hints live as long as it does
+    try:
+        hints = style.accessibility()
+    except AttributeError:                         # Qt < 6.10
+        return False, False
+    reduced = hints.motionPreference() == Qt.MotionPreference.ReducedMotion or _windows_animations_off(app)
+    return reduced, hints.contrastPreference() == Qt.ContrastPreference.HighContrast
+
+
+def _contrast_palette() -> SimpleNamespace:
+    """Every token from the system colours of the active Windows contrast theme: solid surfaces, solid strokes,
+    the theme's highlight for every accent, and no decorative bloom or shadow."""
+    pal = QGuiApplication.palette()
+    role = QPalette.ColorRole
+    bg, fg = pal.color(role.Window), pal.color(role.WindowText)
+    hi, on_hi = pal.color(role.Highlight), pal.color(role.HighlightedText)
+    grey = pal.color(QPalette.ColorGroup.Disabled, role.WindowText)
+    scrim = QColor(fg)
+    scrim.setAlpha(110)
+    tokens = dict.fromkeys(("BG0", "BG1", "SIDEBAR", "PANEL", "PANEL_HI", "SUNK", "CONTROL", "CONTROL_HI",
+                            "SHADOW"), bg)
+    tokens.update(dict.fromkeys(("TEXT", "TEXT_DIM", "STROKE", "STROKE_STRONG", "GREEN", "RED", "AMBER"), fg))
+    tokens.update(dict.fromkeys(("CYAN", "VIOLET", "MAGENTA"), hi))
+    tokens.update(TEXT_FAINT=grey, ON_ACCENT=on_hi, SCRIM=scrim, BLOOM=0.0,
+                  name="light" if bg.lightness() >= 128 else "dark")
+    return SimpleNamespace(**tokens)
+
+
+def _on_system_prefs(*_a) -> None:
+    if _system_prefs() != _system:
+        apply_theme(MODE)
+
+
 def apply_theme(mode: str = "dark", reduced_motion: bool | None = None) -> None:
-    """Switch palette (``dark`` | ``light`` | ``system``) and optionally the reduced-motion preference."""
-    global MODE, RESOLVED, REDUCED_MOTION, _hooked_system
+    """Switch palette (``dark`` | ``light`` | ``system``) and optionally the app's reduced-motion switch. Windows'
+    contrast themes and its "Animation effects" setting are followed as well."""
+    global MODE, RESOLVED, REDUCED_MOTION, HIGH_CONTRAST, _user_reduced, _system, _hooked_system
     mode = mode if mode in ("dark", "light", "system") else "dark"
-    resolved = _system_scheme() if mode == "system" else mode
-    pal = LIGHT if resolved == "light" else DARK
+    if reduced_motion is not None:
+        _user_reduced = bool(reduced_motion)
+    _system = _system_prefs()
+    HIGH_CONTRAST = _system[1]
+    if HIGH_CONTRAST:
+        pal = _contrast_palette()
+        resolved = pal.name
+    else:
+        resolved = _system_scheme() if mode == "system" else mode
+        pal = LIGHT if resolved == "light" else DARK
     g = globals()
     for k in _TOKENS:
         g[k] = getattr(pal, k)
     MODE, RESOLVED = mode, resolved
-    if reduced_motion is not None:
-        REDUCED_MOTION = bool(reduced_motion)
+    REDUCED_MOTION = _user_reduced or _system[0]
     app = QGuiApplication.instance()
     if app is not None and not _hooked_system:
         try:
-            app.styleHints().colorSchemeChanged.connect(_on_system_scheme)
+            style = app.styleHints()
+            style.colorSchemeChanged.connect(_on_system_scheme)
             _hooked_system = True
+            hints = style.accessibility()
+            hints.motionPreferenceChanged.connect(_on_system_prefs)
+            hints.contrastPreferenceChanged.connect(_on_system_prefs)
+            app.applicationStateChanged.connect(_on_system_prefs)     # back to VoxFlow: Windows may have changed
         except AttributeError:
             pass
     if _bus is not None:
@@ -148,9 +220,12 @@ def apply_theme(mode: str = "dark", reduced_motion: bool | None = None) -> None:
 
 
 def set_reduced_motion(on: bool) -> None:
-    global REDUCED_MOTION
-    if REDUCED_MOTION != bool(on):
-        REDUCED_MOTION = bool(on)
+    """The app's own switch. Windows' "Animation effects" off keeps motion reduced either way."""
+    global REDUCED_MOTION, _user_reduced
+    _user_reduced = bool(on)
+    effective = _user_reduced or _system[0]
+    if REDUCED_MOTION != effective:
+        REDUCED_MOTION = effective
         if _bus is not None:
             _bus.changed.emit()
 

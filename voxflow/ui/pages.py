@@ -1547,7 +1547,8 @@ class SettingsPage(Page):
         self.theme.changed.connect(lambda v: self._set_or_resync("theme", v))
         self._sync["theme"] = self.theme.set_value
         sec.add(Row("Theme", "System follows your Windows light or dark mode.", self.theme, icon="moon"))
-        sec.add(self._toggle("reduced_motion", "Reduce motion", "Turns off decorative animation everywhere."))
+        sec.add(self._toggle("reduced_motion", "Reduce motion", "Turns off decorative animation everywhere. Always "
+                                                                "on while Windows' Animation effects are off."))
         sec.add(self._toggle("show_idle_pill", "Show the Flow bar when idle",
                              "Keeps a small pill on screen so you know VoxFlow is ready."))
         pos_box = QWidget()
