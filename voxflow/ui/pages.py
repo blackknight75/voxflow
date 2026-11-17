@@ -1309,6 +1309,8 @@ _HOTKEYS = (("hotkey", "Dictation", "Hold to talk, release to paste.", False),
                                                "more formal”. With nothing selected it writes for you.", True),
             ("paste_last_hotkey", "Paste last transcript", "Pastes your most recent dictation again.", True),
             ("undo_hotkey", "Undo last paste", "Removes the text VoxFlow just pasted.", True))
+_HOTKEY_WORDS = "hotkey shortcut keyboard keys"           # extra words the settings search matches (UI-04)
+_DEVICE_WORDS = "gpu cuda cpu graphics card nvidia amd intel device speed"
 _RETENTION = ((0, "Forever"), (1, "1 day"), (7, "7 days"), (30, "30 days"), (90, "90 days"), (365, "1 year"))
 _MODEL_LABELS = {"pending": ("Waiting", "TEXT_DIM"), "downloading": ("Downloading", "AMBER"),
                  "loading": ("Loading", "AMBER"), "ready": ("Ready", "GREEN"), "degraded": ("Limited", "AMBER"),
@@ -1421,6 +1423,7 @@ class SettingsPage(Page):
         self._capturing: HotkeyRecorder | None = None
         self._testing = False
         self._arranging = False
+        self._tab_fixed = False
 
         # ---- hotkeys
         sec = Section("Hotkeys")
@@ -1434,9 +1437,10 @@ class SettingsPage(Page):
             rec.changed.connect(lambda combo, k=key, r=rec: self._hotkey_changed(k, combo, r))
             self.recorders[key] = rec
             self._sync[key] = rec.set_combo
-            sec.add(Row(title, sub, rec, icon="keyboard" if key == "hotkey" else None))
+            sec.add(Row(title, sub, rec, icon="keyboard" if key == "hotkey" else None)).keywords = _HOTKEY_WORDS
         sec.add(self._toggle("double_tap_lock", "Hands-free lock",
                              "Double-tap the dictation hotkey to keep listening; tap once more to finish."))
+        sec._rows[-1].keywords = _HOTKEY_WORDS
         self.body.addWidget(sec)
 
         # ---- microphone
@@ -1622,8 +1626,9 @@ class SettingsPage(Page):
         # ---- system
         sec = Section("System")
         sec.add(self._toggle("launch_at_login", "Launch at login", "Start VoxFlow when you sign in to Windows.",
-                             icon="power"))
-        sec.add(self._toggle("start_minimized", "Start in the tray", "Open quietly without showing this window."))
+                             icon="power")).keywords = "startup autostart boot windows sign in"
+        sec.add(self._toggle("start_minimized", "Start in the tray", "Open quietly without showing this window.")
+                ).keywords = "startup minimised minimized hidden"
         self.body.addWidget(sec)
 
         # ---- updates
@@ -1637,7 +1642,7 @@ class SettingsPage(Page):
         self.devices: dict[str, ChoiceButton] = {}
         self.device_rows: dict[str, Row] = {}
         for name, key, title in _DEVICE_MODELS:
-            sec.add(self.models[name])
+            sec.add(self.models[name]).keywords = "model download ai"
             pick = ChoiceButton(name=title, fallback="Automatic")
             pick.setObjectName(f"settings_device_{name}")
             pick.setFixedWidth(350)
@@ -1645,6 +1650,7 @@ class SettingsPage(Page):
             self._sync[key] = lambda _v: self._show_devices()
             self.devices[name] = pick
             self.device_rows[name] = sec.add(Row(title, "", pick))
+            self.device_rows[name].keywords = _DEVICE_WORDS
             self.device_rows[name].setObjectName(f"settings_device_{name}_row")
         self.btn_measure = Button("Measure now", "secondary", icon="refresh", height=30)
         self.btn_measure.setObjectName("settings_speed_check")
@@ -1652,6 +1658,7 @@ class SettingsPage(Page):
         self.speed_bar = ProgressBar()
         self.speed_bar.hide()
         self.speed_row = sec.add(Row("Speed check", "", self.btn_measure, below=self.speed_bar))
+        self.speed_row.keywords = _DEVICE_WORDS + " benchmark performance"
         self.speed_row.setObjectName("settings_speed_row")
         self.body.addWidget(sec)
         ctl.devices_changed.connect(self._show_devices)
@@ -1685,7 +1692,7 @@ class SettingsPage(Page):
 
         # ---- about
         sec = Section("About")
-        self.about = Row(f"VoxFlow {ctl.version}", "Fully local dictation. No cloud, no account, no telemetry: your "
+        self.about = Row("About VoxFlow", "Fully local dictation. No cloud, no account, no telemetry: your "
                                                  "voice never leaves this PC.", icon="info")
         self.about.setObjectName("settings_about")
         sec.add(self.about)
@@ -1725,6 +1732,16 @@ class SettingsPage(Page):
         self.no_match.hide()
         self.body.insertWidget(0, self.no_match)
 
+    def showEvent(self, e):
+        super().showEvent(e)
+        if not self._tab_fixed:            # once the page sits in the window: moving it there rebuilds its focus chain
+            self._tab_fixed = True
+            before = self.recorders["hotkey"].btn.previousInFocusChain()
+            while before.focusPolicy() == Qt.FocusPolicy.NoFocus:   # setTabOrder ignores widgets without focus
+                before = before.previousInFocusChain()
+            QWidget.setTabOrder(before, self.find)          # built last but first on screen: Tab reaches the
+            QWidget.setTabOrder(self.find, self.jump)       # search and the jump menu before the rows
+
     _SECTION_ALIASES = {"microphone": "Microphone", "models": "On-device models", "hotkeys": "Hotkeys",
                         "privacy": "History and privacy", "sync": "Backup and sync", "updates": "Updates"}
 
@@ -1757,8 +1774,10 @@ class SettingsPage(Page):
         any_shown = False
         for sec in self._sections():
             shown = 0
+            whole = bool(q) and q in sec.caption.text().lower()      # "privacy": the whole section
             for row in sec._rows:
-                hit = not q or q in row.title.text().lower() or q in row.sub.text().lower()
+                hit = not q or whole or any(q in t.lower() for t in (row.title.text(), row.sub.text(),
+                                                                     getattr(row, "keywords", "")))
                 row.setVisible(hit)
                 shown += hit
             sec.setVisible(bool(shown))

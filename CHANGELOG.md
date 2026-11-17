@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   they belong to; the hotkey Change buttons say the current shortcut; the transcript list says each transcript
   as you move through it and explains its keys; and the Flow bar's results ("Pasted", "No speech heard",
   "Result copied: press Ctrl+V", downloads) are announced. Nothing is announced while the microphone is open.
+- Settings search also finds section names ("privacy") and everyday words: "shortcut" or "keyboard" find every
+  hotkey, "gpu" the device choices and the speed check, "startup" the launch options, "model" the model rows.
+- In Settings, Tab reaches the search box and *Jump to section* first, not after *Reset…* at the bottom.
+- Settings shows the version once (*Updates > Version 0.2.1*); the About row is now *About VoxFlow*. The Dictation
+  hotkey's Change button and the setup guide's Change button line up with the right edge.
 
 ## [0.2.1] - 2026-11-15
 

@@ -789,7 +789,8 @@ class HotkeyRecorder(QWidget):
         self._allow_clear = allow_clear
         row.addStretch(1)
         policy = self.btn_clear.sizePolicy()
-        policy.setRetainSizeWhenHidden(True)      # the slot stays even when empty: keycaps, Change and x line up per row
+        policy.setRetainSizeWhenHidden(allow_clear)   # a clearable combo keeps its x slot when empty, so its keycaps
+                                                      # do not jump; one that cannot be cleared ends at the edge
         self.btn_clear.setSizePolicy(policy)
         row.addWidget(self.caps)
         row.addWidget(self.btn)

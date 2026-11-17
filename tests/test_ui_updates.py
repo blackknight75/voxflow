@@ -70,7 +70,7 @@ def test_the_section_shows_the_version_the_mode_and_the_last_check(demo):
     page, sec = section(demo)
     assert sec.mode.label() == "Notify me, I choose"
     assert [o[1] for o in sec.mode.options] == ["Install automatically", "Notify me, I choose", "Off (never check)"]
-    assert sec.status_row.title.text() == "VoxFlow 0.2.0"
+    assert sec.status_row.title.text() == "Version 0.2.0"
     assert sec.status_row.sub.text().startswith("VoxFlow is up to date. Last checked today at")
     assert not sec.when_row.isVisible(), "the install timing only applies to automatic mode"
     assert not sec.btn_see.isVisible() and sec.btn_check.isEnabled()

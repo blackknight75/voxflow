@@ -960,7 +960,7 @@ def test_support_buttons_and_about(ui, monkeypatch):
     ui.find("settings_open_logs").click()
     assert opened == [ui.rig.data_dir, ui.rig.data_dir / "logs"]
     about = " ".join(w.text() for w in ui.find("settings_about").findChildren(QWidget) if hasattr(w, "text") and callable(w.text))
-    assert f"VoxFlow {ui.c.version}" in about and "No cloud" in about and "never leaves this PC" in about
+    assert "About VoxFlow" in about and "No cloud" in about and "never leaves this PC" in about
     ui.find("settings_onboarding").click()
     assert ui.shell.onboarding is not None and ui.shell.onboarding.isVisible()
     ui.shell.onboarding.skip()

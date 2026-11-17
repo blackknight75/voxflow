@@ -224,3 +224,66 @@ def test_ui10_flow_bar_results_are_announced(qapp, spoken):
         bar._timer.stop()
         bar._follow.stop()
         bar.deleteLater()
+
+
+# =========================================================================== UI-04 settings search
+def _visible_titles(page) -> set[str]:
+    return {row.title.text() for sec in page._sections() if not sec.isHidden() for row in sec._rows if not row.isHidden()}
+
+
+def test_ui04_settings_search_matches_sections_and_everyday_words(demo):
+    page = demo.page("settings")
+    page.find.setText("hotkey")
+    assert {"Dictation", "Command mode", "Paste last transcript", "Undo last paste",
+            "Hands-free lock"} <= _visible_titles(page)
+    page.find.setText("shortcut")
+    assert "Dictation" in _visible_titles(page) and not page.no_match.isVisible()
+    page.find.setText("gpu")
+    assert {"Speech recognition device", "Language model device", "Speed check"} <= _visible_titles(page)
+    page.find.setText("startup")
+    assert _visible_titles(page) == {"Launch at login", "Start in the tray"}
+    page.find.setText("privacy")                               # a section name shows the whole section
+    assert "Keep transcripts for" in _visible_titles(page)
+    page.find.setText("model")
+    assert {"Speech recognition", "Smart cleanup and Command mode"} <= _visible_titles(page)
+    page.find.setText("zzz-nothing")
+    assert page.no_match.isVisible() and not _visible_titles(page)
+    page.find.setText("")
+    assert not page.no_match.isVisible()
+
+
+# =========================================================================== UI-06 settings tab order
+def _tab_stops(win) -> list[str]:
+    out, x = [], win.nextInFocusChain()
+    while x is not win:
+        if x.isVisible() and x.isEnabled() and x.focusPolicy() & Qt.FocusPolicy.TabFocus and x.objectName():
+            out.append(x.objectName())
+        x = x.nextInFocusChain()
+    return out
+
+
+def test_ui06_search_and_jump_come_first_in_settings(demo):
+    page = demo.page("settings")
+    stops = _tab_stops(demo.win)
+    i = stops.index("settings_search")
+    assert stops[i + 1] == "settings_jump" and stops[i + 2] == "settings_hotkey_recorder_change"
+    assert stops.index("settings_reset") > i
+    page.hide()
+    page.show()                                                # shown again: the order is fixed only once
+    assert _tab_stops(demo.win) == stops
+
+
+# =========================================================================== UI-16 duplicates and alignment
+def test_ui16_the_version_heads_one_row_only(demo):
+    page = demo.page("settings")
+    titles = [row.title.text() for sec in page._sections() for row in sec._rows]
+    assert sum(t.startswith("VoxFlow ") for t in titles) == 0
+    assert f"Version {demo.c.version}" in titles and "About VoxFlow" in titles
+
+
+def test_ui16_a_hotkey_that_cannot_be_cleared_ends_at_the_edge(show):
+    fixed = show(HotkeyRecorder("ctrl+win", name="Dictation hotkey"), 400, 60)
+    clearable = show(HotkeyRecorder("", name="Undo hotkey", allow_clear=True), 400, 60)
+    QApplication.processEvents()
+    assert fixed.btn.geometry().right() == fixed.width() - 1, "no empty x column"
+    assert clearable.btn.geometry().right() < clearable.width() - 30, "a clearable one keeps the slot for its x"
