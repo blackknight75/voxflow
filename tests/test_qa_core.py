@@ -459,3 +459,148 @@ def test_c05_a_refused_model_answer_no_longer_brings_the_stutters_back():
     assert c.clean("I I think that the problem is in the the database.") == \
         "I think that the problem is in the database."
     assert c.last_info["rejected"] is True
+
+
+# =========================================================================== C-06: VRAM held after long dictations
+import types  # noqa: E402
+
+import numpy as np  # noqa: E402
+
+from voxflow import asr  # noqa: E402
+from test_asr_unit import fake_ort  # noqa: E402,F401  (fixture)
+
+
+class _Encoder:
+    def __init__(self):
+        self.runs = []
+
+    def run(self, output_names, input_feed, run_options=None):
+        self.runs.append(run_options)
+        return ["out"]
+
+    def get_providers(self):
+        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+
+
+@pytest.fixture
+def run_options(monkeypatch, fake_ort):  # noqa: F811
+    class RunOptions:
+        def __init__(self):
+            self.entries = {}
+
+        def add_run_config_entry(self, key, value):
+            self.entries[key] = value
+
+    fake_ort.RunOptions = RunOptions
+    return fake_ort
+
+
+def _features(seconds):
+    return {"audio_signal": np.zeros((1, 128, int(seconds * 100)), dtype=np.float32), "length": np.array([1])}
+
+
+@pytest.mark.parametrize("seconds, free, shrinks", [
+    (80, 900, True),                 # a long clip on a GPU short of memory: its working memory goes back
+    (80, 8000, False),               # room to spare: kept, so the next long clip is as fast as before
+    (80, None, False),               # cannot tell: as before
+    (20, 900, False),                # a short clip never needs much
+])
+def test_c06_a_long_clip_gives_its_gpu_memory_back_only_when_the_gpu_is_short_of_it(run_options, monkeypatch,
+                                                                                   seconds, free, shrinks):
+    asked = []
+    monkeypatch.setattr(gpuprobe, "cuda_free_mb", lambda: asked.append(1) or free)
+    encoder = _Encoder()
+    session = asr._ShrinkingSession(encoder)
+    assert session.run(["outputs"], _features(seconds)) == ["out"]
+    (options,) = encoder.runs
+    if shrinks:
+        assert options.entries == {"memory.enable_memory_arena_shrinkage": "gpu:0"}
+    else:
+        assert options is None
+    assert bool(asked) == (seconds > asr.SHRINK_AFTER_S), "short clips do not even ask"
+
+
+def test_c06_the_wrapper_is_the_encoder_for_everything_else(run_options, monkeypatch):
+    monkeypatch.setattr(gpuprobe, "cuda_free_mb", lambda: 100)
+    encoder = _Encoder()
+    session = asr._ShrinkingSession(encoder)
+    mine = object()
+    session.run(["outputs"], _features(80), mine)
+    session.run(["outputs"], [np.zeros(3)])                     # not a feed it understands: passed on as is
+    assert encoder.runs == [mine, None], "the caller's own options win"
+    assert session.get_providers() == encoder.get_providers()
+    model = types.SimpleNamespace(asr=types.SimpleNamespace(_encoder=session))
+    assert asr._runs_on(model, "CUDAExecutionProvider"), "the check that the encoder runs on the GPU still works"
+
+
+def test_c06_the_cuda_build_wraps_its_encoder_and_sets_the_memory_probe_up(fake_ort, monkeypatch, caplog):  # noqa: F811
+    probes = []
+    monkeypatch.setattr(gpuprobe, "cuda_free_mb", lambda: probes.append(1) or 5000)
+    encoder = _Encoder()
+
+    def load_model(name, **kw):
+        decoder = types.SimpleNamespace(_model_path="decoder_joint-model.onnx")
+        return types.SimpleNamespace(asr=types.SimpleNamespace(_decoder_joint=decoder, _encoder=encoder))
+
+    monkeypatch.setattr(fake_ort.onnx_asr, "load_model", load_model)
+    model = asr._build_cuda("my-model")
+    assert isinstance(model.asr._encoder, asr._ShrinkingSession) and model.asr._encoder._session is encoder
+    assert probes == [1], "the first probe (NVML start) belongs to the load, not to a dictation"
+    bare = types.SimpleNamespace(asr=types.SimpleNamespace())
+    with caplog.at_level("INFO"):
+        assert asr._shrink_long_runs(bare) is bare and not hasattr(bare.asr, "_encoder")
+    assert "not shrunk after long clips" in caplog.text
+
+
+class _FakeNvml:
+    def __init__(self, free_mb=1500, init=0, handle=0, info=0):
+        self.free_mb, self.init, self.handle, self.info = free_mb, init, handle, info
+        self.bus = None
+
+    def nvmlInit_v2(self):
+        return self.init
+
+    def nvmlDeviceGetHandleByPciBusId_v2(self, bus, ref):
+        self.bus = bus.value
+        return self.handle
+
+    def nvmlDeviceGetMemoryInfo(self, handle, ref):
+        ref._obj.free = self.free_mb << 20
+        return self.info
+
+
+class _FakeCudaBus(_FakeCuda):
+    def __init__(self, bus_status=0):
+        super().__init__()
+        self.bus_status = bus_status
+
+    def cuDeviceGetPCIBusId(self, buf, size, dev):
+        buf.value = b"0000:01:00.0"
+        return self.bus_status
+
+
+def _probe(monkeypatch, cu, nvml, info=RTX50):
+    monkeypatch.setattr(gpuprobe, "_cuda_cache", [info])
+    monkeypatch.setattr(gpuprobe, "_nvml_cache", [])
+    monkeypatch.setattr(gpuprobe, "_load_library", lambda name: {"nvcuda.dll": cu, "nvml.dll": nvml}[name])
+
+
+def test_c06_free_gpu_memory_comes_from_nvml_for_the_cuda_device_by_pci_bus(monkeypatch):
+    nvml = _FakeNvml(free_mb=1500)
+    _probe(monkeypatch, _FakeCudaBus(), nvml)
+    assert gpuprobe.cuda_free_mb() == 1500 and nvml.bus == b"0000:01:00.0"
+    nvml.free_mb = 9000
+    assert gpuprobe.cuda_free_mb() == 9000, "asked fresh every time, set up once"
+    nvml.info = 3
+    assert gpuprobe.cuda_free_mb() is None
+
+
+@pytest.mark.parametrize("cu, nvml, info", [
+    (_FakeCudaBus(), _FakeNvml(), None),                   # no CUDA driver at all
+    (_FakeCudaBus(bus_status=1), _FakeNvml(), RTX50),
+    (_FakeCudaBus(), _FakeNvml(init=9), RTX50),
+    (_FakeCudaBus(), _FakeNvml(handle=13), RTX50),
+])
+def test_c06_free_gpu_memory_unknown_when_the_driver_cannot_say(monkeypatch, cu, nvml, info):
+    _probe(monkeypatch, cu, nvml, info)
+    assert gpuprobe.cuda_free_mb() is None and gpuprobe.cuda_free_mb() is None

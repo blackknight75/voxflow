@@ -198,6 +198,12 @@ process and only when it gets that far. `Transcriber.load()` walks `ASR_BACKENDS
   | `cuda` | `cuda` | `cuda` |
   | `webgpu` or `vulkan` | `webgpu` | `vulkan` |
 
+* GPU memory on CUDA: onnxruntime's memory arena grows with the longest clip and keeps that memory (Parakeet on
+  the RTX 5080: 3.3 GB after the load, +1.1 GB after an 80 s clip, +5.2 GB after 240 s). A clip longer than 30 s
+  that starts while the GPU has less than 2 GB free gives its working memory back when it ends
+  (`SHRINK_AFTER_S` / `SHRINK_BELOW_FREE_MB` in `voxflow/asr.py`; free memory from NVML, as nvidia-smi shows it,
+  0.02 ms). With room to spare nothing changes, because the next long clip would pay for allocating it again
+  (measured 5-25 ms per long clip).
 * Measured on the development PC (RTX 5080 / Ryzen 9800X3D, the 11.6 s clip, warm, medians of 5): CUDA 29 ms,
   WebGPU on the same card 65 ms, CPU 257 ms; load and warm-up 2.4 s, 3.5 s and 2.9 s. The text was identical on
   all three. **WebGPU was only ever run on that NVIDIA card and, forced, on the integrated AMD GPU; no separate

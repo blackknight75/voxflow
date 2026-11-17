@@ -177,6 +177,55 @@ def _decoder_on_cpu(model):
     return model
 
 
+# The CUDA memory arena grows to the largest clip it has seen and keeps that memory for the whole session: measured
+# with Parakeet on an RTX 5080, +1.1 GB after an 80 s clip, +2.8 GB after 160 s, +5.2 GB after 240 s on top of the
+# 3.3 GB the model takes (QA C-06). On an 8 GB card that ends in an out-of-memory error, and the session moves to
+# the CPU for good. Giving the memory back costs time, though: the next long clip allocates it again (measured
+# +15-25 ms for 80 s, +40-60 ms for 160-240 s of audio). So a run on audio longer than SHRINK_AFTER_S hands the
+# arena's free chunks back when it ends only while the GPU has less than SHRINK_BELOW_FREE_MB free: a card with
+# room keeps its speed, a full one (a small card, a game) stays bounded.
+SHRINK_AFTER_S = 30.0
+SHRINK_BELOW_FREE_MB = 2048
+_FEATURE_FRAMES_PER_S = 100        # the encoder input: one feature frame per 10 ms of audio
+
+
+class _ShrinkingSession:
+    """An onnxruntime session (the encoder) whose long runs shrink the CUDA arena when they end, while the GPU is
+    short of memory. Everything else is the session's own."""
+
+    def __init__(self, session):
+        self._session = session
+
+    def __getattr__(self, name):
+        return getattr(self._session, name)
+
+    def run(self, output_names, input_feed, run_options=None):
+        signal = input_feed.get("audio_signal") if isinstance(input_feed, dict) else None
+        frames = int(signal.shape[-1]) if hasattr(signal, "shape") else 0
+        if run_options is None and frames > SHRINK_AFTER_S * _FEATURE_FRAMES_PER_S:
+            free = gpuprobe.cuda_free_mb()
+            if free is not None and free < SHRINK_BELOW_FREE_MB:
+                import onnxruntime as ort
+
+                log.info("long clip with %d MiB of GPU memory free: its working memory is given back", free)
+                run_options = ort.RunOptions()
+                run_options.add_run_config_entry("memory.enable_memory_arena_shrinkage", "gpu:0")
+        return self._session.run(output_names, input_feed, run_options)
+
+
+def _shrink_long_runs(model):
+    """Let the encoder of a CUDA model give back the memory a long clip needed (onnx-asr's pinned private
+    attribute, like ``_decoder_on_cpu``; without it the model is used as it was built)."""
+    recogniser = getattr(model, "asr", None)
+    encoder = getattr(recogniser, "_encoder", None)
+    if encoder is None or not hasattr(encoder, "run"):
+        log.info("the encoder's GPU memory is not shrunk after long clips (this onnx-asr has no _encoder session)")
+        return model
+    recogniser._encoder = _ShrinkingSession(encoder)
+    gpuprobe.cuda_free_mb()            # set the memory probe up now, during the load, not in a long dictation
+    return model
+
+
 def _build_cuda(name: str):
     import onnx_asr
 
@@ -184,7 +233,8 @@ def _build_cuda(name: str):
                                             # allocate what is asked, not the next power of two: ~0.3-0.8 GB less VRAM
                                             "arena_extend_strategy": "kSameAsRequested"}),
                  "CPUExecutionProvider"]
-    return _decoder_on_cpu(onnx_asr.load_model(name, sess_options=_session_options(), providers=providers))
+    model = onnx_asr.load_model(name, sess_options=_session_options(), providers=providers)
+    return _shrink_long_runs(_decoder_on_cpu(model))
 
 
 def _build_webgpu(name: str):

@@ -5,6 +5,7 @@ their own: ``voxflow.cleanup`` picks its llama.cpp build with it, speech recogni
 
     nvidia_driver()      -> bool         the NVIDIA driver's CUDA library loads (an NVIDIA card with its driver)
     cuda_info()          -> CudaInfo     the CUDA version that driver supports and each device's compute capability
+    cuda_free_mb()       -> int | None   free memory of CUDA device 0 in MiB
     vulkan_gpus()        -> list[Gpu]    the devices the Vulkan loader reports: any vendor (AMD, Intel, NVIDIA, ...)
     usable_vulkan_gpu(n) -> Gpu | None   the best real GPU among them with at least ``n`` MiB of memory
     library_loads(name)  -> bool         a DLL can be loaded by name
@@ -103,6 +104,48 @@ def _query_cuda(cu) -> CudaInfo:
         check(cu.cuDeviceGetAttribute(ctypes.byref(minor), _CU_COMPUTE_MINOR, device), "cuDeviceGetAttribute")
         caps.append((major.value, minor.value))
     return CudaInfo(version.value, tuple(caps))
+
+
+class _NvmlMemory(ctypes.Structure):
+    _fields_ = [("total", ctypes.c_ulonglong), ("free", ctypes.c_ulonglong), ("used", ctypes.c_ulonglong)]
+
+
+_nvml_cache: list = []             # [(nvml library, device handle)] or [None]
+
+
+def _nvml_device0():
+    """NVML's handle for CUDA device 0 (matched by PCI bus id: the two number devices differently)."""
+    cu = _load_library("nvcuda.dll")
+    dev, bus = ctypes.c_int(0), ctypes.create_string_buffer(64)
+    if cu.cuDeviceGet(ctypes.byref(dev), 0) != 0 or cu.cuDeviceGetPCIBusId(bus, 64, dev) != 0:
+        raise OSError("CUDA device 0 has no PCI bus id")
+    nvml = _load_library("nvml.dll")
+    handle = ctypes.c_void_p()
+    if nvml.nvmlInit_v2() != 0 or nvml.nvmlDeviceGetHandleByPciBusId_v2(bus, ctypes.byref(handle)) != 0:
+        raise OSError(f"NVML does not know the device at {bus.value!r}")
+    return nvml, handle
+
+
+def cuda_free_mb() -> int | None:
+    """Free memory of CUDA device 0 (the one onnxruntime and llama.cpp use) in MiB, counting every process (a game
+    too), as nvidia-smi shows it; None when it cannot be told. Asks NVML, part of the driver: the first call sets it
+    up (tens of milliseconds, most of it the driver start every CUDA program pays), later ones take microseconds.
+    The driver's own cuMemGetInfo is no use here: on Windows it leaves the memory of other processes out."""
+    if cuda_info() is None:
+        return None
+    if not _nvml_cache:
+        try:
+            _nvml_cache.append(_nvml_device0())
+        except Exception as exc:  # noqa: BLE001 - a question about memory must never break a dictation
+            log.info("GPU free memory unknown (%s: %s)", type(exc).__name__, exc)
+            _nvml_cache.append(None)
+    if _nvml_cache[0] is None:
+        return None
+    nvml, handle = _nvml_cache[0]
+    memory = _NvmlMemory()
+    if nvml.nvmlDeviceGetMemoryInfo(handle, ctypes.byref(memory)) != 0:
+        return None
+    return int(memory.free >> 20)
 
 
 def cuda_info() -> CudaInfo | None:
