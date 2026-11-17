@@ -36,7 +36,8 @@ def test_backend_names_match_the_model_tables():
     from voxflow.asr import ASR_BACKENDS
     from voxflow.cleanup import LLAMA_BACKENDS
     assert sc.backends("asr") == tuple(b.name for b in ASR_BACKENDS)
-    assert sc.backends("cleanup") == tuple(b.name for b in LLAMA_BACKENDS)
+    # two llama.cpp builds share the name "cuda" (CUDA 13 for RTX 50xx, else CUDA 12): one back-end to measure
+    assert sc.backends("cleanup") == tuple(dict.fromkeys(b.name for b in LLAMA_BACKENDS))
 
 
 def test_the_static_choice_is_the_first_back_end_the_automatic_probe_accepts():

@@ -34,9 +34,10 @@ python -m venv .venv
 * `--install-cuda` (needs internet) downloads the CUDA 12 runtime DLLs the cleanup wheel needs
   (`cudart64_12`, `cublas64_12`, `cublasLt64_12`) and copies just those next to `llama.dll`. Skip it and
   the CUDA build of llama.cpp cannot be loaded.
-* `fetch_llama_backends.py` (needs internet once, about 50 MB) adds the Vulkan and CPU builds of llama.cpp next
-  to the CUDA one. Skip it and the language model only loads on a PC with an NVIDIA driver; anywhere else VoxFlow
-  falls back to the rule-based cleanup. See [Where the language model runs](#where-the-language-model-runs).
+* `fetch_llama_backends.py` (needs internet once, about 200 MB) adds the CUDA 13, Vulkan and CPU builds of
+  llama.cpp next to the CUDA 12 one. Skip it and the language model only loads on a PC with an NVIDIA driver;
+  anywhere else VoxFlow falls back to the rule-based cleanup, and an RTX 50xx card compiles its GPU code on the
+  first start (see below). See [Where the language model runs](#where-the-language-model-runs).
 * **Windows 260-character path limit:** installing PySide6 into a deep folder can fail with
   `OSError: [Errno 2] ... PySide6\qml\...`. Use a short install path such as `C:\voxflow`, or enable Windows long
   paths (`reg add HKLM\SYSTEM\CurrentControlSet\Control\FileSystem /v LongPathsEnabled /t REG_DWORD /d 1 /f`
@@ -91,7 +92,8 @@ What the installer does:
 * `VoxFlow-Setup-<version>.exe` (about 1.8 GB) installs for the current user only: no administrator rights,
   default folder `%LOCALAPPDATA%\Programs\VoxFlow`, a Start menu entry, an optional desktop shortcut and a
   "Launch VoxFlow" box on the last page. Running a newer installer updates the old copy in place.
-* The GPU runtime (CUDA 13 for speech recognition, CUDA 12 for the language model) is inside the installer, so no
+* The GPU runtime (CUDA 13 for speech recognition, CUDA 12 and, for RTX 50xx, CUDA 13 for the language model; the
+  CUDA 13 llama.cpp build adds about 150 MB unpacked) is inside the installer, so no
   CUDA toolkit is needed. So are the Vulkan and CPU builds of llama.cpp: without an NVIDIA card the language model
   uses another GPU through Vulkan or the CPU. So is the WebGPU plugin for onnxruntime (about 30 MB): without an
   NVIDIA card speech recognition uses another separate GPU through it, or the CPU.
@@ -105,13 +107,14 @@ What the installer does:
 ## Where the language model runs
 
 llama.cpp is built once per kind of hardware, and a build can only be loaded where its driver is installed. VoxFlow
-therefore carries three builds of the same llama-cpp-python release, each in its own folder next to the
+therefore carries four builds of the same llama-cpp-python release, each in its own folder next to the
 `llama_cpp` package, and picks one before `llama_cpp` is imported (`LLAMA_BACKENDS` in `voxflow/cleanup.py`, in
 this order):
 
 | back-end | folder | chosen when |
 | --- | --- | --- |
-| `cuda` | `llama_cpp\lib` (the installed wheel, plus `--install-cuda`) | the NVIDIA driver is installed and the build loads |
+| `cuda` | `llama_cpp\lib_cuda13` (CUDA 13: native code for sm_86, sm_89, sm_120, sm_121) | every NVIDIA GPU is one the CUDA 12 build has no native code for and this one has (today: RTX 50xx), the driver supports CUDA 13.0 or newer, and the build loads |
+| `cuda` | `llama_cpp\lib` (the installed wheel, plus `--install-cuda`: native code for sm_60 to sm_90) | the NVIDIA driver is installed and the build loads |
 | `vulkan` | `llama_cpp\lib_vulkan` | Vulkan reports a separate (discrete) graphics card with at least 3500 MiB, any vendor, and the build loads |
 | `cpu` | `llama_cpp\lib_cpu` | always loads: the last resort |
 
@@ -131,7 +134,20 @@ this order):
   build, so a change applies when VoxFlow restarts.
 * The Vulkan and CPU builds come from the wheels the llama-cpp-python project publishes for the same version,
   pinned by SHA-256 in `scripts/fetch_llama_backends.py`. When `requirements.txt` moves to another
-  llama-cpp-python version, add that version's two wheels there; a folder built for another version is never loaded.
+  llama-cpp-python version, add that version's builds there; a folder built for another version is never loaded.
+* Why a CUDA 13 build: a GPU needs machine code (SASS) for its own generation, or the driver compiles the build's
+  PTX on first use of each kernel module and caches it (`%APPDATA%\VoxFlow\cuda-cache`). The CUDA 12 wheel has SASS
+  for sm_60 to sm_90 only, so on an RTX 5080 a first start took 25-30 s and the first dictation of a new length
+  stalled 4-8 s more (QA C-01). No llama-cpp-python wheel has sm_120 code (the cu130 and cu132 wheels stop at
+  sm_90 too), but ggml-org's own CUDA 13.4 build of the llama.cpp release that llama-cpp-python vendors (b11312
+  for 0.3.36) has. `lib_cuda13` is that build's `ggml-cuda.dll` next to the wheel's own `llama.dll` and ggml
+  DLLs; it uses the CUDA 13 cuBLAS that onnxruntime-gpu already brings. Measured on the RTX 5080 against the CUDA
+  12 build: empty cache 1.0 s load instead of 24.7 s and no stall, warm 2 % less time over 30 dictations,
+  identical text for all of them, the same GPU memory.
+* Where the loaded CUDA build has no native code for a GPU (the CUDA 12 build on a PC whose driver is too old for
+  CUDA 13, say), the load also prefills one short user turn, so the compiling happens while the UI says
+  "Preparing the GPU" instead of inside a dictation: 8 s on an empty cache, 30-40 ms once compiled. GPUs with
+  native code skip it.
 * Measured on the development PC (RTX 5080, one 19-word sentence that needs the language model, warm): CUDA 82 ms,
   Vulkan on the same card 82 ms, CPU build 0.9 s. **Vulkan was only ever run on that NVIDIA card (and, forced, on
   the integrated AMD GPU above); no AMD or Intel graphics card has been tested.** Speech recognition is separate:
@@ -182,6 +198,12 @@ process and only when it gets that far. `Transcriber.load()` walks `ASR_BACKENDS
   | `cuda` | `cuda` | `cuda` |
   | `webgpu` or `vulkan` | `webgpu` | `vulkan` |
 
+* GPU memory on CUDA: onnxruntime's memory arena grows with the longest clip and keeps that memory (Parakeet on
+  the RTX 5080: 3.3 GB after the load, +1.1 GB after an 80 s clip, +5.2 GB after 240 s). A clip longer than 30 s
+  that starts while the GPU has less than 2 GB free gives its working memory back when it ends
+  (`SHRINK_AFTER_S` / `SHRINK_BELOW_FREE_MB` in `voxflow/asr.py`; free memory from NVML, as nvidia-smi shows it,
+  0.02 ms). With room to spare nothing changes, because the next long clip would pay for allocating it again
+  (measured 5-25 ms per long clip).
 * Measured on the development PC (RTX 5080 / Ryzen 9800X3D, the 11.6 s clip, warm, medians of 5): CUDA 29 ms,
   WebGPU on the same card 65 ms, CPU 257 ms; load and warm-up 2.4 s, 3.5 s and 2.9 s. The text was identical on
   all three. **WebGPU was only ever run on that NVIDIA card and, forced, on the integrated AMD GPU; no separate

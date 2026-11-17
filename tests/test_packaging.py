@@ -184,8 +184,9 @@ def _sha(data: bytes) -> str:
 def test_spec_bundles_every_llama_build_folder_the_app_chooses_from():
     from voxflow.cleanup import LLAMA_BACKENDS
     spec = (ROOT / "packaging" / "voxflow.spec").read_text("utf-8")
-    assert [b.folder for b in LLAMA_BACKENDS] == ["lib", "lib_vulkan", "lib_cpu"]
-    assert 'for folder in ("lib_vulkan", "lib_cpu"):' in spec and 'f"llama_cpp/{folder}"' in spec
+    assert [b.folder for b in LLAMA_BACKENDS] == ["lib_cuda13", "lib", "lib_vulkan", "lib_cpu"]
+    assert 'for folder in ("lib_cuda13", "lib_vulkan", "lib_cpu"):' in spec and 'f"llama_cpp/{folder}"' in spec
+    assert 'for sub in ("cu13", "cudnn"):' in spec, "the CUDA 13 cuBLAS that lib_cuda13's ggml-cuda.dll loads"
     assert "version.txt" in spec, "the folder's release marker is bundled: the app refuses a build without a match"
     assert "raise SystemExit" in spec, "a freeze without the Vulkan / CPU builds must fail, not ship a CUDA-only app"
 
@@ -195,7 +196,8 @@ def test_the_build_fetches_the_extra_llama_builds_before_the_freeze():
     assert src.index("fetch_llama_backends.fetch()") < src.index('"-m", "PyInstaller"')
     release = (ROOT / ".github" / "workflows" / "release.yml").read_text("utf-8")
     for needed in ("scripts/fetch_llama_backends.py", "_internal/llama_cpp/lib_cpu/llama.dll",
-                   "_internal/llama_cpp/lib_vulkan/ggml-vulkan.dll", "_internal/llama_cpp/lib_cpu/version.txt"):
+                   "_internal/llama_cpp/lib_vulkan/ggml-vulkan.dll", "_internal/llama_cpp/lib_cpu/version.txt",
+                   "_internal/llama_cpp/lib_cuda13/ggml-cuda.dll", "_internal/llama_cpp/lib_cuda13/version.txt"):
         assert needed in release
 
 
@@ -203,13 +205,17 @@ def test_the_extra_llama_builds_are_pinned_for_the_required_version():
     fetch = _load_fetch_script()
     required = re.search(r"^llama-cpp-python==(\S+)\s*$", (ROOT / "requirements.txt").read_text("utf-8"), re.M).group(1)
     pins = fetch.PINS[required]
-    assert set(pins) == set(fetch.backend_folders()) == {"vulkan", "cpu"}
-    for name, (url, sha256) in pins.items():
-        assert url.startswith("https://github.com/abetlen/llama-cpp-python/releases/download/v" + required)
-        assert url.endswith(f"llama_cpp_python-{required}-py3-none-win_amd64.whl")
+    assert list(pins) == fetch.backend_folders() == ["lib_cuda13", "lib_vulkan", "lib_cpu"]
+    for folder, (kind, url, sha256) in pins.items():
         assert re.fullmatch(r"[0-9a-f]{64}", sha256)
-    assert "-vulkan/" in pins["vulkan"][0] and pins["vulkan"][1] != pins["cpu"][1]
-    assert fetch.backend_folders() == {"vulkan": "lib_vulkan", "cpu": "lib_cpu"}
+        if kind == "wheel":
+            assert url.startswith("https://github.com/abetlen/llama-cpp-python/releases/download/v" + required)
+            assert url.endswith(f"llama_cpp_python-{required}-py3-none-win_amd64.whl")
+    assert "-vulkan/" in pins["lib_vulkan"][1] and pins["lib_vulkan"][2] != pins["lib_cpu"][2]
+    # llama-cpp-python 0.3.36 vendors llama.cpp 0c1e570, which ggml-org released as b11312
+    assert pins["lib_cuda13"][:2] == ("cuda13", "https://github.com/ggml-org/llama.cpp/releases/download/b11312/"
+                                                "llama-b11312-bin-win-cuda-13.4-x64.zip")
+    assert fetch.WHEEL_SHARED == ("llama.dll", "ggml.dll", "ggml-base.dll", "ggml-cpu.dll", "mtmd.dll")
 
 
 def test_fetch_installs_only_the_dlls_of_a_wheel_that_matches_its_pin(tmp_path, monkeypatch, capsys):
@@ -220,8 +226,10 @@ def test_fetch_installs_only_the_dlls_of_a_wheel_that_matches_its_pin(tmp_path, 
     cpu = _wheel({"llama_cpp/lib/llama.dll": b"CPU-LLAMA", "llama_cpp/lib/ggml-cpu.dll": b"CPU"})
     wheels = {"https://example.invalid/vulkan.whl": vulkan, "https://example.invalid/cpu.whl": cpu}
     monkeypatch.setattr(fetch.metadata, "version", lambda dist: "9.9.9")
-    monkeypatch.setattr(fetch, "PINS", {"9.9.9": {"vulkan": ("https://example.invalid/vulkan.whl", _sha(vulkan)),
-                                                  "cpu": ("https://example.invalid/cpu.whl", _sha(cpu))}})
+    monkeypatch.setattr(fetch, "backend_folders", lambda: ["lib_vulkan", "lib_cpu"])
+    monkeypatch.setattr(fetch, "PINS", {"9.9.9": {
+        "lib_vulkan": ("wheel", "https://example.invalid/vulkan.whl", _sha(vulkan)),
+        "lib_cpu": ("wheel", "https://example.invalid/cpu.whl", _sha(cpu))}})
     dest = tmp_path / "llama_cpp"
     stale = dest / "lib_cpu"
     stale.mkdir(parents=True)
@@ -230,14 +238,14 @@ def test_fetch_installs_only_the_dlls_of_a_wheel_that_matches_its_pin(tmp_path, 
     (stale / "version.txt").write_text("9.9.8\n", "utf-8")
     asked = []
 
-    assert fetch.fetch(dest, check_only=True) == 1 and "cpu: MISSING" in capsys.readouterr().out
+    assert fetch.fetch(dest, check_only=True) == 1 and "lib_cpu: MISSING" in capsys.readouterr().out
     assert fetch.fetch(dest, fetcher=lambda url: asked.append(url) or wheels[url]) == 0
     assert asked == ["https://example.invalid/vulkan.whl", "https://example.invalid/cpu.whl"]
     assert sorted(p.name for p in (dest / "lib_vulkan").iterdir()) == ["ggml-vulkan.dll", "llama.dll", "version.txt"]
     assert (dest / "lib_vulkan" / "llama.dll").read_bytes() == b"VK-LLAMA"
     assert sorted(p.name for p in stale.iterdir()) == ["ggml-cpu.dll", "llama.dll", "version.txt"], "no mix of releases"
     assert (stale / "version.txt").read_text("utf-8").strip() == "9.9.9"
-    assert "vulkan: installed ggml-vulkan.dll, llama.dll" in capsys.readouterr().out
+    assert "lib_vulkan: installed ggml-vulkan.dll, llama.dll" in capsys.readouterr().out
 
     # a second run needs no network, and --check is satisfied
     assert fetch.fetch(dest, fetcher=lambda url: pytest.fail("nothing may be downloaded")) == 0
@@ -249,14 +257,17 @@ def test_fetch_refuses_a_download_that_does_not_match_its_pin(tmp_path, monkeypa
     fetch = _load_fetch_script()
     good = _wheel({"llama_cpp/lib/llama.dll": b"REAL"})
     monkeypatch.setattr(fetch.metadata, "version", lambda dist: "9.9.9")
-    monkeypatch.setattr(fetch, "PINS", {"9.9.9": {"vulkan": ("u", _sha(good)), "cpu": ("u", _sha(good))}})
+    monkeypatch.setattr(fetch, "backend_folders", lambda: ["lib_vulkan", "lib_cpu"])
+    monkeypatch.setattr(fetch, "PINS", {"9.9.9": {"lib_vulkan": ("wheel", "u", _sha(good)),
+                                                  "lib_cpu": ("wheel", "u", _sha(good))}})
     with pytest.raises(SystemExit) as exc:
         fetch.fetch(tmp_path, fetcher=lambda url: _wheel({"llama_cpp/lib/llama.dll": b"TAMPERED"}))
     assert "refusing the download for lib_vulkan: SHA-256 is" in str(exc.value)
     assert not (tmp_path / "lib_vulkan").exists(), "nothing is unpacked from a wheel that fails the check"
 
     empty = _wheel({"llama_cpp/llama.py": b"no libraries"})
-    monkeypatch.setattr(fetch, "PINS", {"9.9.9": {"vulkan": ("u", _sha(empty)), "cpu": ("u", _sha(empty))}})
+    monkeypatch.setattr(fetch, "PINS", {"9.9.9": {"lib_vulkan": ("wheel", "u", _sha(empty)),
+                                                  "lib_cpu": ("wheel", "u", _sha(empty))}})
     with pytest.raises(SystemExit) as exc:
         fetch.fetch(tmp_path, fetcher=lambda url: empty)
     assert "has no llama_cpp/lib/llama.dll" in str(exc.value)
@@ -306,3 +317,54 @@ def test_fetch_downloads_over_https_with_a_generic_client_name(monkeypatch):
     monkeypatch.setattr(fetch.urllib.request, "urlopen", urlopen)
     assert fetch.download("https://github.com/abetlen/llama-cpp-python/releases/download/x.whl") == b"wheel bytes"
     assert seen["url"].startswith("https://github.com/abetlen/") and seen["agent"] == "python-urllib"
+
+
+def _cuda_wheel_lib(lib: Path, ggml=b"MZ imports ggml-cuda.dll and ggml-cpu.dll") -> Path:
+    lib.mkdir(parents=True, exist_ok=True)
+    for name in ("llama.dll", "ggml-base.dll", "ggml-cpu.dll", "mtmd.dll"):
+        (lib / name).write_bytes(b"WHEEL-" + name.encode())
+    (lib / "ggml.dll").write_bytes(ggml)
+    return lib
+
+
+def test_qa_c01_the_cuda13_folder_is_the_archives_ggml_cuda_next_to_the_wheels_own_dlls(tmp_path, monkeypatch,
+                                                                                        capsys):
+    fetch = _load_fetch_script()
+    archive = _wheel({"ggml-cuda.dll": b"SM120", "llama.dll": b"UPSTREAM-LLAMA", "ggml-cpu-zen4.dll": b"X",
+                      "llama-server.exe": b"exe"})
+    dest = tmp_path / "llama_cpp"
+    _cuda_wheel_lib(dest / "lib")
+    monkeypatch.setattr(fetch.metadata, "version", lambda dist: "9.9.9")
+    monkeypatch.setattr(fetch, "backend_folders", lambda: ["lib_cuda13"])
+    monkeypatch.setattr(fetch, "PINS", {"9.9.9": {"lib_cuda13": ("cuda13", "https://example.invalid/b1.zip",
+                                                                 _sha(archive))}})
+    assert fetch.fetch(dest, fetcher=lambda url: archive) == 0
+    folder = dest / "lib_cuda13"
+    assert sorted(p.name for p in folder.iterdir()) == ["ggml-base.dll", "ggml-cpu.dll", "ggml-cuda.dll", "ggml.dll",
+                                                        "llama.dll", "mtmd.dll", "version.txt"]
+    assert (folder / "ggml-cuda.dll").read_bytes() == b"SM120", "the only file taken from the archive"
+    assert (folder / "llama.dll").read_bytes() == b"WHEEL-llama.dll", "the bindings keep talking to the wheel's llama"
+    assert (folder / "version.txt").read_text("utf-8").strip() == "9.9.9"
+    assert "lib_cuda13: installed ggml-base.dll, ggml-cpu.dll, ggml-cuda.dll" in capsys.readouterr().out
+    assert fetch.fetch(dest, fetcher=lambda url: pytest.fail("nothing may be downloaded")) == 0
+
+
+def test_qa_c01_the_cuda13_folder_refuses_a_bad_archive_or_a_wheel_that_is_not_the_cuda_one(tmp_path):
+    fetch = _load_fetch_script()
+    good = _wheel({"bin/ggml-cuda.dll": b"SM120"})
+    lib = _cuda_wheel_lib(tmp_path / "lib")
+    with pytest.raises(SystemExit, match="refusing the download for lib_cuda13: SHA-256 is"):
+        fetch.install_cuda13(tmp_path / "lib_cuda13", _wheel({"ggml-cuda.dll": b"TAMPERED"}), _sha(good), "1", lib)
+    assert not (tmp_path / "lib_cuda13").exists()
+    for wrong in (_wheel({"llama.dll": b"no cuda"}), _wheel({"a/ggml-cuda.dll": b"1", "b/ggml-cuda.dll": b"2"})):
+        with pytest.raises(SystemExit, match="has no single ggml-cuda.dll"):
+            fetch.install_cuda13(tmp_path / "lib_cuda13", wrong, _sha(wrong), "1", lib)
+    vulkan_lib = _cuda_wheel_lib(tmp_path / "vk", ggml=b"MZ imports ggml-vulkan.dll")
+    with pytest.raises(SystemExit, match="is not from the CUDA wheel"):
+        fetch.install_cuda13(tmp_path / "lib_cuda13", good, _sha(good), "1", vulkan_lib)
+    (lib / "mtmd.dll").unlink()
+    with pytest.raises(SystemExit, match=r"mtmd.dll is missing: install requirements.txt"):
+        fetch.install_cuda13(tmp_path / "lib_cuda13", good, _sha(good), "1", lib)
+    assert not (tmp_path / "lib_cuda13").exists(), "nothing is written before every check passed"
+    (lib / "mtmd.dll").write_bytes(b"WHEEL-mtmd.dll")
+    assert "ggml-cuda.dll" in fetch.install_cuda13(tmp_path / "lib_cuda13", good, _sha(good), "1", lib)

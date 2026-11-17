@@ -4,6 +4,8 @@ One small place for every "is there a usable GPU, and whose?" question, so the m
 their own: ``voxflow.cleanup`` picks its llama.cpp build with it, speech recognition can use it the same way.
 
     nvidia_driver()      -> bool         the NVIDIA driver's CUDA library loads (an NVIDIA card with its driver)
+    cuda_info()          -> CudaInfo     the CUDA version that driver supports and each device's compute capability
+    cuda_free_mb()       -> int | None   free memory of CUDA device 0 in MiB
     vulkan_gpus()        -> list[Gpu]    the devices the Vulkan loader reports: any vendor (AMD, Intel, NVIDIA, ...)
     usable_vulkan_gpu(n) -> Gpu | None   the best real GPU among them with at least ``n`` MiB of memory
     library_loads(name)  -> bool         a DLL can be loaded by name
@@ -67,6 +69,96 @@ def library_loads(name: str) -> bool:
 def nvidia_driver() -> bool:
     """True when the NVIDIA display driver is installed: ``nvcuda.dll`` is part of the driver, not of any app."""
     return library_loads("nvcuda.dll")
+
+
+@dataclass(frozen=True)
+class CudaInfo:
+    """What the NVIDIA driver reports: the CUDA version it supports (13000 = 13.0) and each device's compute
+    capability, e.g. ``((12, 0),)`` for one RTX 50xx."""
+    driver_version: int
+    capabilities: tuple
+
+    def __str__(self) -> str:
+        caps = ", ".join(f"sm_{a}{b}" for a, b in self.capabilities) or "no devices"
+        return f"CUDA {self.driver_version // 1000}.{self.driver_version % 1000 // 10} driver, {caps}"
+
+
+_CU_COMPUTE_MAJOR, _CU_COMPUTE_MINOR = 75, 76       # CUdevice_attribute
+_cuda_cache: list = []
+
+
+def _query_cuda(cu) -> CudaInfo:
+    def check(status: int, what: str) -> None:
+        if status != 0:
+            raise OSError(f"{what} returned CUDA error {status}")
+
+    version, count = ctypes.c_int(0), ctypes.c_int(0)
+    check(cu.cuInit(0), "cuInit")
+    check(cu.cuDriverGetVersion(ctypes.byref(version)), "cuDriverGetVersion")
+    check(cu.cuDeviceGetCount(ctypes.byref(count)), "cuDeviceGetCount")
+    caps = []
+    for i in range(count.value):
+        device, major, minor = ctypes.c_int(0), ctypes.c_int(0), ctypes.c_int(0)
+        check(cu.cuDeviceGet(ctypes.byref(device), i), "cuDeviceGet")
+        check(cu.cuDeviceGetAttribute(ctypes.byref(major), _CU_COMPUTE_MAJOR, device), "cuDeviceGetAttribute")
+        check(cu.cuDeviceGetAttribute(ctypes.byref(minor), _CU_COMPUTE_MINOR, device), "cuDeviceGetAttribute")
+        caps.append((major.value, minor.value))
+    return CudaInfo(version.value, tuple(caps))
+
+
+class _NvmlMemory(ctypes.Structure):
+    _fields_ = [("total", ctypes.c_ulonglong), ("free", ctypes.c_ulonglong), ("used", ctypes.c_ulonglong)]
+
+
+_nvml_cache: list = []             # [(nvml library, device handle)] or [None]
+
+
+def _nvml_device0():
+    """NVML's handle for CUDA device 0 (matched by PCI bus id: the two number devices differently)."""
+    cu = _load_library("nvcuda.dll")
+    dev, bus = ctypes.c_int(0), ctypes.create_string_buffer(64)
+    if cu.cuDeviceGet(ctypes.byref(dev), 0) != 0 or cu.cuDeviceGetPCIBusId(bus, 64, dev) != 0:
+        raise OSError("CUDA device 0 has no PCI bus id")
+    nvml = _load_library("nvml.dll")
+    handle = ctypes.c_void_p()
+    if nvml.nvmlInit_v2() != 0 or nvml.nvmlDeviceGetHandleByPciBusId_v2(bus, ctypes.byref(handle)) != 0:
+        raise OSError(f"NVML does not know the device at {bus.value!r}")
+    return nvml, handle
+
+
+def cuda_free_mb() -> int | None:
+    """Free memory of CUDA device 0 (the one onnxruntime and llama.cpp use) in MiB, counting every process (a game
+    too), as nvidia-smi shows it; None when it cannot be told. Asks NVML, part of the driver: the first call sets it
+    up (tens of milliseconds, most of it the driver start every CUDA program pays), later ones take microseconds.
+    The driver's own cuMemGetInfo is no use here: on Windows it leaves the memory of other processes out."""
+    if cuda_info() is None:
+        return None
+    if not _nvml_cache:
+        try:
+            _nvml_cache.append(_nvml_device0())
+        except Exception as exc:  # noqa: BLE001 - a question about memory must never break a dictation
+            log.info("GPU free memory unknown (%s: %s)", type(exc).__name__, exc)
+            _nvml_cache.append(None)
+    if _nvml_cache[0] is None:
+        return None
+    nvml, handle = _nvml_cache[0]
+    memory = _NvmlMemory()
+    if nvml.nvmlDeviceGetMemoryInfo(handle, ctypes.byref(memory)) != 0:
+        return None
+    return int(memory.free >> 20)
+
+
+def cuda_info() -> CudaInfo | None:
+    """The driver's CUDA version and the compute capability of every NVIDIA device; None without a working
+    driver. Asked once per process (``cuInit`` is the start every CUDA program pays anyway, so later users of the
+    driver in this process do not pay it again)."""
+    if not _cuda_cache:
+        try:
+            _cuda_cache.append(_query_cuda(_load_library("nvcuda.dll")))
+        except Exception as exc:  # noqa: BLE001 - no driver, or one that misbehaves: no CUDA device to speak of
+            log.info("no CUDA devices (%s: %s)", type(exc).__name__, exc)
+            _cuda_cache.append(None)
+    return _cuda_cache[0]
 
 
 # --------------------------------------------------------------------------- Vulkan (vendor neutral)

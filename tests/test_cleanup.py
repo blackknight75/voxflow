@@ -204,8 +204,10 @@ def test_latency_measure_rejects_a_rules_fallback():
     c.clean(t)
     t0 = time.perf_counter()
     c.clean(t)
-    assert time.perf_counter() - t0 < 0.1 and c.last_info["rules_only"]    # the old measure saw a fast "pass"
-    time.sleep(0.4)                                                         # let the abandoned generation unwind
+    # since QA C-02 the second call waits for the stuck one inside its own budget instead of failing at once (the old
+    # measure saw a fast "pass" there); it still ends on the rules within that budget
+    assert time.perf_counter() - t0 < 0.3 + 0.2 and c.last_info["rules_only"]
+    time.sleep(0.6)                                                         # let the abandoned generation unwind
     with pytest.raises(AssertionError, match="rules fallback"):
         _best_llm_seconds(c, t)
 
@@ -298,10 +300,11 @@ def test_timeout_is_hard_bounded():
     assert dt < 1.2, dt
     assert out == "So we should move the meeting to Friday."
     assert c.last_info.get("timeout")
-    # while the abandoned generation is still running, new calls degrade instantly instead of queueing
+    # while the abandoned generation is still running, a new call waits for it at most its own budget (QA C-02)
     t0 = time.perf_counter()
     c.clean("so we should uh move the meeting to friday")
-    assert time.perf_counter() - t0 < 0.3
+    assert time.perf_counter() - t0 < 0.4 + 0.3
+    assert c.last_info.get("model_skipped") and not c.last_info.get("timeout")
     time.sleep(3)  # let the abandoned thread unwind
     assert not c._abandoned.is_set()
 
@@ -385,7 +388,7 @@ def test_lone_line_break_commands_return_the_characters():
     c.load()
     assert c.clean("new line") == nl
     assert c.clean("new paragraph") == para
-    assert c.clean("hello new line world") == "Hello" + nl + "World"
+    assert c.clean("hello new line world") == "Hello," + nl + "World"     # a greeting line gets its comma (C-11)
 
 
 def test_install_cuda_without_llama_cpp_is_friendly(monkeypatch):

@@ -211,9 +211,10 @@ def run_pipeline(audio, asr, cleaner, cleanup_enabled: bool = True, **clean_opti
 
     ``clean_options`` (tone, terms, language, smart) are passed to ``cleaner.clean`` when it supports them.
     ``rules_only`` in the result is True when the language model was wanted for this utterance but timed out or
-    was skipped for lack of time, so the text got the rule clean-up only."""
+    was skipped for lack of time, so the text got the rule clean-up only; ``model_skipped`` says it was skipped
+    only because an earlier, abandoned generation was still running (this utterance's model call never ran)."""
     out = {"raw": "", "text": "", "t_asr": 0.0, "t_clean": 0.0, "cleaned": False, "dropped": False,
-           "rules_only": False}
+           "rules_only": False, "model_skipped": False}
     t0 = time.perf_counter()
     out["raw"] = (asr.transcribe(audio) or "").strip()
     out["t_asr"] = time.perf_counter() - t0
@@ -234,6 +235,9 @@ def run_pipeline(audio, asr, cleaner, cleanup_enabled: bool = True, **clean_opti
             info = getattr(cleaner, "last_info", None)
             # the language model was wanted but timed out or had no time left: the text is rule-cleaned only
             out["rules_only"] = bool(cleaned) and isinstance(info, dict) and bool(info.get("rules_only"))
+            # ... only because an EARLIER generation was still stuck: this one never ran (QA C-01 / C-02)
+            out["model_skipped"] = (out["rules_only"] and bool(info.get("model_skipped"))
+                                    and not info.get("timeout"))
         except Exception as exc:  # cleanup failed: keep the raw transcript
             log.warning("cleanup raised, pasting the raw transcript: %s", system.redacted_exc(exc))
         out["t_clean"] = time.perf_counter() - t1

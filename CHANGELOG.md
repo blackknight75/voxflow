@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The default models are downloaded at a fixed, reviewed version and every file is checked by size and SHA-256,
   instead of whatever was last pushed to their repositories. Copies already downloaded stay valid. The release
   build installs every Python package pinned by the SHA-256 of its wheel (`requirements-release.txt`).
+- NVIDIA RTX 50 series: the language model now uses a llama.cpp build with ready-made code for these cards
+  (CUDA 13). The first start no longer spends about 25 seconds preparing the GPU (now about 1 second), and the
+  first dictations no longer wait several seconds and fall back to the basic clean-up. It needs an NVIDIA driver
+  for CUDA 13 (version 580 or newer); with an older driver the previous build is used. Other cards keep the
+  previous build. The installer grows by about 150 MB unpacked.
 
 ### Fixed
 
@@ -120,6 +125,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value that is still not valid is reset to its default and VoxFlow says so at start-up.
 - Running an older VoxFlow after a newer one no longer drops the newer version's settings from `config.json` or
   lowers its `config_version`.
+- On a graphics card the language model build has no ready-made code for, the GPU code that short dictations
+  need is now prepared while VoxFlow starts, not inside the first such dictation (that one waited up to 8 seconds
+  and got the basic clean-up). Dictations that were only held up by an earlier slow one no longer count towards
+  the "too slow several times" notice.
+- "Scratch that" right after a sentence the recogniser had already ended with a full stop ("I will call you tomorrow. Scratch that. I will email you.") now removes that sentence; before, only the words "scratch that" went. Also in the other languages ("borra eso", "streich das", ...).
+- A correction with numbers the recogniser writes as digits ("the deadline is the 10th I mean the 12th") was pasted uncorrected: the check on the language model's answer rejected the right one. It is now accepted, and the basic clean-up resolves it too.
+- Stutters on small words ("I I think", "in the the database", "to to") are now removed by the basic clean-up too, so they no longer reach the text when the language model is not used or its answer is refused. Real doubles ("had had", "that that") stay.
+- Speech recognition on an NVIDIA card kept the graphics memory a long dictation needed (over 1 GB after 80 seconds, 5 GB after 4 minutes) for the rest of the session, which could run a smaller card out of memory. When the card is short of free memory, a long dictation now gives it back afterwards.
+- Corrections that restate the start of the sentence ("let's meet on Monday, actually let's make it Tuesday", "red, actually change it to blue") were pasted uncorrected although the language model had fixed them. Its answer is now accepted.
+- When a graphics card error moved speech recognition to the CPU during a session, VoxFlow kept saying it ran on the GPU while every dictation got slower. It now says so once, with a button to the model settings, where Retry loads it on the GPU again.
+- A recording that was only silence showed two notifications with different wording. It now shows one, with the button to the microphone settings.
+- Long dictations that run on as one line go to the language model sentence by sentence, and only the sentences that need it: a 230-word dictation took 0.65 s instead of 1.2 s on an RTX 5080, with the same text. On a computer without a usable graphics card, a sentence the model cannot finish in the time left is no longer started.
+- A letter dictated with "new line" lost the full stops of its sentences (only the last line kept one), and the sign-off got a stray one ("Best regards."). Sentences before a line break now keep their full stop, a greeting line gets its comma ("Dear John,") and a sign-off gets a comma before the name, or nothing at the end.
+- Command mode asked to write something new (no text selected) pasted fill-in-the-blanks such as "[Your Name]" into the document. The model is now told to leave out what it does not know; a line that is only such a blank is removed, and a greeting to one becomes "Hello,". These answers also came back about a third faster.
+- After one dictation timed out in the language model, the next dictations got the basic clean-up at once, and
+  command mode said it "took too long", even when the model was free again a moment later. They now wait for it,
+  within their own time limit. Command mode says the model is still busy when that is the reason.
 
 ### Improved
 

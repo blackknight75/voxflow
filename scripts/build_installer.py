@@ -3,8 +3,8 @@ r"""Build VoxFlow-Setup-<version>.exe: PyInstaller (onedir) then Inno Setup.
     C:\...\.venv\Scripts\python.exe scripts\build_installer.py [--skip-freeze] [--skip-installer] [--clean]
 
 Needs: pyinstaller (requirements-dev.txt) in the interpreter that runs this, and Inno Setup 6
-(winget install --id JRSoftware.InnoSetup -e --scope user). The first freeze downloads the Vulkan and CPU builds
-of llama.cpp (about 50 MB, see scripts/fetch_llama_backends.py). Output: dist\VoxFlow\ (the app) and
+(winget install --id JRSoftware.InnoSetup -e --scope user). The first freeze downloads the CUDA 13, Vulkan and CPU
+builds of llama.cpp (about 200 MB, see scripts/fetch_llama_backends.py). Output: dist\VoxFlow\ (the app) and
 dist\VoxFlow-Setup-<version>.exe. build\ and dist\ are git-ignored.
 """
 from __future__ import annotations
@@ -77,7 +77,7 @@ def main() -> int:
     run([sys.executable, str(ROOT / "packaging" / "make_icon.py"), str(icon)])
     write_version_file(vfile, ver)
     if not args.skip_freeze:
-        # the Vulkan and CPU builds of llama.cpp the spec bundles next to the CUDA one (pinned by SHA-256;
+        # the CUDA 13, Vulkan and CPU builds of llama.cpp the spec bundles next to the CUDA 12 one (pinned by SHA-256;
         # a no-op when they are already in site-packages)
         import fetch_llama_backends
         fetch_llama_backends.fetch()

@@ -148,10 +148,11 @@ jobs:
       - name: CUDA 12 runtime for llama.cpp
         run: python -m voxflow.cleanup --install-cuda
 
-      # The Vulkan build (AMD / Intel / NVIDIA cards) and the CPU build (a PC without any GPU driver, where the
-      # CUDA build cannot be loaded at all) of the same llama-cpp-python release, pinned by SHA-256 in the script.
-      # scripts/build_installer.py would fetch them too; a step of its own shows a failed download for what it is.
-      - name: Vulkan and CPU builds of llama.cpp
+      # The CUDA 13 build with native code for RTX 50xx, the Vulkan build (AMD / Intel / NVIDIA cards) and the CPU
+      # build (a PC without any GPU driver, where the CUDA build cannot be loaded at all) of the same
+      # llama-cpp-python release, pinned by SHA-256 in the script. scripts/build_installer.py would fetch them too;
+      # a step of its own shows a failed download for what it is.
+      - name: CUDA 13, Vulkan and CPU builds of llama.cpp
         run: python scripts/fetch_llama_backends.py
 
       - name: Inno Setup
@@ -188,6 +189,8 @@ jobs:
                    _internal/llama_cpp/lib/llama.dll _internal/llama_cpp/lib/ggml-cuda.dll \
                    _internal/llama_cpp/lib/cudart64_12.dll _internal/llama_cpp/lib/cublas64_12.dll \
                    _internal/llama_cpp/lib/cublasLt64_12.dll \
+                   _internal/llama_cpp/lib_cuda13/llama.dll _internal/llama_cpp/lib_cuda13/ggml-cuda.dll \
+                   _internal/llama_cpp/lib_cuda13/version.txt \
                    _internal/llama_cpp/lib_vulkan/llama.dll _internal/llama_cpp/lib_vulkan/ggml-vulkan.dll \
                    _internal/llama_cpp/lib_vulkan/version.txt \
                    _internal/llama_cpp/lib_cpu/llama.dll _internal/llama_cpp/lib_cpu/ggml-cpu.dll \

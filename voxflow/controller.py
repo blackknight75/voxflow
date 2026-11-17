@@ -138,6 +138,7 @@ class Controller(QObject):
         self.dictionary = store.Dictionary(self.data_dir)
         self.snippets = store.Snippets(self.data_dir)
         self._rule_cleaner = None                     # model-free clean-up, for a trigger the full one reworded
+        self._asr_fallback_told = None                # the transcriber whose move to the CPU was reported (C-08)
         self.history = store.History(self.data_dir, limit=cfg.history_limit,
                                      retention_days=cfg.history_retention_days)
         self.stats = store.Stats(self.data_dir)
@@ -886,12 +887,20 @@ class Controller(QObject):
         return dict(self._models[name])
 
     def _on_model_event(self, name: str, status: dict) -> None:
+        was = self._models.get(name, {}).get("state")
         self._models[name] = status
         if name == "asr":
             if status["state"] == "failed":
                 self._problems["asr"] = status["detail"]
             elif status["state"] == "ready":
                 self._problems.pop("asr", None)
+            if status["state"] == "degraded":            # running, but on the CPU after a GPU error (C-08)
+                self._warnings["asr"] = status["detail"]
+                if was != "degraded":                    # the card's Retry loads it on the GPU again
+                    self._notice_action("warning", status["detail"], "open_settings:models",
+                                        self._FAILURE_LABELS["models"])
+            else:
+                self._warnings.pop("asr", None)
         if name == "cleanup":
             if status["state"] in ("degraded", "failed"):
                 self._warnings["cleanup"] = status["detail"]
@@ -1501,7 +1510,7 @@ class Controller(QObject):
         if self._speed.running:
             self._speed.cancel()                       # its child is killed at once: the dictation gets the PC
         asr_state = self._models["asr"]["state"]
-        if asr_state != "ready":
+        if asr_state not in ("ready", "degraded"):           # degraded: on the CPU after a GPU error, still working
             self.listener.force_idle()
             self.mode = mode
             self._fail("Speech model unavailable" if asr_state == "failed" else "Speech model still loading…")
@@ -1738,10 +1747,14 @@ class Controller(QObject):
             log.exception("speech recognition failed")
             self._sig_failed.emit(_SPEECH_FAILURE, gen)
             return
+        finally:
+            self._check_asr_fallback()
         text = res["text"]
         if not text:
             if silent:
-                msg = "Heard only silence. Is the microphone muted?"
+                # short enough for the bar: the one notice is the failure's own, with its hint and the microphone
+                # settings button (a second sentence here also sent a plain notice of its own: QA C-09)
+                msg = "Heard only silence"
             else:
                 msg = "Nothing to paste" if res["dropped"] else "Didn't catch that"
             self._sig_failed.emit(msg, gen)
@@ -1776,6 +1789,8 @@ class Controller(QObject):
                 log.exception("speech recognition failed")
                 self._sig_failed.emit(_SPEECH_FAILURE, gen)
                 return
+            finally:
+                self._check_asr_fallback()
             result = self.command.run(instruction, selection, tone=self.styles.tone_for(ctx.exe, ctx.title),
                                       terms=self.dictionary.terms(), language=cfg.language)
         except CommandError as exc:
@@ -1801,6 +1816,20 @@ class Controller(QObject):
             message = "Rewritten" if selection.strip() else "Written"
         self._finish(entry, ctx, gen, message, None, pasted=ok)
 
+    def _check_asr_fallback(self) -> None:
+        """A GPU error during a transcription makes ``voxflow.asr`` rebuild the model on the CPU for the rest of the
+        session. Say so once (QA C-08 / R11): the model card turns "Limited" with its Retry button (which loads it
+        on the GPU again), and a notice explains why dictation got slower. Runs on the worker thread."""
+        asr = self._asr
+        loaded_on = str(self._models["asr"].get("backend") or "")
+        if (self._asr_fallback_told is asr or str(getattr(asr, "backend", "")) != "cpu"
+                or loaded_on in ("", "cpu", "demo")):
+            return
+        self._asr_fallback_told = asr
+        log.warning("speech recognition moved from %s to the CPU after a GPU error", loaded_on)
+        self._sig_model.emit("asr", {"state": "degraded", "detail": ASR_CPU_FALLBACK, "progress": None,
+                                     "backend": "cpu"})
+
     def _job_paste(self, job: dict) -> None:
         ok, message = self._paste(job["text"])
         if ok:
@@ -1824,7 +1853,9 @@ class Controller(QObject):
                      res["t_asr"] * 1000, res["t_clean"] * 1000, entry["latency_ms"], entry["words"],
                      ctx.exe or "unknown app")
         # the bar says "Pasted" first; the (slower) file writes follow and can never turn a paste into an error
-        self._sig_done.emit({"entry": entry, "gen": gen, "message": message, "pasted": pasted})
+        # "slow": the model itself ran too long; a skip behind an earlier stuck generation is not counted again
+        self._sig_done.emit({"entry": entry, "gen": gen, "message": message, "pasted": pasted,
+                             "slow": not (res or {}).get("model_skipped")})
         if entry["text"].strip():                      # a lone line break is pasted but is not a transcript
             try:
                 if self.config.save_history:
@@ -1853,7 +1884,7 @@ class Controller(QObject):
         entry = payload["entry"]
         if entry["text"].strip():
             self.last_transcript = entry
-            if entry.get("rules_only"):
+            if entry.get("rules_only") and payload.get("slow", True):
                 self._note_rules_only()
             self.transcript_ready.emit(dict(entry))
         if not payload.get("pasted", True):
@@ -1926,6 +1957,8 @@ def classify_error(message: str) -> dict:
 
 
 _SPEECH_FAILURE = "The speech model hit an error. Try again; if it keeps happening, restart VoxFlow."
+ASR_CPU_FALLBACK = ("Speech recognition moved to the CPU after a GPU error, so dictation is slower. Choose Retry "
+                    "under Settings > On-device models, or restart VoxFlow, to use the GPU again.")
 _JOB_FAILURES = {
     "dictate": "Something went wrong with that dictation. Try again; if it keeps happening, restart VoxFlow.",
     "command": "Something went wrong in command mode, so nothing was changed. Try again; if it keeps happening, "

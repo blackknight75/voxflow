@@ -78,11 +78,12 @@ for sub in ("cu13", "cudnn"):
 for dll in (SITE / "llama_cpp" / "lib").glob("*.dll"):
     extra_binaries.append((str(dll), "llama_cpp/lib"))
 
-# ---- the other llama.cpp builds of the same release, each in its own folder: Vulkan (AMD / Intel / NVIDIA cards)
-# and plain CPU (a PC without any GPU driver, where the CUDA and Vulkan builds cannot even be loaded).
+# ---- the other llama.cpp builds of the same release, each in its own folder: CUDA 13 with native code for RTX 50xx
+# (its cuBLAS is the CUDA 13 one in nvidia/cu13 above), Vulkan (AMD / Intel / NVIDIA cards) and plain CPU (a PC
+# without any GPU driver, where the CUDA and Vulkan builds cannot even be loaded).
 # voxflow.cleanup picks one folder at start; scripts/fetch_llama_backends.py puts them into site-packages.
 llama_extra_data = []
-for folder in ("lib_vulkan", "lib_cpu"):
+for folder in ("lib_cuda13", "lib_vulkan", "lib_cpu"):
     src = SITE / "llama_cpp" / folder
     if not (src / "llama.dll").is_file() or not (src / "version.txt").is_file():
         raise SystemExit(f"{src} is missing or incomplete: run scripts/fetch_llama_backends.py "

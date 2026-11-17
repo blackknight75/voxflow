@@ -81,7 +81,8 @@ def _setup_dll_paths() -> None:
         if os.path.isdir(cand):
             roots.append(cand)
     for root in roots:
-        for d in glob.glob(os.path.join(root, "*", "bin")):
+        # nvidia/<pkg>/bin (CUDA 12 wheels) and nvidia/cu13/bin/x86_64 (the CUDA 13 cuBLAS of the lib_cuda13 build)
+        for d in glob.glob(os.path.join(root, "*", "bin")) + glob.glob(os.path.join(root, "*", "bin", "x86_64")):
             try:
                 os.add_dll_directory(d)
             except (OSError, AttributeError):
@@ -112,10 +113,45 @@ PUNCTUATION_PASS_MAX_MS = 400
 WARMUP_GPU_S = 60.0
 WARMUP_CPU_S = 600.0
 _PASS_MIN_WORDS = 8           # short lines cost a fixed overhead: judge them as if they had this many words
+# A line longer than this goes to the model sentence by sentence (QA C-10). Measured on a 227-word, 16-sentence
+# dictation that the model left unchanged: the whole line took 1.2 s on an RTX 5080 and always the full 4 s timeout
+# on the CPU, for the 6 sentences that needed the model.
+LONG_LINE_WORDS = 40
+# A piece is not sent when the model's recent speed says it needs more than this many times the time left.
+SKIP_MARGIN = 1.5
 
 
 def _cuda_unusable(asked_for: bool) -> str | None:
     return None if gpuprobe.nvidia_driver() else "no NVIDIA driver (nvcuda.dll)"
+
+
+# The GPU generations each CUDA build carries ready-made machine code (SASS) for, read from the fatbins of its
+# ggml-cuda.dll. Any other GPU makes the driver compile the build's PTX on first use of each kernel module: 25-30 s
+# for the load's warm-up on an RTX 5080 with the CUDA 12 build, then 4-8 s more inside the first dictation of a new
+# prompt length (QA C-01). The driver caches the result in CUDA_CACHE_PATH.
+#   lib          the llama-cpp-python CUDA 12.4 wheel: SASS sm_60-sm_90, PTX sm_90
+#   lib_cuda13   llama.cpp b11312 (the commit llama-cpp-python 0.3.36 vendors) built by ggml-org with CUDA 13.4:
+#                SASS sm_86, sm_89, sm_120, sm_121, PTX sm_75 / sm_80 / sm_90
+_CUDA12_NATIVE = ((6, 0), (6, 1), (7, 0), (7, 5), (8, 0), (8, 6), (8, 9), (9, 0))
+_CUDA13_NATIVE = ((8, 6), (8, 9), (12, 0), (12, 1))
+_CUDA13_MIN_DRIVER = 13000         # a CUDA 13 build needs a driver for CUDA 13.0 or newer (R580+)
+
+
+def _cuda13_unusable(asked_for: bool) -> str | None:
+    """The CUDA 13 build is taken only where it has native code for every GPU and the CUDA 12 build has not (today:
+    RTX 50xx / sm_12x). Everywhere else the CUDA 12 build stays, exactly as before."""
+    if not gpuprobe.nvidia_driver():
+        return "no NVIDIA driver (nvcuda.dll)"
+    info = gpuprobe.cuda_info()
+    if info is None or not info.capabilities:
+        return "the NVIDIA driver reports no CUDA device"
+    if all(cc in _CUDA12_NATIVE for cc in info.capabilities):
+        return f"not needed, the CUDA 12 build has native code for {info}"
+    if not all(cc in _CUDA13_NATIVE for cc in info.capabilities):
+        return f"no native code for every device ({info})"
+    if info.driver_version < _CUDA13_MIN_DRIVER:
+        return f"needs a driver for CUDA 13.0 or newer ({info})"
+    return None
 
 
 def _vulkan_unusable(asked_for: bool) -> str | None:
@@ -140,18 +176,29 @@ class LlamaBackend:
     folder: str                                # next to the llama_cpp package
     gpu: bool
     unusable: Callable[[bool], str | None]
+    native: tuple = ()                         # CUDA: compute capabilities with ready-made machine code (no JIT)
+    label: str = ""                            # in the log, where ``name`` alone is ambiguous
+
+    def __str__(self) -> str:
+        return self.label or self.name
 
 
-# In order of preference. A new back-end (Apple Metal later) is one more line with its own probe.
+# In order of preference. A new back-end (Apple Metal later) is one more line with its own probe. Two builds share
+# the name "cuda": the device setting, the speed check and the UI see one CUDA back-end.
 LLAMA_BACKENDS = (
-    LlamaBackend("cuda", "lib", True, _cuda_unusable),
+    LlamaBackend("cuda", "lib_cuda13", True, _cuda13_unusable, _CUDA13_NATIVE, "cuda 13"),
+    LlamaBackend("cuda", "lib", True, _cuda_unusable, _CUDA12_NATIVE),
     LlamaBackend("vulkan", "lib_vulkan", True, _vulkan_unusable),
     LlamaBackend("cpu", "lib_cpu", False, _cpu_unusable),
 )
 _GPU_DEVICES = ("auto", "gpu") + tuple(b.name for b in LLAMA_BACKENDS if b.gpu)
 _SPEED_CHECK = "i think we should uh move the meeting to friday at three thirty"
+# A user turn of a few tokens: its prefill uses the small-batch kernels that the long warm-up prompt does not, and
+# compiling those for a GPU without native code took 8 s inside the first short dictation (QA C-01).
+_WARM_SHORT = "thanks a lot"
 _UNSET = object()
 _llama_choice = _UNSET        # the back-end whose DLLs this process loaded (None: llama_cpp's own default)
+_llama_build: LlamaBackend | None = None     # ... and its row of LLAMA_BACKENDS
 
 
 def _llama_pkg_dir() -> str | None:
@@ -197,7 +244,7 @@ def _select_llama_libs(device: str = "auto") -> str | None:
     then the CPU build; "cpu" takes the CPU build. None means nothing was chosen (not Windows, a folder set by the
     user in LLAMA_CPP_LIB_PATH, or no build passed): llama_cpp then loads its default folder as it always did.
     """
-    global _llama_choice
+    global _llama_choice, _llama_build
     if _llama_choice is not _UNSET:
         return _llama_choice
     _llama_choice = None
@@ -222,16 +269,25 @@ def _select_llama_libs(device: str = "auto") -> str | None:
             except OSError as e:
                 why = f"did not load ({e})"
         if why is not None:
-            skipped.append(f"{backend.name}: {why}")
+            skipped.append(f"{backend}: {why}")
             continue
         os.environ["LLAMA_CPP_LIB_PATH"] = folder
-        _llama_choice = backend.name
-        log.info("llama.cpp libraries: %s build, %s (device %s%s)", backend.name, folder, device,
+        _llama_choice, _llama_build = backend.name, backend
+        log.info("llama.cpp libraries: %s build, %s (device %s%s)", backend, folder, device,
                  "".join(f"; {s}" for s in skipped))
         return backend.name
     log.warning("no llama.cpp build is usable here (%s); in a source install run "
                 "scripts/fetch_llama_backends.py once", "; ".join(skipped))
     return None
+
+
+def _jit_likely() -> bool:
+    """True when the loaded CUDA build has no ready-made machine code for some GPU of this PC, so the driver
+    compiles kernels on their first use. A build VoxFlow did not choose (LLAMA_CPP_LIB_PATH set outside, not
+    Windows) counts as having none; a driver that does not answer means there is no CUDA GPU to compile for."""
+    native = _llama_build.native if _llama_build is not None else ()
+    info = gpuprobe.cuda_info()
+    return info is not None and any(cc not in native for cc in info.capabilities)
 
 
 def _gpu_offload_supported() -> bool:
@@ -297,26 +353,15 @@ _PUNCT_CMDS = [
     (re.compile(r"\s*\b(?:exclamation (?:mark|point))\b[.,]?", re.I), "!"),
     (re.compile(r"\s*\b(?:full stop)\b[.,]?", re.I), "."),
 ]
-# "scratch that": drop the clause spoken before it (back to the previous sentence end)
-_SCRATCH_RE = re.compile(r"\bscratch that\b[\s,.;:]*", re.I)
+# "scratch that": drop the clause spoken before it (back to the previous sentence end; see langs.drop_scratched)
+_SCRATCH_RE = re.compile(r"\bscratch that\b[\s,.;:!?]*", re.I)
 
 
 def _drop_scratched(t: str) -> str:
-    """Remove every "scratch that" together with the clause before it (back to the previous sentence end).
-    Linear: the clause start is found by scanning backwards, never by a lazy regex that rescans the text."""
+    """Remove every "scratch that" together with the clause (or the sentence) spoken before it."""
     if "scratch that" not in t.lower():
         return t
-    out: list[str] = []
-    pos = 0
-    for m in _SCRATCH_RE.finditer(t):
-        if m.start() < pos:  # pragma: no cover - defensive: finditer matches never overlap
-            continue
-        start = max(t.rfind(c, pos, m.start()) for c in ".!?\n") + 1
-        out.append(t[pos:start])
-        out.append(" ")
-        pos = m.end()
-    out.append(t[pos:])
-    return "".join(out)
+    return langs.drop_scratched(t, _SCRATCH_RE)
 _FRAGMENT_RE = re.compile(r"(?:[\w.-]+[/\\][\w./\\-]*|[\w-]+(?:\.[A-Za-z0-9]{1,5})+|\S+@\S+|https?://\S+)$")
 
 # Unambiguous same-kind self-corrections ("monday no tuesday", "five wait six") are resolved by rule,
@@ -330,26 +375,40 @@ _NUMW1 = (r"(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twel
           r"hundred|thousand|million)")
 _NUMPHRASE = rf"(?:{_NUMW1}(?:[\s-]+{_NUMW1}){{0,3}}|\d+(?:[.,]\d+)*)"
 _MARKS = rf"(?:{_CORR_MARK}\b[\s,]+)+"
+# an article repeated after the marker: "the 10th I mean the 12th", "the red I mean the blue" (QA C-04)
+_ART = r"(?:(?P<art>the|a|an)\s+)?"
 # the earlier value (X) and the marker are dropped; the later value (Y) always survives
 _SAMEKIND_RES = [
-    re.compile(rf"\b{k}\b[\s,]+{_MARKS}(?={k}\b)", re.I) for k in (_DAY, _MON, _COL)
+    re.compile(rf"\b{k}\b[\s,]+{_MARKS}{_ART}(?={k}\b)", re.I) for k in (_DAY, _MON, _COL)
 ] + [
     # "fifty dollars no sixty dollars": same unit repeated after the marker
-    re.compile(rf"(?<![\w.:-]){_NUMPHRASE}\s+([A-Za-z]+)\b[\s,]+{_MARKS}(?={_NUMPHRASE}\s+\1\b)", re.I),
+    re.compile(rf"(?<![\w.:-]){_NUMPHRASE}\s+([A-Za-z]+)\b[\s,]+{_MARKS}{_ART}(?={_NUMPHRASE}\s+\1\b)", re.I),
 ]
-# "five wait six": bare number, marker, number. Not a correction when the two numbers are written
-# differently ("page one wait 5 minutes") or when "wait" is followed by a duration ("wait five minutes").
-_NUM_CORR_RE = re.compile(rf"(?<![\w.:-])({_NUMPHRASE})\b[\s,]+({_MARKS})(?=((?:{_NUMW1}|\d)[\w.,-]*)(\s+\w+)?)", re.I)
+# "five wait six", "the 10th I mean the 12th": number (the recogniser writes ordinals as digits), marker, number.
+# Not a correction when the two numbers are written differently ("page one wait 5 minutes") or when "wait" is
+# followed by a duration ("wait five minutes").
+_NUM_CORR_RE = re.compile(rf"(?<![\w.:-])(?P<first>{_NUMPHRASE}(?:st|nd|rd|th)?)\b[\s,]+(?P<marks>{_MARKS}){_ART}"
+                          rf"(?=(?P<second>(?:{_NUMW1}|\d)[\w.,-]*)(?P<after>\s+\w+)?)", re.I)
 _DURATION_RE = re.compile(r"\s*(?:more\s+)?(?:second|minute|hour|day|week|month|year|moment)s?\b", re.I)
 
 
+def _keep_article(m: re.Match) -> str:
+    """What replaces a dropped "X marker [article]": nothing, or the article when X did not have the same one
+    ("at 10 I mean the 12th" keeps "the")."""
+    art = m.group("art")
+    if not art:
+        return ""
+    before = re.findall(r"[A-Za-z']+", m.string[:m.start()])[-1:]
+    return "" if before and before[0].lower() == art.lower() else art + " "
+
+
 def _num_correction(m: re.Match) -> str:
-    first, marks, second, after = m.group(1), m.group(2), m.group(3), m.group(4) or ""
+    first, marks, second, after = m.group("first"), m.group("marks"), m.group("second"), m.group("after") or ""
     if first[0].isdigit() != second[0].isdigit():
         return m.group(0)
     if re.fullmatch(r"wait[\s,]*", marks, re.I) and _DURATION_RE.match(after):
         return m.group(0)
-    return ""
+    return _keep_article(m)
 
 # cues that suggest the LLM is worth running
 _CORRECTION_CUE = re.compile(
@@ -370,6 +429,12 @@ _SPOKEN_NUM = re.compile(
     r"fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|"
     r"ninety|hundred|thousand|million|billion|first|second|third)\b", re.I)
 _REPEAT_RE =re.compile(r"\b(\w+)\s+\1\b", re.I)
+# A stutter on a word that is never doubled on purpose ("I I think", "in the the database", "to to"): kept once by
+# the rules, so it is gone even when the model is not asked or its answer is refused (QA C-05). Words with a real
+# double are not here: "had had", "that that", "is is" (what it is is), "so so", "he he", "in in" (come in in
+# five minutes), "on on", "can can", "for for", "with with".
+_STUTTER_RE = re.compile(r"(?<![\w'-])(i|the|a|an|to|we|you|she|they|my|our|your|his|their|of|and|but)"
+                         r"(?:,?\s+\1)+(?![\w'-])", re.I)
 
 
 # a token that is code, not prose: camelCase, snake_case, a.b, path/like, call(
@@ -544,6 +609,23 @@ _SUBORDINATE_RE = re.compile(r"(?:^|(?<=[.!?]\s))(?:if|when|once|after|before|si
                              r"unless|as soon as)\b[^,;:.!?]{12,}[.!?]?$", re.I | re.M)
 
 
+_SENTENCE_GAP_RE = re.compile(r"(?<=[.!?])\s+")
+# a sentence that opens with a correction cue stays with the one before it ("... on Monday. No wait, Tuesday."),
+# so the model sees what is being corrected
+_LEADING_CUE_RE = re.compile(rf"(?:{_CORR_MARK}|scratch that|make that|correction)\b", re.I)
+
+
+def _sentences(line: str) -> list[str]:
+    """``line`` in sentences, as the recogniser punctuated it; never split after an abbreviation ("Dr.", "e.g.")."""
+    out: list[str] = []
+    for part in _SENTENCE_GAP_RE.split(line):
+        if out and (_ABBREV_RE.search(out[-1]) or _LEADING_CUE_RE.match(part)):
+            out[-1] += " " + part
+        else:
+            out.append(part)
+    return out
+
+
 def looks_unpunctuated(text: str) -> bool:
     """True when a sentence of ``text`` seems to run two clauses together without punctuation."""
     sentences = re.split(r"(?<=[.!?])\s+", text)
@@ -571,13 +653,14 @@ def rule_clean(text: str, formatting: bool = True, terminal: bool = True, filler
     if fillers:
         t = _drop_scratched(t)
         for rx in _SAMEKIND_RES:
-            t = rx.sub("", t)
+            t = rx.sub(_keep_article, t)
         t = _NUM_CORR_RE.sub(_num_correction, t)
         t = _ER_BEFORE_FILLER_RE.sub("", t)
         t = _FILLER_RE.sub("", t)
         t = _FILLER_COMMA_RE.sub("", t)
         t = _SOFT_FILLER_RE.sub(lambda m: " ", t)
         t = _YOU_KNOW_MID_RE.sub(", ", t)
+        t = _STUTTER_RE.sub(lambda m: m.group(1), t)
     lead = trail = ""
     if formatting:
         t = apply_formatting_commands(t)
@@ -608,7 +691,40 @@ def rule_clean(text: str, formatting: bool = True, terminal: bool = True, filler
         and last[-1].isalnum()
     ):
         t = t + ("?" if _is_question(re.split(r"(?<=[.!?])\s+", last)[-1]) else ".")
+    if formatting and "\n" in t:
+        t = _letter_lines(t)
     return lead + t + trail
+
+
+# a letter dictated with "new line" (QA C-11): "Dear John," on a line of its own, and a sign-off with a comma before
+# the name (no full stop: "Best regards" is not a sentence)
+_SALUTATION_RE = re.compile(r"(dear|hi|hello|hey|good (?:morning|afternoon|evening))\b((?: [^\s,.;:!?]+){0,3})", re.I)
+_GROUP_WORDS = frozenset("team all everyone everybody folks guys there both".split())
+
+
+def _is_salutation(line: str) -> bool:
+    """"Dear John", "Hi team", "Hello Anna Lee": a greeting and who it is for, not "Hey are you free"."""
+    m = _SALUTATION_RE.fullmatch(line)
+    if not m:
+        return False
+    names = m.group(2).split()
+    return m.group(1).lower() == "dear" or (len(names) <= 2 and all(
+        w.lower() in _GROUP_WORDS or w[0].isupper() for w in names))
+_CLOSING_RE = re.compile(
+    r"(?:(?:best|kind|warm|warmest) (?:regards|wishes)|best|regards|many thanks|thanks(?: again)?|thank you|cheers|"
+    r"sincerely|yours (?:sincerely|truly|faithfully)|all the best|talk soon)[.,]?", re.I)
+
+
+def _letter_lines(t: str) -> str:
+    lines = t.split("\n")
+    filled = [i for i, line in enumerate(lines) if line.strip()]
+    for i in filled:
+        line, more = lines[i], i != filled[-1]
+        if i == filled[0] and more and _is_salutation(line):
+            lines[i] = line + ","
+        elif _CLOSING_RE.fullmatch(line):
+            lines[i] = line.rstrip(".,") + ("," if more else "")
+    return "\n".join(lines)
 
 
 _Q_LEAD_SKIP = ("so", "and", "but", "well", "okay", "ok", "also", "hey", "oh", "now")
@@ -778,6 +894,8 @@ def _restore_case(src: str, out: str) -> str:
 
 _CORE_MARKERS = {"no", "wait", "sorry", "oops", "whoops", "meant", "mean", "rather", "actually", "correction"}
 _MARKERS = _CORE_MARKERS | {"i", "make", "that", "or", "um", "uh", "er", "hmm", "well", "not", "let", "me", "rephrase"}
+# words that only frame a corrected value after the marker: "let's make it", "make that", "change it to", "go with"
+_REPHRASE = {"let's", "lets", "let", "us", "make", "it", "that", "change", "to", "say", "go", "with", "the"}
 _DAYS = {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
 _MONTHS = {"january", "february", "march", "april", "may", "june", "july", "august", "september",
            "october", "november", "december"}
@@ -928,7 +1046,9 @@ def _accept(src: str, out: str) -> bool:
     stoks, otoks = set(_NUM_TOKEN_RE.findall(src)), set(_NUM_TOKEN_RE.findall(out))
     if otoks - stoks and not _SPOKEN_NUM.search(src):
         return False
-    if any(t not in otoks and t not in corrected for t in stoks - otoks):
+    # a number may go only as part of a dropped correction; "10th" was dropped, so was its "10" (QA C-04)
+    dropped_numbers = {n for w in corrected for n in _NUM_TOKEN_RE.findall(w)}
+    if any(t not in otoks and t not in dropped_numbers for t in stoks - otoks):
         return False
     # --- no new symbols that change content ($ % # & * + = ~ ^)
     if set(re.findall(r"[$%#&*+=~^|<>]", out)) - set(re.findall(r"[$%#&*+=~^|<>]", src)):
@@ -970,6 +1090,7 @@ def _dropped_ok(sw: list[str], eff: list[int], matched, cue: bool):
     if matched is None:
         return None
     mset = set(matched)
+    kept = {sw[x] for x in mset}
     corrected: set[str] = set()
     k = 0
     while k < len(eff):
@@ -993,9 +1114,14 @@ def _dropped_ok(sw: list[str], eff: list[int], matched, cue: bool):
         if not content or len(content) > limit_c or len(run) > limit_r:
             return None
         if first_marker is not None:
-            # all content words come BEFORE the marker (X marker Y); content after it means the model
-            # dropped the later value
-            if any(w not in _MARKERS for w in run[first_marker:]):
+            # all content words come BEFORE the marker (X marker Y); content after it means the model dropped the
+            # later value. Except a short rephrasing of the lead-in ("Monday, actually let's make it Tuesday",
+            # "red, actually change it to blue": QA C-07): those words are kept elsewhere or only frame the new
+            # value, and the earlier value must be of the same kind as the kept one that follows.
+            after = [w for w in run[first_marker:] if w not in _MARKERS]
+            before = [w for w in run[:first_marker] if w not in _MARKERS]
+            if after and not (len(after) <= 4 and all(w in _REPHRASE or w in kept for w in after)
+                              and before and _kind(before[-1]) is not None and _kind(before[-1]) == _kind(y)):
                 return None
         elif not (_kind(content[-1]) is not None and _kind(content[-1]) == _kind(y)):
             return None
@@ -1611,6 +1737,10 @@ def smart_format(text: str) -> str:
 _NO_REPORT = {"llm": False, "rejected": False, "rules_only": False, "ms": 0.0}
 
 
+class LlmBusy(TimeoutError):
+    """The model was not asked at all: an earlier, abandoned generation was still running for the whole budget."""
+
+
 class Cleaner:
     """Dictation clean-up: rule pass + guarded local LLM.
 
@@ -1634,6 +1764,9 @@ class Cleaner:
         self._lock = threading.Lock()
         self._handoff = threading.Lock()     # makes "generation finished" vs "caller gave up" atomic
         self._abandoned = threading.Event()  # set while a timed-out generation is still unwinding
+        self._idle = threading.Event()       # its opposite, for waiting on the unwinding without polling
+        self._idle.set()
+        self._waited_s = 0.0                 # how long the latest call waited for such an unwinding
         self._terms: list[str] | None = None  # preferred spellings for the clean() call in progress
         self._ready = False
         self.load_error: BaseException | None = None   # why the language model did not load (rules only)
@@ -1702,6 +1835,8 @@ class Cleaner:
                     self.backend = (libs or "cuda") if gpu else "cpu"
                     # warm up (also primes the KV cache with the constant few-shot prefix)
                     self._llm_clean("um so what is the capital of france", max_ms=warmup_s * 1000)
+                    if gpu and self.backend == "cuda" and _jit_likely():
+                        self._warm_short(warmup_s)
                     if gpu and libs is not None:
                         # a GPU that loads the model but cannot keep up would make every dictation time out
                         # (basic clean-up only): time one sentence and prefer the CPU if it is that slow
@@ -1730,6 +1865,17 @@ class Cleaner:
             self._llm = None
             self.backend = "rules"
             self._ready = True  # rules still work
+
+    def _warm_short(self, budget_s: float) -> None:
+        """Prefill one short user turn (one output token) so the driver compiles the small-batch kernels during the
+        load, while the UI says "Preparing the GPU", instead of inside a dictation (QA C-01). Measured on an RTX
+        5080 with the CUDA 12 build and an empty cache: 8.0 s here, after which no real dictation stalled; 7-10 ms
+        once compiled. A timeout here only means the compiling goes on: the GPU itself works."""
+        try:
+            self._run_bounded(lambda abort: self._stream(self._messages(_WARM_SHORT), 1, abort), budget_s,
+                              "the short warm-up")
+        except TimeoutError as e:
+            log.warning("cleanup model: %s; the first dictations may wait for the GPU", e)
 
     @property
     def ready(self) -> bool:
@@ -1773,9 +1919,14 @@ class Cleaner:
 
     def _run_bounded(self, job, budget: float, what: str) -> str:
         """Run ``job(abort)`` in a worker thread and abandon it at the deadline (a prompt prefill cannot be
-        interrupted). While an abandoned generation is still unwinding, new calls fail fast."""
+        interrupted). While an abandoned generation is still unwinding, the call waits for it inside its own
+        ``budget`` (the wait is deducted) and raises ``LlmBusy`` if it is still running when the budget is gone."""
         if self._abandoned.is_set():
-            raise TimeoutError("previous LLM generation still running")
+            started = time.monotonic()
+            if not self._idle.wait(budget):
+                raise LlmBusy("previous LLM generation still running")
+            self._waited_s = time.monotonic() - started
+            budget -= self._waited_s
         abort, done = threading.Event(), threading.Event()
         box: dict = {}
 
@@ -1789,6 +1940,7 @@ class Cleaner:
                     done.set()
                     if box.get("abandoned"):
                         self._abandoned.clear()
+                        self._idle.set()
 
         th = threading.Thread(target=work, name="voxflow-cleanup-llm", daemon=True)
         th.start()
@@ -1797,6 +1949,7 @@ class Cleaner:
                 timed_out = not done.is_set()
                 if timed_out:
                     box["abandoned"] = True
+                    self._idle.clear()
                     self._abandoned.set()
                     abort.set()
             if timed_out:
@@ -1807,9 +1960,8 @@ class Cleaner:
 
     def _wait_unwound(self, limit_s: float) -> None:
         """Wait (at most ``limit_s``) for an abandoned generation to finish."""
-        end = time.monotonic() + limit_s
-        while self._abandoned.is_set() and time.monotonic() < end:
-            time.sleep(0.05)
+        if self._abandoned.is_set():
+            self._idle.wait(limit_s)
 
     def _llm_clean(self, text: str, max_ms: float | None = None) -> str:
         assert self._llm is not None
@@ -1825,7 +1977,8 @@ class Cleaner:
         per = seconds * 1000 / max(_PASS_MIN_WORDS, len(text.split()))
         prev = self._ms_per_word
         self._ms_per_word = per if prev is None else (prev + per) / 2
-        self.punctuation_pass = PUNCTUATION_PASS_MAX_MS > 0 and self._pass_fast()
+        if self._learn_speed:                    # a GPU: the punctuation pass follows the speed (never on a CPU)
+            self.punctuation_pass = PUNCTUATION_PASS_MAX_MS > 0 and self._pass_fast()
 
     @property
     def has_llm(self) -> bool:
@@ -1937,6 +2090,9 @@ class Cleaner:
                 else:
                     self.last_info["rejected"] = True
                     out_lines.append(line)
+            except LlmBusy:
+                self.last_info["model_skipped"] = self.last_info["rules_only"] = True
+                out_lines.append(line)
             except TimeoutError:
                 self.last_info["timeout"] = self.last_info["rules_only"] = True
                 out_lines.append(line)
@@ -1954,55 +2110,88 @@ class Cleaner:
             return ruled
         # LLM works line-by-line so formatting commands (newlines / bullets) survive.
         # "unchanged" ignores the grammar rules' own fixes, so they never make the model run where it did not before
-        unchanged = ruled in (text.strip(), grammar_rules(text.strip()))
+        raw = text.strip()
+        unchanged = ruled in (raw, grammar_rules(raw))
         lines = ruled.split("\n")
         out_lines: list[str] = []
-        remaining = self.timeout_s
         for idx, line in enumerate(lines):
             bullet = line.startswith("- ")
             body = line[2:] if bullet else line
             if not body.strip():
                 out_lines.append(line)
                 continue
-            if not self._needs_llm(body, unchanged) and not (
-                    self.punctuation_pass and len(body.split()) > 2 and looks_unpunctuated(body)):
-                out_lines.append(line)
-                continue
-            if remaining <= 0.05:                        # an earlier line used up the time
-                self.last_info["rules_only"] = True
-                out_lines.append(line)
-                continue
-            # list headers / bullets / file names never get an added sentence period
-            allow_period = not bullet and idx == len(lines) - 1 and not _is_fragment(body)
-            try:
-                self.last_info["llm"] = True
-                t_call = time.perf_counter()
-                try:
-                    res = self._llm_clean(body, max_ms=remaining * 1000)
-                finally:
-                    if self._learn_speed:
-                        self._note_speed(body, time.perf_counter() - t_call)
-                res = res.strip().strip('"').strip()
-                if res[:2] in ("- ", "* ") or res[:1] == "•":
-                    res = ""  # model invented a bullet
-                if res:
-                    res = _restore_case(body, rule_clean(res, formatting=False, terminal=allow_period, fillers=False))
-                no_dot = not allow_period or _is_fragment(res.rstrip("."))
-                if no_dot and res.endswith(".") and not body.rstrip().endswith("."):
-                    res = res[:-1]
-                if _accept(body, res):
-                    out_lines.append(("- " if bullet else "") + res.replace("\n", " "))
-                else:
-                    self.last_info["rejected"] = True
-                    salv = _salvage_case(body, res) if res else body
-                    out_lines.append(("- " if bullet else "") + salv)
-            except TimeoutError:
-                self.last_info["timeout"] = self.last_info["rules_only"] = True
-                out_lines.append(line)
-            remaining = self.timeout_s - (time.perf_counter() - t0)
+            # a long line goes to the model sentence by sentence: only the sentences that need it, and a call the
+            # time left cannot cover is not started (QA C-10). A shorter line is one piece, as it always was.
+            pieces = _sentences(body) if not bullet and len(body.split()) > LONG_LINE_WORDS else [body]
+            done = []
+            for k, piece in enumerate(pieces):
+                # a sentence the rules left exactly as recognised needs the model no more than such a line does
+                same = unchanged or (len(pieces) > 1 and (piece in raw or piece in grammar_rules(raw)))
+                # list headers / bullets / file names never get an added sentence period
+                ends_text = not bullet and idx == len(lines) - 1 and k == len(pieces) - 1
+                allow_period = (ends_text and not _is_fragment(piece)) or (
+                    len(pieces) > 1 and piece.rstrip()[-1:] in ".!?")
+                # a line that ends before "new line" keeps the full stop the model gave it ("Thanks for the
+                # update."), but none is added for it: an address or a list header has none (QA C-11)
+                header = idx + 1 < len(lines) and lines[idx + 1].startswith("- ")
+                keep_period = not bullet and not header and len(piece.split()) >= 3
+                done.append(self._clean_piece(piece, same, allow_period, t0, keep_period))
+            out_lines.append(("- " if bullet else "") + " ".join(done))
         self.last_info["ms"] = (time.perf_counter() - t0) * 1000
         return "\n".join(out_lines)
 
+    def _clean_piece(self, body: str, unchanged: bool, allow_period: bool, t0: float,
+                     keep_period: bool = False) -> str:
+        """One line, or one sentence of a long line, through the model when it needs it; the rule text otherwise.
+        ``t0``: when the clean-up of the whole dictation started (all pieces share one time budget).
+        ``allow_period``: a missing full stop is added; ``keep_period``: one the model wrote is kept."""
+        if not self._needs_llm(body, unchanged) and not (
+                self.punctuation_pass and len(body.split()) > 2 and looks_unpunctuated(body)):
+            return body
+        remaining = self.timeout_s - (time.perf_counter() - t0)
+        if remaining <= 0.05 or self._too_slow_for(body, remaining):
+            self.last_info["rules_only"] = True          # an earlier piece used up the time, or this one would
+            return body
+        try:
+            self.last_info["llm"] = True
+            t_call = time.perf_counter()
+            self._waited_s = 0.0
+            # the time spent waiting for an earlier call is not this call's own
+            try:
+                res = self._llm_clean(body, max_ms=remaining * 1000)
+            except LlmBusy:
+                raise                                    # the model never ran: nothing to learn about its speed
+            except TimeoutError:
+                self._note_speed(body, time.perf_counter() - t_call - self._waited_s)
+                raise
+            self._note_speed(body, time.perf_counter() - t_call - self._waited_s)
+            res = res.strip().strip('"').strip()
+            if res[:2] in ("- ", "* ") or res[:1] == "•":
+                res = ""  # model invented a bullet
+            if res:
+                res = _restore_case(body, rule_clean(res, formatting=False, terminal=allow_period, fillers=False))
+            no_dot = not (allow_period or keep_period) or _is_fragment(res.rstrip("."))
+            if no_dot and res.endswith(".") and not body.rstrip().endswith("."):
+                res = res[:-1]
+            if _accept(body, res):
+                return res.replace("\n", " ")
+            self.last_info["rejected"] = True
+            return _salvage_case(body, res) if res else body
+        except LlmBusy:
+            self.last_info["model_skipped"] = self.last_info["rules_only"] = True
+        except TimeoutError:
+            self.last_info["timeout"] = self.last_info["rules_only"] = True
+        return body
+
+    def _too_slow_for(self, body: str, remaining_s: float) -> bool:
+        """True when, on the CPU, the model's recent speed says this piece cannot be done in the time left (with room
+        for error): the call would only use up the time and time out (QA C-10). Not on a GPU: there one call that
+        waited for kernels to compile would make the average say "too slow" for long pieces that are then never
+        timed again; on the CPU the speed is steady and shorter pieces keep the average current."""
+        if self.backend != "cpu" or self._ms_per_word is None:
+            return False
+        needed_ms = self._ms_per_word * max(_PASS_MIN_WORDS, len(body.split()))
+        return needed_ms > SKIP_MARGIN * remaining_s * 1000
 
 __all__ = ["Cleaner", "rule_clean", "smart_format", "apply_tone", "is_english", "resolve_language",
            "clean_foreign", "phonetic_key", "grammar_rules", "looks_unpunctuated", "DEFAULT_MODEL"]

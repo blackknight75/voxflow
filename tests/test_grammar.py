@@ -238,7 +238,8 @@ def test_cpu_model_never_gets_punctuation_pass(monkeypatch):
     c, fake = _load(monkeypatch, "cpu", 0.0, device="cpu")
     assert c.backend == "cpu" and c.punctuation_pass is False
     c.clean("i finished the report last night i will send it to you after lunch")
-    assert c.punctuation_pass is False and c._ms_per_word is None
+    # the CPU learns its speed (QA C-10: a call it cannot finish in time is not started), never the punctuation pass
+    assert c.punctuation_pass is False and c._ms_per_word is not None
 
 
 def test_failed_gpu_attempt_leaves_no_pass(monkeypatch):

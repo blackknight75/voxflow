@@ -36,7 +36,7 @@ def settle(c: Cleaner, llm: FakeLLM):
 def test_a_timeout_is_reported_as_rules_only_and_the_text_is_the_rule_text():
     c, llm = with_llm("I pushed the branch to GitHub.", timeout_s=0.15)
     llm.release.clear()
-    assert c.clean(MESSY) == "I pushed the the branch to get hub."
+    assert c.clean(MESSY) == "I pushed the branch to get hub."
     assert c.last_info["rules_only"] is True and c.last_info["timeout"] is True
     settle(c, llm)
 
@@ -45,7 +45,7 @@ def test_a_dictation_that_arrives_while_a_stuck_generation_unwinds_is_flagged_to
     c, llm = with_llm("I pushed the branch to GitHub.", timeout_s=0.15)
     llm.release.clear()
     c.clean(MESSY)
-    assert c.clean("we we should deploy it") == "We we should deploy it."
+    assert c.clean("we we should deploy it") == "We should deploy it."
     assert c.last_info["rules_only"] is True, "the model was wanted for this one as well and could not be used"
     settle(c, llm)
     c.timeout_s = 5.0
@@ -388,7 +388,7 @@ def test_the_real_cleaner_drives_the_whole_chain(tmp_path, qtbot, monkeypatch):
         llm.release.clear()
         events = r.dictate(MESSY)
         assert done_message(events) == "Pasted · basic clean-up"
-        assert r.last_entry()["rules_only"] is True and r.last_entry()["text"] == "I pushed the the branch to get hub."
+        assert r.last_entry()["rules_only"] is True and r.last_entry()["text"] == "I pushed the branch to get hub."
         settle(c, llm)
         c.timeout_s = 5.0
         events = r.dictate(MESSY)

@@ -25,7 +25,8 @@ _SYSTEM = (
     "around it, no markdown code fences.\n"
     "- Keep the language of the TEXT unless the instruction asks for a translation.\n"
     "- Keep line breaks and list structure unless the instruction asks to change them.\n"
-    "- Do not add facts that are not in the TEXT unless the instruction asks you to."
+    "- Do not add facts that are not in the TEXT unless the instruction asks you to.\n"
+    "- Never write placeholders such as [Your Name] or [Date]; leave out what you do not know."
 )
 _TONE_NOTES = {
     "formal": "Unless told otherwise, write in a professional tone with full punctuation.",
@@ -38,6 +39,12 @@ _REFUSAL_RE = re.compile(
     r"^\s*(?:i['’]?m sorry,? but|i am sorry,? but|i cannot\b|i can['’]?t (?:help|assist|do|comply)|as an ai\b|"
     r"i['’]?m unable to)", re.I)
 _FENCE_RE = re.compile(r"^```[\w-]*\n(.*?)\n?```$", re.S)
+# a line that is only a fill-in-the-blank ("[Your Name]", "[Company]"): it would land in the user's document as is
+_PLACEHOLDER = r"\[[^\[\]\n]{0,40}[A-Za-z][^\[\]\n]{0,40}\]"
+_PLACEHOLDER_LINE_RE = re.compile(rf"^[ \t]*{_PLACEHOLDER}[ \t]*$\n?", re.M)
+# "Dear [Landlord's Name],": a greeting to a name the model did not know
+_PLACEHOLDER_GREETING_RE = re.compile(rf"^([ \t]*)(?:dear|hi|hello|hey)[ \t]+{_PLACEHOLDER}[ \t]*([,!:]?)[ \t]*$",
+                                      re.M | re.I)
 _OUTPUT_RESERVE = 96          # tokens kept free for the answer on top of the computed budget
 _PROMPT_OVERHEAD = 260        # system prompt + chat template + labels, in tokens (measured, rounded up)
 
@@ -73,7 +80,11 @@ def build_messages(instruction: str, selection: str, *, tone: str | None = None,
     if selection.strip():
         user = f"INSTRUCTION: {instruction}\n\nTEXT:\n{selection}"
     else:
-        user = f"INSTRUCTION: {instruction}\n\n(There is no TEXT: write what the instruction asks for.)"
+        # the placeholder rule is repeated here, at the end, where the small model heeds it (QA C-12, measured on 8
+        # "write ..." requests: answers with a [placeholder] 5 -> 2, and shorter: median 339 -> 227 ms)
+        user = (f"INSTRUCTION: {instruction}\n\n(There is no TEXT: write what the instruction asks for. Write it "
+                "ready to send: no placeholders in square brackets; leave out names, dates and details you do not "
+                "know.)")
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
@@ -86,6 +97,11 @@ def tidy_output(output: str, selection: str = "") -> str:
     out = _PREAMBLE_RE.sub("", out, count=1).strip()
     out = re.sub(r"^(?:TEXT|RESULT|OUTPUT|REWRITTEN TEXT)\s*:\s*\n?", "", out, count=1, flags=re.I).strip()
     out = re.sub(r"[ \t]+\n", "\n", out)               # markdown hard breaks ("line  \n") are noise once pasted
+    # fill-in-the-blank lines the model wrote although it was told not to (QA C-12): a signature line that is only
+    # "[Your Name]" goes, a greeting to "[Landlord's Name]" says "Hello". Kept when the selection had them itself.
+    if not re.search(_PLACEHOLDER, selection):
+        out = _PLACEHOLDER_GREETING_RE.sub(lambda m: f"{m.group(1)}Hello{m.group(2) or ','}", out)
+        out = _PLACEHOLDER_LINE_RE.sub("", out).strip()
     for left, right in (('"', '"'), ("“", "”"), ("'", "'")):
         wrapped = len(out) >= 2 and out.startswith(left) and out.endswith(right)
         if wrapped and not selection.strip().startswith(left) and left not in out[1:-1]:
@@ -149,7 +165,12 @@ class CommandMode:
         messages = build_messages(instruction, selection, tone=tone, terms=terms, language=language)
         try:
             raw = self.cleaner.generate(messages, max_tokens=max_tokens, timeout_s=self.timeout_s)
-        except TimeoutError:
+        except TimeoutError as exc:
+            from .cleanup import LlmBusy
+            if isinstance(exc, LlmBusy):            # an earlier generation was still running: this one never ran
+                # (no "language model" in the words: that would offer the model settings, and nothing is broken)
+                raise CommandError("The model is still finishing an earlier request. Try again in a moment. "
+                                   "Nothing was changed.") from None
             raise CommandError("Command mode took too long and was stopped. Nothing was changed.") from None
         except Exception as exc:  # noqa: BLE001
             log.warning("command generation failed: %s", redacted_exc(exc))
