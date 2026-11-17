@@ -41,6 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A backup that includes a large history can be restored: backups may be up to 1 GB (packs stay at 50 MB), and
   exporting refuses a backup that would be too large to import again.
 - Snippets with numbers above twenty fire when the number is said: "room twenty-one" types the "room 21" snippet.
+- *Learn new words* no longer suggests "AM" and "PM" (written by smart formatting, not names VoxFlow had to fix).
+- A snippet no longer inflates the speed and *time saved* statistics: a dictation counts the words you said ("my
+  address": 2 words), not the words of the text the snippet typed.
+- With more than 60 dictionary words, the clean-up's language model gets the ones that sound like what you said
+  (then the newest), instead of always the alphabetically first 60, so "Zendesk" or "TypeScript" are corrected too.
 
 ## [0.2.1] - 2026-11-15
 

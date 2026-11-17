@@ -725,8 +725,12 @@ class Dictionary(_JsonStore):
         with self._lock:
             return sorted(copy.deepcopy(self._entries), key=lambda e: e["term"].lower())
 
-    def terms(self) -> list[str]:
+    def terms(self, newest_first: bool = False) -> list[str]:
+        """Every term, A to Z; or the most recently added first (what the clean-up's prompt should keep when
+        there are more terms than it has room for)."""
         with self._lock:
+            if newest_first:
+                return [e["term"] for e in reversed(self._entries)]
             return sorted((e["term"] for e in self._entries), key=str.lower)
 
     def add(self, term: str, aliases: list[str] | None = None) -> dict:
@@ -1048,8 +1052,13 @@ class Dictionary(_JsonStore):
         the clean-up had to repair ("get hub" -> "GitHub"). Returns the newly queued suggestions."""
         if not raw or not text:
             return []
+        from .cleanup import smart_format
+
         raw_words = [w.lower() for w in re.findall(r"[A-Za-z0-9+#']+", raw)]
         raw_tokens = set(_TOKEN_RE.findall(raw))
+        # what smart formatting writes from the raw words on its own ("three pm" -> "3 PM") is not a name the
+        # clean-up had to repair: never suggest it
+        raw_tokens |= set(_TOKEN_RE.findall(smart_format(raw)))
         out: list[dict] = []
         seen: set[str] = set()
         for tok in _TOKEN_RE.findall(text):
@@ -1505,13 +1514,18 @@ _HISTORY_FIELDS = ("id", "ts", "raw", "text", "app_exe", "app_title", "duration_
 
 def make_entry(text: str, raw: str = "", *, app_exe: str = "", app_title: str = "", duration_s: float = 0.0,
                mode: str = "dictate", latency_ms: float = 0.0, ts: float | None = None,
-               rules_only: bool = False) -> dict:
+               rules_only: bool = False, words: int | None = None) -> dict:
     """Build a history-shaped entry (also used for transcripts that are not stored).
 
     ``rules_only``: the language model timed out or was skipped for this dictation, so the text got the rule
-    clean-up only. The key is present (and True) only on such entries; read it with ``entry.get("rules_only")``."""
+    clean-up only. The key is present (and True) only on such entries; read it with ``entry.get("rules_only")``.
+    ``words``: how many words were spoken, when that is not the text's own count (a snippet types many words for
+    the two that were said; speed and time saved are measured on what was said)."""
     text, raw, app_title = clean_text(text), clean_text(raw or ""), clean_text(app_title or "")
-    words = count_words(text)
+    if words is None:
+        words = count_words(text)
+    else:                            # never more than was heard or written (a hand-edited file can say anything)
+        words = min(max(0, int(words)), max(count_words(text), count_words(raw)))
     duration_s = max(0.0, float(duration_s or 0.0))
     wpm = round(words / (duration_s / 60.0), 1) if duration_s >= 1.0 and mode == "dictate" else 0.0
     entry = {"id": _new_id(), "ts": float(ts if ts is not None else time.time()), "raw": raw, "text": text,
@@ -1555,7 +1569,8 @@ class History(_JsonStore):
                 app_exe=str(raw.get("app_exe") or ""), app_title=str(raw.get("app_title") or ""),
                 duration_s=_num(raw.get("duration_s")), mode=str(raw.get("mode") or "dictate"),
                 latency_ms=_num(raw.get("latency_ms", raw.get("ms"))),
-                ts=_sane_ts(raw.get("ts"), self._clock()) or self._clock(), rules_only=raw.get("rules_only") is True)
+                ts=_sane_ts(raw.get("ts"), self._clock()) or self._clock(), rules_only=raw.get("rules_only") is True,
+                words=_stored_words(raw))
             if isinstance(raw.get("id"), str) and raw["id"]:
                 entry["id"] = raw["id"]
             self._items.append(entry)
@@ -1647,7 +1662,7 @@ class History(_JsonStore):
                     app_exe=str(raw.get("app_exe") or ""), app_title=str(raw.get("app_title") or ""),
                     duration_s=_num(raw.get("duration_s")), mode=str(raw.get("mode") or "dictate"),
                     latency_ms=_num(raw.get("latency_ms")), ts=_sane_ts(raw.get("ts"), now) or now,
-                    rules_only=raw.get("rules_only") is True)
+                    rules_only=raw.get("rules_only") is True, words=_stored_words(raw))
                 if isinstance(raw.get("id"), str) and raw["id"]:
                     entry["id"] = raw["id"]
                 if entry["id"] in known:
@@ -1749,6 +1764,12 @@ class History(_JsonStore):
         except OSError as exc:
             raise ValueError(f"Couldn't write {target.name}: {exc}") from None
         return len(items)
+
+
+def _stored_words(raw: dict) -> int | None:
+    """The word count a stored entry carries (the spoken words, see ``make_entry``); None to count the text."""
+    words = raw.get("words")
+    return words if isinstance(words, int) and not isinstance(words, bool) and words >= 0 else None
 
 
 def _num(value) -> float:

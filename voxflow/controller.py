@@ -1557,7 +1557,8 @@ class Controller(QObject):
 
     def _clean_kwargs(self, context: AppContext) -> dict:
         cfg = self.config
-        return {"tone": self.styles.tone_for(context.exe, context.title), "terms": self.dictionary.terms(),
+        return {"tone": self.styles.tone_for(context.exe, context.title),
+                "terms": self.dictionary.terms(newest_first=True),      # the clean-up ranks them by the speech
                 "language": cfg.language, "smart": cfg.smart_formatting}
 
     def _personalise(self, text: str, raw: str, context: AppContext) -> str:
@@ -1616,6 +1617,7 @@ class Controller(QObject):
                 msg = "Nothing to paste" if res["dropped"] else "Didn't catch that"
             self._sig_failed.emit(msg, gen)
             return
+        spoken_words = store.count_words(text)       # what was said: a snippet types more words than that
         if text.strip():
             cleaned = text
             text = self._personalise(text, res["raw"], ctx)
@@ -1627,7 +1629,7 @@ class Controller(QObject):
         rules_only = bool(res.get("rules_only"))
         entry = store.make_entry(text, res["raw"], app_exe=ctx.exe, app_title=ctx.title,
                                  duration_s=job["speech_s"], mode="dictate", latency_ms=latency * 1000,
-                                 rules_only=rules_only)
+                                 rules_only=rules_only, words=spoken_words)
         if ok and rules_only:
             message += RULES_ONLY_SUFFIX                 # "Pasted · basic clean-up": the quiet hint on the bar
         self._finish(entry, ctx, gen, message, res, pasted=ok)
