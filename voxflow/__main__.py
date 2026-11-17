@@ -1,6 +1,12 @@
 """python -m voxflow [--demo] [--fake] [--selftest [WAV]] [--settings] [--no-hook] [--autostart]"""
 import argparse
+import os
 import sys
+
+# numpy's OpenBLAS reserves a buffer per thread at import: about 480 MB of private memory on a 32-thread CPU, for
+# nothing (VoxFlow does no large matrix work; the models use their own threads). Before numpy is imported; an
+# explicit setting wins.
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
 
 def main(argv=None) -> int:

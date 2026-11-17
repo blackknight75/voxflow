@@ -105,3 +105,21 @@ def test_r1_a_broken_audio_module_gives_a_recorder_that_never_records(monkeypatc
 def test_r1_fake_mode_still_uses_the_stand_ins(monkeypatch):
     Rec, asr, cleaner, notes = app.make_modules(Config(), fake=True)
     assert notes == ["audio stub", "asr stub", "cleanup stub"]
+
+
+# =========================================================================== R15: OpenBLAS thread buffers
+@pytest.mark.parametrize("preset, expected", [(None, "1"), ("4", "4")])
+def test_r15_openblas_uses_one_thread_unless_told_otherwise(preset, expected):
+    import os
+    import subprocess
+    from pathlib import Path
+    env = {k: v for k, v in os.environ.items() if k != "OPENBLAS_NUM_THREADS"}
+    if preset:
+        env["OPENBLAS_NUM_THREADS"] = preset
+    root = Path(__file__).resolve().parent.parent
+    code = "import sys, os, voxflow.__main__; print(os.environ['OPENBLAS_NUM_THREADS'], 'numpy' in sys.modules)"
+    out = subprocess.run([sys.executable, "-c", code], cwd=root, env=env, capture_output=True, text=True,
+                         check=True).stdout.split()
+    assert out == [expected, "False"], "set before numpy is imported"
+    entry = (root / "packaging" / "voxflow_entry.py").read_text(encoding="utf-8")
+    assert entry.index('setdefault("OPENBLAS_NUM_THREADS", "1")') < entry.index("from voxflow")

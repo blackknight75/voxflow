@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A damaged install (part of VoxFlow's code missing) no longer runs the demo models in the real app, which pasted
   a canned sentence into your window. The speech model now shows "VoxFlow's installation is damaged. Reinstall
   VoxFlow."
+- VoxFlow uses about 480 MB less memory: numpy no longer reserves a buffer for every CPU thread at start.
 
 ## [0.2.1] - 2026-11-15
 
