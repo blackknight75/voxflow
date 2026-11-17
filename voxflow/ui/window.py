@@ -73,6 +73,8 @@ class MainWindow(QWidget):
 
     M = 14          # shadow margin around the panel
     GRIP = 7        # resize band (inside the margin, hugging the panel edge)
+    MIN_W, MIN_H = 800, 580       # smallest panel on a roomy screen
+    FLOOR_W, FLOOR_H = 640, 460   # smallest panel on a small one (1920x1080 at 200 %): sidebar + a scrolling page
 
     def __init__(self, controller):
         super().__init__(None)
@@ -82,7 +84,7 @@ class MainWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setWindowTitle("VoxFlow")
         self.setMouseTracking(True)
-        self.setMinimumSize(800 + 2 * self.M, 580 + 2 * self.M)
+        self.setMinimumSize(self.MIN_W + 2 * self.M, self.MIN_H + 2 * self.M)
         self.resize(1080 + 2 * self.M, 720 + 2 * self.M)
         self._placed = False
         self._modal: Modal | None = None
@@ -278,6 +280,7 @@ class MainWindow(QWidget):
         if not self._placed:
             self._placed = True
             self._restore_geometry()
+            self.windowHandle().screenChanged.connect(self._fit_minimum)
         self.pages[self.current].on_enter()
 
     def hideEvent(self, e):
@@ -289,6 +292,13 @@ class MainWindow(QWidget):
         e.ignore()          # the app lives in the tray; quitting is explicit (tray menu)
         self.hide()
 
+    def _fit_minimum(self, screen) -> None:
+        """The minimum size never exceeds the work area, or the bottom of the window (Pause, the status, the end
+        of each page) would sit off-screen and could not be brought back by resizing."""
+        ag = screen.availableGeometry()
+        self.setMinimumSize(max(self.FLOOR_W, min(self.MIN_W, ag.width())) + 2 * self.M,
+                            max(self.FLOOR_H, min(self.MIN_H, ag.height())) + 2 * self.M)
+
     def _restore_geometry(self) -> None:
         state = self.ctl.get("ui_state") or {}
         geo = state.get("window")
@@ -299,6 +309,7 @@ class MainWindow(QWidget):
             for s in screens:
                 vis = s.availableGeometry().intersected(cand)
                 if vis.width() >= 200 and vis.height() >= 120:      # still reachable on some monitor
+                    self._fit_minimum(s)
                     ag = s.availableGeometry()
                     cand.setWidth(min(cand.width(), ag.width() + 2 * self.M))
                     cand.setHeight(min(cand.height(), ag.height() + 2 * self.M))
@@ -306,10 +317,12 @@ class MainWindow(QWidget):
                     break
         if rect is None:
             from .overlay import active_screen
-            ag = (active_screen() or QGuiApplication.primaryScreen()).availableGeometry()
+            screen = active_screen() or QGuiApplication.primaryScreen()
+            self._fit_minimum(screen)
+            ag = screen.availableGeometry()
             w = min(self.width(), ag.width() + 2 * self.M)
             h = min(self.height(), ag.height() + 2 * self.M)
-            rect = QRect(ag.center().x() - w // 2, ag.center().y() - h // 2, w, h)
+            rect = QRect(ag.x() + (ag.width() - w) // 2, ag.y() + (ag.height() - h) // 2, w, h)
         self.setGeometry(rect)
         if state.get("maximized"):
             self.showMaximized()

@@ -24,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hotkey's Change button and the setup guide's Change button line up with the right edge.
 - Deleting a transcript in History (the bin icon or the Delete key) can be undone from the toast, like removing
   a dictionary word or a snippet.
+- On small screens (for example 1920x1080 at 175 % or 200 %) the main window and the setup guide fit the work
+  area: Pause, the status and the guide's Continue and Skip are no longer under the taskbar, and a guide step that
+  does not fit scrolls.
+- In the setup guide, Esc during the microphone, model or hotkey steps first asks ("Press Esc again to skip"), so
+  an Esc meant for a recording no longer ends the setup. On the first and last step it still closes at once.
+- The microphone step hides the "No movement?" help once your microphone is heard.
 
 ## [0.2.1] - 2026-11-15
 

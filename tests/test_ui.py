@@ -1069,7 +1069,7 @@ def test_onboarding_can_be_skipped_every_way_and_never_returns(make_ui, how):
     ob.finished.connect(done.append)
     ob.btn_next.click()                                        # leave from the mic step: monitor must be released
     {"skip": ob.btn_skip.click, "close_button": ob.btn_close.click,
-     "escape": lambda: ui.qtbot.keyClick(ob, Qt.Key.Key_Escape), "window_close": ob.close}[how]()
+     "escape": lambda: [ui.qtbot.keyClick(ob, Qt.Key.Key_Escape) for _ in "12"], "window_close": ob.close}[how]()
     assert done == [False] and ui.c.get("onboarding_done") is True and not ui.c._monitor
     assert ui.shell.onboarding is None
     saved = json.loads((ui.rig.data_dir / "config.json").read_text(encoding="utf-8"))
