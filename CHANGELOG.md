@@ -29,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - When a graphics card error moved speech recognition to the CPU during a session, VoxFlow kept saying it ran on the GPU while every dictation got slower. It now says so once, with a button to the model settings, where Retry loads it on the GPU again.
 - A recording that was only silence showed two notifications with different wording. It now shows one, with the button to the microphone settings.
 - Long dictations that run on as one line go to the language model sentence by sentence, and only the sentences that need it: a 230-word dictation took 0.65 s instead of 1.2 s on an RTX 5080, with the same text. On a computer without a usable graphics card, a sentence the model cannot finish in the time left is no longer started.
+- A letter dictated with "new line" lost the full stops of its sentences (only the last line kept one), and the sign-off got a stray one ("Best regards."). Sentences before a line break now keep their full stop, a greeting line gets its comma ("Dear John,") and a sign-off gets a comma before the name, or nothing at the end.
 - After one dictation timed out in the language model, the next dictations got the basic clean-up at once, and
   command mode said it "took too long", even when the model was free again a moment later. They now wait for it,
   within their own time limit. Command mode says the model is still busy when that is the reason.

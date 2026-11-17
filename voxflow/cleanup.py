@@ -691,7 +691,40 @@ def rule_clean(text: str, formatting: bool = True, terminal: bool = True, filler
         and last[-1].isalnum()
     ):
         t = t + ("?" if _is_question(re.split(r"(?<=[.!?])\s+", last)[-1]) else ".")
+    if formatting and "\n" in t:
+        t = _letter_lines(t)
     return lead + t + trail
+
+
+# a letter dictated with "new line" (QA C-11): "Dear John," on a line of its own, and a sign-off with a comma before
+# the name (no full stop: "Best regards" is not a sentence)
+_SALUTATION_RE = re.compile(r"(dear|hi|hello|hey|good (?:morning|afternoon|evening))\b((?: [^\s,.;:!?]+){0,3})", re.I)
+_GROUP_WORDS = frozenset("team all everyone everybody folks guys there both".split())
+
+
+def _is_salutation(line: str) -> bool:
+    """"Dear John", "Hi team", "Hello Anna Lee": a greeting and who it is for, not "Hey are you free"."""
+    m = _SALUTATION_RE.fullmatch(line)
+    if not m:
+        return False
+    names = m.group(2).split()
+    return m.group(1).lower() == "dear" or (len(names) <= 2 and all(
+        w.lower() in _GROUP_WORDS or w[0].isupper() for w in names))
+_CLOSING_RE = re.compile(
+    r"(?:(?:best|kind|warm|warmest) (?:regards|wishes)|best|regards|many thanks|thanks(?: again)?|thank you|cheers|"
+    r"sincerely|yours (?:sincerely|truly|faithfully)|all the best|talk soon)[.,]?", re.I)
+
+
+def _letter_lines(t: str) -> str:
+    lines = t.split("\n")
+    filled = [i for i, line in enumerate(lines) if line.strip()]
+    for i in filled:
+        line, more = lines[i], i != filled[-1]
+        if i == filled[0] and more and _is_salutation(line):
+            lines[i] = line + ","
+        elif _CLOSING_RE.fullmatch(line):
+            lines[i] = line.rstrip(".,") + ("," if more else "")
+    return "\n".join(lines)
 
 
 _Q_LEAD_SKIP = ("so", "and", "but", "well", "okay", "ok", "also", "hey", "oh", "now")
@@ -2066,14 +2099,20 @@ class Cleaner:
                 ends_text = not bullet and idx == len(lines) - 1 and k == len(pieces) - 1
                 allow_period = (ends_text and not _is_fragment(piece)) or (
                     len(pieces) > 1 and piece.rstrip()[-1:] in ".!?")
-                done.append(self._clean_piece(piece, same, allow_period, t0))
+                # a line that ends before "new line" keeps the full stop the model gave it ("Thanks for the
+                # update."), but none is added for it: an address or a list header has none (QA C-11)
+                header = idx + 1 < len(lines) and lines[idx + 1].startswith("- ")
+                keep_period = not bullet and not header and len(piece.split()) >= 3
+                done.append(self._clean_piece(piece, same, allow_period, t0, keep_period))
             out_lines.append(("- " if bullet else "") + " ".join(done))
         self.last_info["ms"] = (time.perf_counter() - t0) * 1000
         return "\n".join(out_lines)
 
-    def _clean_piece(self, body: str, unchanged: bool, allow_period: bool, t0: float) -> str:
+    def _clean_piece(self, body: str, unchanged: bool, allow_period: bool, t0: float,
+                     keep_period: bool = False) -> str:
         """One line, or one sentence of a long line, through the model when it needs it; the rule text otherwise.
-        ``t0``: when the clean-up of the whole dictation started (all pieces share one time budget)."""
+        ``t0``: when the clean-up of the whole dictation started (all pieces share one time budget).
+        ``allow_period``: a missing full stop is added; ``keep_period``: one the model wrote is kept."""
         if not self._needs_llm(body, unchanged) and not (
                 self.punctuation_pass and len(body.split()) > 2 and looks_unpunctuated(body)):
             return body
@@ -2098,7 +2137,7 @@ class Cleaner:
                 res = ""  # model invented a bullet
             if res:
                 res = _restore_case(body, rule_clean(res, formatting=False, terminal=allow_period, fillers=False))
-            no_dot = not allow_period or _is_fragment(res.rstrip("."))
+            no_dot = not (allow_period or keep_period) or _is_fragment(res.rstrip("."))
             if no_dot and res.endswith(".") and not body.rstrip().endswith("."):
                 res = res[:-1]
             if _accept(body, res):

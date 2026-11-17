@@ -388,7 +388,7 @@ def test_lone_line_break_commands_return_the_characters():
     c.load()
     assert c.clean("new line") == nl
     assert c.clean("new paragraph") == para
-    assert c.clean("hello new line world") == "Hello" + nl + "World"
+    assert c.clean("hello new line world") == "Hello," + nl + "World"     # a greeting line gets its comma (C-11)
 
 
 def test_install_cuda_without_llama_cpp_is_friendly(monkeypatch):

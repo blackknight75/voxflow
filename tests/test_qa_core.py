@@ -773,3 +773,35 @@ def test_c10_the_cpu_learns_its_speed_but_never_turns_the_punctuation_pass_on():
     c.backend, c._learn_speed, c.punctuation_pass = "cpu", False, False
     c.clean("then we move the meeting to friday at three")
     assert c._ms_per_word is not None and c.punctuation_pass is False
+
+
+# =========================================================================== C-11: lines before "new line"
+def test_c11_a_line_before_a_line_break_keeps_the_full_stop_the_model_gave_it():
+    """QA: "Dear John new line thanks for the update new paragraph best regards"."""
+    c, llm = with_llm(lambda user, msgs: user if user.endswith(".") else user + ".")
+    out = c.clean("dear John new line thanks for the update new paragraph best regards")
+    assert out == "Dear John,\nThanks for the update.\n\nBest regards"
+
+
+def test_c11_no_full_stop_is_added_where_the_model_wrote_none_and_never_on_a_list_header():
+    c, llm = with_llm(lambda user, msgs: user)
+    assert c.clean("221b baker street new line london nw1 new line england") == \
+        "221b baker street\nLondon nw1\nEngland", "an address dictated line by line gets no full stops"
+    c, llm = with_llm(lambda user, msgs: user + ".")
+    out = c.clean("my shopping list for today bullet point eggs bullet point milk")
+    assert out.split("\n")[0] == "My shopping list for today", "a list header never gets a period"
+
+
+@pytest.mark.parametrize("spoken, expect", [
+    ("dear john new line thanks for the update new paragraph best regards",
+     "Dear john,\nThanks for the update\n\nBest regards"),
+    ("Hi team new line the build is green new line thanks new line Alex",
+     "Hi team,\nThe build is green\nThanks,\nAlex"),
+    ("good morning everyone new line the agenda is short", "Good morning everyone,\nThe agenda is short."),
+    # not a greeting line, or no line after it: as before
+    ("hey are you free new line call me", "Hey are you free\nCall me."),
+    ("I said thanks new line ok", "I said thanks\nOk"),
+    ("best regards", "Best regards."),
+])
+def test_c11_a_dictated_letter_gets_its_salutation_comma_and_a_sign_off_without_a_full_stop(spoken, expect):
+    assert rule_clean(spoken) == expect

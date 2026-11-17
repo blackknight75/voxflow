@@ -577,7 +577,7 @@ def test_default_model_and_public_names():
     ("i think i.e. is latin", "I think i.e. is latin."),
     ("visit foo.bar for more", "Visit foo.bar for more."),
     ("new line", "\n"),
-    ("dear bob new line how are you new paragraph best dan", "Dear bob\nHow are you\n\nBest dan."),
+    ("dear bob new line how are you new paragraph best dan", "Dear bob,\nHow are you\n\nBest dan."),
     ("the new line of products is great", "The new line of products is great."),
     ("start a new paragraph here", "Start a new paragraph here."),
     ("bullet point milk bullet point eggs", "- Milk\n- Eggs"),
