@@ -805,3 +805,30 @@ def test_c11_no_full_stop_is_added_where_the_model_wrote_none_and_never_on_a_lis
 ])
 def test_c11_a_dictated_letter_gets_its_salutation_comma_and_a_sign_off_without_a_full_stop(spoken, expect):
     assert rule_clean(spoken) == expect
+
+
+# =========================================================================== C-12: no [Your Name] in the document
+from voxflow.command import build_messages, tidy_output  # noqa: E402
+
+
+def test_c12_the_model_is_told_not_to_write_placeholders_at_the_end_of_a_write_request():
+    system, user = build_messages("write a short thank you note to my team", "")
+    assert "Never write placeholders such as [Your Name]" in system["content"]
+    assert user["content"].endswith("no placeholders in square brackets; leave out names, dates and details you "
+                                    "do not know.)"), "the rule closes the request, where the small model heeds it"
+    _system, rewrite = build_messages("make this formal", "hey send me the file")
+    assert "placeholders" not in rewrite["content"]
+
+
+@pytest.mark.parametrize("raw, selection, expect", [
+    ("Dear team,\n\nThank you all.\n\nBest regards,\n[Your Name]", "", "Dear team,\n\nThank you all.\n\nBest regards,"),
+    ("Dear [Landlord's Name],\n\nThe heating is broken.", "", "Hello,\n\nThe heating is broken."),
+    ("Hi [Name]!\nSee you on Friday.", "", "Hello!\nSee you on Friday."),
+    # left alone: a placeholder inside a sentence, check boxes, a footnote, a selection that is itself a template
+    ("I am back on [return date].", "", "I am back on [return date]."),
+    ("- [x] done\n- [ ] todo", "", "- [x] done\n- [ ] todo"),
+    ("[1]\nThe footnote.", "", "[1]\nThe footnote."),
+    ("Dear [Name],\nWelcome.\n[Signature]", "Dear [Name], welcome. [Signature]", "Dear [Name],\nWelcome.\n[Signature]"),
+])
+def test_c12_placeholder_lines_are_taken_out_of_what_is_pasted(raw, selection, expect):
+    assert tidy_output(raw, selection) == expect
