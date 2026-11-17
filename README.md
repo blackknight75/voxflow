@@ -264,6 +264,16 @@ VoxFlow is built so that there is nothing to trust: audio and text are processed
 * Nothing else. No account, no analytics, no crash upload. Audio, transcripts, dictionary and settings are
   never sent anywhere.
 
+**Why Windows shows "VoxFlow is using your microphone"**
+
+VoxFlow keeps the microphone open while it runs, also when it is paused. That is how it keeps the 0.3 seconds
+*before* you press the shortcut, so a first word you start saying as you press is not cut off. Opening the
+microphone only when you press would lose that, and a little more while the device starts. Until you hold the
+shortcut, the sound goes into a 2-second buffer in memory that is overwritten all the time. It is never written to
+disk, transcribed or sent anywhere. On a Bluetooth headset an open microphone keeps the headset in its call mode,
+which makes music sound worse: choose another microphone in Settings > Microphone (for example the PC's own)
+to avoid that. Quitting VoxFlow closes the microphone.
+
 **What is stored, and where**
 
 | Where | What |

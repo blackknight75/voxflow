@@ -48,6 +48,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *Launch at login* no longer shows as on when its entry starts nothing. An entry for a program that is gone
   (the install folder moved) is rewritten for this copy. One that starts another copy of VoxFlow shows "Launch at
   login starts another copy of VoxFlow" with *Use this copy*.
+- The README explains why Windows shows VoxFlow using the microphone (Privacy): the open microphone keeps the
+  moment before you press the shortcut, in memory only.
 - VoxFlow uses about 480 MB less memory: numpy no longer reserves a buffer for every CPU thread at start.
 
 ## [0.2.1] - 2026-11-15
