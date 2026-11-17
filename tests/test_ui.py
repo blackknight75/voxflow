@@ -1359,8 +1359,10 @@ def test_flow_bar_follows_the_controller_through_a_dictation(ui):
     seen = []
     ui.c.state_changed.connect(lambda *a: seen.append((overlay.state, overlay.mode, overlay.text)))
     ui.rig.dictate("the bar follows along")
-    assert seen == [("listening", "dictate", ""), ("processing", "dictate", ""), ("done", "dictate", "Pasted")]
+    # the whole cycle, checked once it is over: the rig's 40 ms "done" can end before a slow runner polls again
     ui.wait(lambda: overlay.state == "idle")
+    assert seen == [("listening", "dictate", ""), ("processing", "dictate", ""), ("done", "dictate", "Pasted"),
+                    ("idle", "dictate", "")]
     ui.rig.pause()
     ui.rig.tap()
     ui.rig.tap()
