@@ -347,26 +347,15 @@ _PUNCT_CMDS = [
     (re.compile(r"\s*\b(?:exclamation (?:mark|point))\b[.,]?", re.I), "!"),
     (re.compile(r"\s*\b(?:full stop)\b[.,]?", re.I), "."),
 ]
-# "scratch that": drop the clause spoken before it (back to the previous sentence end)
-_SCRATCH_RE = re.compile(r"\bscratch that\b[\s,.;:]*", re.I)
+# "scratch that": drop the clause spoken before it (back to the previous sentence end; see langs.drop_scratched)
+_SCRATCH_RE = re.compile(r"\bscratch that\b[\s,.;:!?]*", re.I)
 
 
 def _drop_scratched(t: str) -> str:
-    """Remove every "scratch that" together with the clause before it (back to the previous sentence end).
-    Linear: the clause start is found by scanning backwards, never by a lazy regex that rescans the text."""
+    """Remove every "scratch that" together with the clause (or the sentence) spoken before it."""
     if "scratch that" not in t.lower():
         return t
-    out: list[str] = []
-    pos = 0
-    for m in _SCRATCH_RE.finditer(t):
-        if m.start() < pos:  # pragma: no cover - defensive: finditer matches never overlap
-            continue
-        start = max(t.rfind(c, pos, m.start()) for c in ".!?\n") + 1
-        out.append(t[pos:start])
-        out.append(" ")
-        pos = m.end()
-    out.append(t[pos:])
-    return "".join(out)
+    return langs.drop_scratched(t, _SCRATCH_RE)
 _FRAGMENT_RE = re.compile(r"(?:[\w.-]+[/\\][\w./\\-]*|[\w-]+(?:\.[A-Za-z0-9]{1,5})+|\S+@\S+|https?://\S+)$")
 
 # Unambiguous same-kind self-corrections ("monday no tuesday", "five wait six") are resolved by rule,

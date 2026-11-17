@@ -378,3 +378,31 @@ def test_c01_dictations_skipped_behind_one_stuck_generation_do_not_raise_the_too
     rig.dictate("please send the report")
     rig.dictate("please send the report")
     assert rig.spy.notices() == [("info", ctl_mod.RULES_ONLY_NOTICE)], "three real timeouts still do"
+
+
+# =========================================================================== C-03: "scratch that" after a full stop
+from voxflow import langs  # noqa: E402
+from voxflow.cleanup import rule_clean  # noqa: E402
+
+
+@pytest.mark.parametrize("spoken, expect", [
+    # Parakeet punctuates: the marker is a sentence of its own, so the sentence before it is taken back
+    ("I will call you tomorrow. Scratch that. I will email you tomorrow.", "I will email you tomorrow."),
+    ("We met. I will call you tomorrow? Scratch that! I will email.", "We met. I will email."),
+    ("Hello. Scratch that.", ""),
+    # unchanged: the clause before the marker inside its sentence, or nothing before it at all
+    ("i will call you tomorrow scratch that i will email you tomorrow", "I will email you tomorrow."),
+    ("First point. Second point, scratch that. Third point.", "First point. Third point."),
+    ("Scratch that. Send it now.", "Send it now."),
+])
+def test_c03_scratch_that_takes_back_the_sentence_the_recogniser_ended(spoken, expect):
+    assert rule_clean(spoken) == expect
+
+
+@pytest.mark.parametrize("lang, spoken, expect", [
+    ("es", "Te llamo mañana. Borra eso. Te escribo mañana.", "Te escribo mañana."),
+    ("de", "Wir sehen uns. Ich rufe dich morgen an. Streich das! Ich schreibe dir.", "Wir sehen uns. Ich schreibe dir."),
+    ("fr", "je t'appelle demain efface ça je t'écris demain", "Je t'écris demain."),
+])
+def test_c03_the_other_languages_take_it_back_the_same_way(lang, spoken, expect):
+    assert langs.rule_clean(spoken, langs.get(lang)) == expect

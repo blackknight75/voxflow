@@ -752,7 +752,7 @@ def _rx(pack: Pack) -> dict:
         rx["soft"] = re.compile(
             rf"(?:(?<=^)|(?<=[,.;!?]\s)|(?<=,))\s*(?:{_alts(pack.soft)})\s*,\s*", flags)
     if pack.scratch:
-        rx["scratch"] = re.compile(rf"[^.!?\n]*?(?<!\w)(?:{_alts(pack.scratch)})(?!\w)[\s,.;:]*", flags)
+        rx["scratch"] = re.compile(rf"(?<!\w)(?:{_alts(pack.scratch)})(?!\w)[\s,.;:!?]*", flags)
     if pack.markers:
         rx["cue"] = re.compile(rf"(?<!\w)(?:{_alts(pack.markers)})(?!\w)", flags)
     commands = []
@@ -895,6 +895,29 @@ def cap_sentences(text: str) -> str:
     return "\n".join(out)
 
 
+def _sentence_start(t: str, lo: int, hi: int) -> int:
+    """Where the sentence holding ``t[hi]`` starts, looking back no further than ``lo``."""
+    return max(lo, max(t.rfind(ch, lo, hi) for ch in ".!?\n") + 1)
+
+
+def drop_scratched(t: str, marker: re.Pattern) -> str:
+    """Remove every ``marker`` ("scratch that", "borra eso", ...) together with what was said before it, back to
+    the previous sentence end. A recogniser that punctuates often makes the marker a sentence of its own ("I'll call
+    you tomorrow. Scratch that. I'll email you."): then the sentence before it is the one taken back (QA C-03).
+    Linear: each start is found by scanning backwards, never by a lazy regex that rescans the text."""
+    out: list[str] = []
+    pos = 0
+    for m in marker.finditer(t):
+        start = _sentence_start(t, pos, m.start())
+        if start > pos and not t[start:m.start()].strip(" \t,;:"):
+            start = _sentence_start(t, pos, start - 1)
+        out.append(t[pos:start])
+        out.append(" ")
+        pos = m.end()
+    out.append(t[pos:])
+    return "".join(out)
+
+
 def rule_clean(text: str, pack: Pack, formatting: bool = True, terminal: bool = True,
                fillers: bool = True) -> str:
     """Deterministic clean-up of non-English dictation. Never changes meaning."""
@@ -904,7 +927,7 @@ def rule_clean(text: str, pack: Pack, formatting: bool = True, terminal: bool = 
     rx = _rx(pack)
     if fillers:
         if "scratch" in rx:
-            t = rx["scratch"].sub(" ", t)
+            t = drop_scratched(t, rx["scratch"])
         t = rx["hes"].sub("", t)
         if "soft" in rx:
             t = rx["soft"].sub(" ", t)
