@@ -319,12 +319,11 @@ def test_filing_a_transcript_never_writes_the_history_on_the_callers_thread(tmp_
     h = store.History(tmp_path)
     writers: list[str] = []
     real = store.cfgmod._atomic_write
-    monkeypatch.setattr(store.cfgmod, "_atomic_write",
-                        lambda path, text: (writers.append(threading.current_thread().name), real(path, text)))
+    monkeypatch.setattr(store.cfgmod, "_atomic_write", lambda path, text: (
+        path == h.path and writers.append(threading.current_thread().name), real(path, text)))
     h.add("first dictation")
-    assert writers == [], "the dictation's thread returns before the file is written"
     _wait(lambda: writers)
-    assert writers == ["voxflow-store-write"]
+    assert writers == ["voxflow-store-write"], "written on the store's own thread, never the dictation's"
     _settled(h)
     assert json.loads((tmp_path / "history.json").read_text(encoding="utf-8"))["items"][0]["text"] == "first dictation"
 
@@ -388,3 +387,72 @@ def test_search_stops_at_the_limit(tmp_path):
     assert [e["text"] for e in h.search("report", 3)] == ["report number 49", "report number 48", "report number 47"]
     assert len(h.search("", 7)) == 7 and h.search("report", 0) == [] and len(h.search("number")) == 50
     assert h.search("nothing like it", 5) == []
+
+
+def test_a_timer_that_fires_after_a_flush_writes_nothing(tmp_path, monkeypatch):
+    h = store.History(tmp_path)
+    h.add("x")
+    h.flush()
+    calls: list = []
+    monkeypatch.setattr(store.cfgmod, "_atomic_write", lambda path, text: path == h.path and calls.append(text))
+    h._write_behind()                                 # a timer that was already running when flush() cancelled it
+    assert calls == []
+
+
+def test_a_payload_that_is_not_json_is_a_save_error_not_a_crash(tmp_path):
+    h = store.History(tmp_path)
+    assert isinstance(h._serialise({"bad": {1, 2}}), TypeError)
+    h._items.append({"id": "x", "ts": 1.0, "text": {1}})          # never happens through the API
+    h._dirty = True
+    h.flush()
+    assert "not JSON serializable" in h.last_save_error
+
+
+def test_the_v1_copy_that_cannot_be_written_is_logged(tmp_path, monkeypatch, caplog):
+    _write(tmp_path / "history.json", [{"text": "old", "ts": time.time() - 60}])
+    real = store.Path.write_bytes
+
+    def refuse_copy(self, data):
+        if self.name == "history.v1.json":
+            raise OSError(13, "Access is denied")
+        return real(self, data)
+
+    monkeypatch.setattr(store.Path, "write_bytes", refuse_copy)
+    with caplog.at_level("WARNING"):
+        h = store.History(tmp_path)
+    assert h.count() == 1 and "could not keep a copy of history.json" in caplog.text
+
+
+def test_the_term_index_follows_every_change(tmp_path):
+    d = store.Dictionary(tmp_path)
+    a = d.add("Wi-Fi", ["why fly"])
+    d.update(a["id"], term="WLAN")
+    assert d._find_term("wlan")["id"] == a["id"] and d._find_term("wi fi") is None
+    with pytest.raises(ValueError, match="already in your dictionary"):
+        d.add("Wlan")
+    d.remove(a["id"])
+    assert d._find_term("WLAN") is None
+    d.apply_changes([{"term": "GitHub"}, {"term": "github", "aliases": ["get hub"]}], removals=["nothing"])
+    assert d.terms() == ["github"] and d._find_term("GITHUB")["aliases"] == ["get hub"]
+    d.apply_changes(removals=["GitHub"])
+    assert d.terms() == [] and d._find_term("github") is None
+    src = tmp_path / "in.txt"
+    src.write_text("Kubernetes: kube\n", encoding="utf-8")
+    assert d.import_(str(src)) == {"added": 1, "updated": 0}
+    assert d.import_(str(src)) == {"added": 0, "updated": 0}, "nothing new: nothing updated"
+    assert d._find_term("kubernetes")["term"] == "Kubernetes"
+    d.suggest("PyTorch")
+    d.accept_suggestion(d.suggestions()[0]["id"])
+    assert d._find_term("pytorch")["term"] == "PyTorch"
+
+
+def test_search_never_reads_past_the_limit(tmp_path):
+    class Untouchable(dict):
+        def __getitem__(self, key):
+            raise AssertionError("search read an entry after it had enough results")
+
+    h = store.History(tmp_path)
+    for i in range(3):
+        h.add(f"match {i}")
+    h._items.append(Untouchable())                    # the oldest entry: only a scan of everything reaches it
+    assert len(h.search("match", 3)) == 3 and len(h.search("", 2)) == 2

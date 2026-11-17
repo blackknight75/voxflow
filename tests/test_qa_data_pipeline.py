@@ -89,3 +89,8 @@ def test_ranking_is_cheap_even_for_a_large_dictionary():
         cleanup.rank_terms(many, text)
     took_ms = (time.perf_counter() - t0) / 5 * 1000
     assert took_ms < 50, f"ranking 1,500 terms took {took_ms:.1f} ms"
+
+
+def test_a_one_letter_token_is_never_a_name():
+    assert store._interesting_casing("X") is False and store._interesting_casing("'I") is False
+    assert store._interesting_casing("GitHub") is True

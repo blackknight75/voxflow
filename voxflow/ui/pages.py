@@ -1089,7 +1089,8 @@ class SnippetsPage(Page, _ImportExport):
             lay.addWidget(ed)
             lay.addWidget(rm)
             flat = " ⏎ ".join(line.strip() for line in str(s.get("text", "")).splitlines() if line.strip())
-            rows.append(Row(f"“{s['trigger']}”", flat if len(flat) <= 110 else flat[:107] + "…", box, icon="snippet"))
+            rows.append(Row(f"“{s['trigger']}”", flat if len(flat) <= 110 else flat[:107] + "…", box,
+                            icon="snippet"))
         self.rows.add_many(rows)
         self.rows.setVisible(bool(items))
         self.empty.setVisible(not items)

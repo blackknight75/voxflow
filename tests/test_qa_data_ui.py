@@ -156,7 +156,8 @@ def test_the_import_toast_reports_new_and_updated_entries(make_demo, monkeypatch
     src = tmp_path / "words.csv"
     src.write_text("term\n", encoding="utf-8")
     monkeypatch.setattr(dialogs, "ask_open_path", lambda *a, **k: str(src))
-    for result, toast in [({"added": 3, "updated": 2}, "Imported 3 new dictionary entries and updated 2 you already had."),
+    for result, toast in [({"added": 3, "updated": 2},
+                           "Imported 3 new dictionary entries and updated 2 you already had."),
                           ({"added": 0, "updated": 2}, "Updated 2 of your dictionary entries from words.csv."),
                           ({"added": 4, "updated": 0}, "Imported 4 new dictionary entries."),
                           ({"added": 0, "updated": 0}, "No new dictionary entries found in words.csv."),
@@ -184,7 +185,8 @@ def test_alias_conflicts_of_an_import_are_shown(make_demo, monkeypatch, tmp_path
     c.import_pack = lambda p, mode: {"added": 1, "updated": 0, "removed": 0, "skipped": 0, "aliases_skipped": one}
     page.do_import()
     demo.find("pack_import").btn_primary.click()
-    assert demo.toasts()[-2:] == ["Pack imported: 1 added.", "“cube” was left out of Kubernetes: Cuba already uses it."]
+    assert demo.toasts()[-2:] == ["Pack imported: 1 added.",
+                                  "“cube” was left out of Kubernetes: Cuba already uses it."]
 
 
 def test_alias_conflicts_of_a_backup_are_shown(make_demo, monkeypatch, tmp_path):

@@ -192,11 +192,11 @@ class _JsonStore:
         return self.path.with_name(f"{self.path.stem}.{tag}{self.path.suffix}")
 
     def _backup(self, tag: str) -> None:
+        """Keep a copy of the file as it is (``history.v1.json`` before a migration rewrites it)."""
         try:
-            if self.path.exists():
-                self._backup_path(tag).write_bytes(self.path.read_bytes())
-        except OSError:
-            pass
+            self._backup_path(tag).write_bytes(self.path.read_bytes())
+        except OSError as exc:
+            log.warning("could not keep a copy of %s: %s", self.path.name, exc)
 
     def _drop_backups(self, corrupt: bool = False) -> None:
         """Delete the copies ``_backup`` kept (``history.v1.json``): they hold the same data as the file, so
@@ -677,6 +677,7 @@ class Dictionary(_JsonStore):
 
     def _load(self, data) -> None:
         self._entries: list[dict] = []
+        self._by_key = None
         self._suggestions: list[dict] = []
         self._dismissed: set[str] = set()
         self._regex = None
@@ -718,10 +719,19 @@ class Dictionary(_JsonStore):
                 "dismissed": sorted(self._dismissed)}
 
     # ---- helpers (call with the lock held)
+    _by_key: dict | None = None      # match key -> entry, built on first use, kept up to date (None: rebuild)
+
+    def _keys(self) -> dict:
+        if self._by_key is None:
+            self._by_key = {}
+            for e in self._entries:
+                self._by_key.setdefault(_match_key(e["term"]), e)
+        return self._by_key
+
     def _find_term(self, term: str) -> dict | None:
-        """The entry for ``term`` as it is matched in dictation: any letter case, a hyphen = a space."""
-        key = _match_key(term)
-        return next((e for e in self._entries if _match_key(e["term"]) == key), None)
+        """The entry for ``term`` as it is matched in dictation: any letter case, a hyphen = a space. A lookup
+        in an index, so bulk changes (sync, imports) stay linear."""
+        return self._keys().get(_match_key(term))
 
     def _find_id(self, entry_id: str) -> dict:
         entry = next((e for e in self._entries if e["id"] == entry_id), None)
@@ -791,6 +801,7 @@ class Dictionary(_JsonStore):
             self._check_alias_conflicts(term, aliases, None)
             entry = {"id": _new_id(), "term": term, "aliases": aliases}
             self._entries.append(entry)
+            self._keys()[_match_key(term)] = entry
             dropped = self._drop_suggestions_for(term)
             self._changed()
             out = copy.deepcopy(entry)
@@ -808,7 +819,9 @@ class Dictionary(_JsonStore):
                 raise ValueError(f"“{new_term}” is already in your dictionary.")
             new_aliases = self._clean_aliases(new_term, entry["aliases"] if aliases is None else aliases)
             self._check_alias_conflicts(new_term, new_aliases, entry_id)
+            self._keys().pop(_match_key(entry["term"]), None)
             entry["term"], entry["aliases"] = new_term, new_aliases
+            self._keys()[_match_key(new_term)] = entry
             self._changed()
             out = copy.deepcopy(entry)
         self._notify("dictionary")
@@ -820,6 +833,7 @@ class Dictionary(_JsonStore):
             self._entries = [e for e in self._entries if e["id"] != entry_id]
             removed = len(self._entries) != before
             if removed:
+                self._by_key = None
                 self._changed()
         if removed:
             self._notify("dictionary")
@@ -839,6 +853,7 @@ class Dictionary(_JsonStore):
                 entry = self._find_term(_norm_spaces(term)) if isinstance(term, str) else None
                 if entry is not None:
                     self._entries.remove(entry)
+                    self._keys().pop(_match_key(entry["term"]), None)
                     changed += 1
             taken: dict[str, set[str]] = {}
             alias_of: dict[str, set[str]] = {}
@@ -868,9 +883,10 @@ class Dictionary(_JsonStore):
                 if entry is None:
                     entry = {"id": _new_id(), "term": term, "aliases": aliases}
                     self._entries.append(entry)
+                    self._keys()[_match_key(term)] = entry
                     self._drop_suggestions_for(term)
                 elif entry["term"] != term or entry["aliases"] != aliases:
-                    entry["term"], entry["aliases"] = term, aliases
+                    entry["term"], entry["aliases"] = term, aliases      # the same match key: the index holds
                 else:
                     _index_entry(entry, taken, alias_of)
                     continue
@@ -1024,6 +1040,7 @@ class Dictionary(_JsonStore):
                 _index_entry(entry, taken, alias_of)
                 self._drop_suggestions_for(term)
                 added += 1
+            self._by_key = None
             self._changed()
         self._notify("dictionary")
         self._notify("suggestions")
@@ -1170,6 +1187,7 @@ class Dictionary(_JsonStore):
                            if self._alias_free(sug["term"], a, None)]
                 entry = {"id": _new_id(), "term": sug["term"], "aliases": aliases}
                 self._entries.append(entry)
+                self._keys()[_match_key(entry["term"])] = entry
             self._changed()
             out = copy.deepcopy(entry)
         self._notify("dictionary")
