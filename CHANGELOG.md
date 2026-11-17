@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-17
+
 ### Changed
 
 - The default models are downloaded at a fixed, reviewed version and every file is checked by size and SHA-256,
@@ -354,5 +356,6 @@ Interface and system
 - **No automatic updates:** install a newer version by running its installer.
 - Features that would need a cloud service, an account or a phone app are out of scope by design.
 
-[Unreleased]: https://github.com/blackknight75/voxflow/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/blackknight75/voxflow/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/blackknight75/voxflow/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/blackknight75/voxflow/releases/tag/v0.2.1
