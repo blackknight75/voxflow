@@ -46,6 +46,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   address": 2 words), not the words of the text the snippet typed.
 - With more than 60 dictionary words, the clean-up's language model gets the ones that sound like what you said
   (then the newest), instead of always the alphabetically first 60, so "Zendesk" or "TypeScript" are corrected too.
+- Settings written as text in `config.json` (by hand or by a deployment script) are read as meant:
+  `"save_history": "false"` turns history off instead of being ignored, and `"history_limit": "100"` is 100. A
+  value that is still not valid is reset to its default and VoxFlow says so at start-up.
+- Running an older VoxFlow after a newer one no longer drops the newer version's settings from `config.json` or
+  lowers its `config_version`.
 
 ## [0.2.1] - 2026-11-15
 

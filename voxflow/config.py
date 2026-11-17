@@ -168,19 +168,26 @@ class Config:
 
     # ---- (de)serialisation -------------------------------------------------
     @classmethod
-    def from_dict(cls, data: dict | None) -> "Config":
-        """Build a Config from stored JSON: migrates old layouts, ignores unknown keys and invalid values."""
+    def from_dict(cls, data: dict | None, rejected: list | None = None) -> "Config":
+        """Build a Config from stored JSON: migrates old layouts and keeps the default for an invalid value (its
+        key is appended to ``rejected``). "false" / "off" and "100" written by hand or by a deployment script are
+        read as the setting's type. Keys this version does not know are kept for ``save_config`` (a newer
+        VoxFlow wrote them), and ``config_version`` is never lowered."""
         cfg = cls()
         if not isinstance(data, dict):
             return cfg
         data = migrate(data)
+        known = {f.name for f in fields(cls)}
+        cfg._extras = {k: v for k, v in data.items() if k not in known}
+        cfg.config_version = max(CONFIG_VERSION, data["config_version"])
         for f in fields(cls):
             if f.name not in data or f.name == "config_version":
                 continue
             try:
-                setattr(cfg, f.name, cls.validate(f.name, data[f.name]))
+                setattr(cfg, f.name, cls.validate(f.name, _from_text(f.name, data[f.name])))
             except (ValueError, TypeError, OverflowError):
-                continue                      # keep the default for anything unusable
+                if rejected is not None:
+                    rejected.append(f.name)      # keep the default for anything unusable, and say so
         _drop_duplicate_hotkeys(cfg)
         return cfg
 
@@ -197,6 +204,23 @@ _RANGES = {
     "restore_delay_s": (0.05, 5.0), "cleanup_timeout_s": (0.5, 30.0), "command_timeout_s": (2.0, 120.0),
     "min_record_s": (0.05, 5.0), "max_record_s": (5.0, 3600.0),
 }
+
+
+_TRUE, _FALSE = ("true", "on", "yes", "1"), ("false", "off", "no", "0")
+
+
+def _from_text(key: str, value: Any) -> Any:
+    """A boolean or a number written as text in the file ("false", "100", "0.8") as the setting's type."""
+    default = _DEFAULTS.get(key)
+    if not isinstance(value, str) or key in _CHOICES or not isinstance(default, (bool, int, float)):
+        return value
+    text = value.strip().lower()
+    if isinstance(default, bool):
+        return True if text in _TRUE else False if text in _FALSE else value
+    try:
+        return float(text)
+    except ValueError:
+        return value
 
 
 def defaults() -> dict:
@@ -314,12 +338,19 @@ def load_config(path: Path | None = None) -> Config:
             last_load_problem = ("Your settings file could not be read, so defaults are in use. "
                                  f"The old file was kept as {path.name}.bad.")
         return cfg
-    return Config.from_dict(data)
+    rejected: list[str] = []
+    cfg = Config.from_dict(data, rejected)
+    if rejected:
+        log.warning("config file %s: invalid values reset to their defaults: %s", path, ", ".join(rejected))
+        last_load_problem = ("Some settings in your settings file were not valid and are back to their defaults: "
+                             + ", ".join(k.replace("_", " ") for k in rejected) + ".")
+    return cfg
 
 
 def save_config(cfg: Config, path: Path | None = None) -> None:
     path = Path(path) if path else config_path()
-    _atomic_write(path, json.dumps(cfg.to_dict(), indent=2))
+    # settings a newer VoxFlow wrote are kept as they are, so going back to it loses nothing
+    _atomic_write(path, json.dumps({**getattr(cfg, "_extras", {}), **cfg.to_dict()}, indent=2))
 
 
 def __getattr__(name: str):

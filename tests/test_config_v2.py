@@ -141,8 +141,9 @@ def test_from_dict_keeps_valid_values_and_defaults_the_rest():
     assert (cfg.hotkey, cfg.language, cfg.history_limit, cfg.mic_device, cfg.ui_state) == (
         "ctrl+alt+space", "fr", 250, "USB Mic", {"a": 1})
     assert (cfg.theme, cfg.sound_volume, cfg.save_history) == ("system", 0.5, True)
-    assert cfg.config_version == C.CONFIG_VERSION, "the stored version is never trusted"
-    assert not hasattr(cfg, "unknown_future_key")
+    # a newer VoxFlow wrote this file: its version is never lowered and its keys are kept for the next save (QA D13)
+    assert cfg.config_version == 99 and cfg._extras == {"unknown_future_key": 1}
+    assert not hasattr(cfg, "unknown_future_key") and "unknown_future_key" not in cfg.to_dict()
 
 
 @pytest.mark.parametrize("junk", [None, [], "x", 5, {}])
