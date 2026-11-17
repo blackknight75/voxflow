@@ -1445,6 +1445,14 @@ class History(_JsonStore):
         with self._lock:
             return len(self._items)
 
+    def count_older_than(self, days: int) -> int:
+        """How many transcripts a retention of ``days`` days would delete now (0 for "forever")."""
+        if not days or days <= 0:
+            return 0
+        with self._lock:
+            cutoff = self._clock() - days * 86400.0
+            return sum(1 for e in self._items if e["ts"] < cutoff)
+
     def get(self, entry_id: str) -> dict | None:
         with self._lock:
             return next((dict(e) for e in self._items if e["id"] == entry_id), None)

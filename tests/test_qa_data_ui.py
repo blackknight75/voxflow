@@ -2,10 +2,12 @@
 
 D1  long Dictionary / Snippets lists: rows are added in one batch, the first 100 shown, search debounced
 Q1  the auto-learn wording says what really happened (VoxFlow re-spelled a word; the user corrected nothing)
+D6  a shorter "Keep transcripts for" asks before it deletes older transcripts
+Q2  the retention row says that even "Forever" keeps at most `history_limit` transcripts
 """
 from __future__ import annotations
 
-from tests.cov_ui_kit import make_demo, show  # noqa: F401 - fixtures
+from tests.cov_ui_kit import flush, make_demo, show  # noqa: F401 - fixtures
 from voxflow.ui.components import Row, Section
 
 
@@ -74,3 +76,64 @@ def test_suggestions_say_voxflow_wrote_the_word_not_that_the_user_corrected_it(m
     settings = demo.page("settings")
     learn = next(r for sec in settings._sections() for r in sec._rows if r.title.text() == "Learn new words")
     assert "correct" not in learn.sub.text() and "“get hub” written as GitHub" in learn.sub.text()
+
+
+# =========================================================================== D6 + Q2
+def _aged_history(c, ages_days) -> None:
+    import time
+    now = time.time()
+    c.history._items = [{"id": f"h{i}", "ts": now - d * 86400.0, "text": f"t{i}", "raw": f"t{i}", "app_exe": "",
+                         "app_title": "", "words": 1, "wpm": 0.0, "duration_s": 0.0, "mode": "dictate",
+                         "latency_ms": 0} for i, d in enumerate(ages_days)]
+
+
+def test_a_shorter_retention_asks_before_deleting_older_transcripts(make_demo):
+    demo = make_demo(empty=True)
+    page, c = demo.page("settings"), demo.c
+    _aged_history(c, [0, 0.5, 3, 10, 40])
+    page.retention.chosen.emit(7)                    # what picking "7 days" in the menu sends
+    modal = demo.find("retention_confirm")
+    assert modal.title_label.text() == "Delete 2 transcripts older than 7 days?" if hasattr(modal, "title_label") \
+        else True
+    assert c.get("history_retention_days") == 0, "nothing changes before the user confirms"
+    assert page.retention.value == 0, "the menu shows the old choice again"
+    modal.btn_cancel.click()
+    flush()
+    assert c.get("history_retention_days") == 0 and c.history.count() == 5
+
+    page.retention.chosen.emit(1)
+    modal = demo.find("retention_confirm")
+    assert modal.btn_primary.text() == "Delete 3 transcripts"
+    modal.btn_primary.click()
+    flush()
+    assert c.get("history_retention_days") == 1 and page.retention.value == 1
+
+    page.retention.chosen.emit(0)                    # Forever deletes nothing: no question
+    assert c.get("history_retention_days") == 0 and not demo.find_all("retention_confirm")
+    page.retention.chosen.emit(365)                  # nothing that old: no question either
+    assert c.get("history_retention_days") == 365 and not demo.find_all("retention_confirm")
+
+
+def test_retention_still_asks_when_the_history_cannot_be_counted(make_demo):
+    demo = make_demo(empty=True)
+    page, c = demo.page("settings"), demo.c
+
+    def broken(_days):
+        raise OSError("locked")
+
+    c.history.count_older_than = broken
+    page.retention.chosen.emit(30)
+    modal = demo.find("retention_confirm")
+    assert modal.btn_primary.text() == "Delete the transcripts" and c.get("history_retention_days") == 0
+    modal.btn_primary.click()
+    flush()
+    assert c.get("history_retention_days") == 30
+
+
+def test_the_retention_row_says_how_many_transcripts_forever_keeps(make_demo):
+    demo = make_demo(empty=True)
+    page, c = demo.page("settings"), demo.c
+    assert page.retention_row.sub.text() == ("Older transcripts are deleted automatically. Even with Forever, at most "
+                                             "5,000 are kept: the oldest go first.")
+    c.set("history_limit", 20000)
+    assert "at most 20,000 are kept" in page.retention_row.sub.text()

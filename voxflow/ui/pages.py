@@ -1617,9 +1617,11 @@ class SettingsPage(Page):
         self.retention = ChoiceButton(name="Keep transcripts for")
         self.retention.setObjectName("settings_retention")
         self.retention.setFixedWidth(160)
-        self.retention.chosen.connect(lambda v: self._set_or_resync("history_retention_days", int(v)))
+        self.retention.chosen.connect(self._retention_chosen)
         self._sync["history_retention_days"] = self._sync_retention
-        sec.add(Row("Keep transcripts for", "Older transcripts are deleted automatically.", self.retention))
+        self.retention_row = sec.add(Row("Keep transcripts for", "", self.retention))
+        self._sync["history_limit"] = self._sync_history_limit
+        self._sync_history_limit(self.ctl.get("history_limit"))
         sec.add(self._toggle("restore_clipboard", "Restore my clipboard",
                              "Puts back whatever you had copied before VoxFlow pasted."))
         self.body.addWidget(sec)
@@ -1885,6 +1887,30 @@ class SettingsPage(Page):
     def _volume_moved(self, v: int) -> None:
         self.vol_label.setText(f"{v}%")
         self._vol_timer.start()
+
+    def _retention_chosen(self, value) -> None:
+        """A shorter "Keep transcripts for" deletes the older transcripts at once: ask first, like Clear all."""
+        days = int(value)
+        try:
+            n = int(self.ctl.history.count_older_than(days))
+        except Exception:  # noqa: BLE001 - not knowing how many is no reason to skip the question
+            n = -1
+        if n == 0:
+            self._set_or_resync("history_retention_days", days)
+            return
+        self._sync_retention(self.ctl.get("history_retention_days"))    # the old choice stays until confirmed
+        label = dict(_RETENTION).get(days, f"{days} days")
+        what = f"{n:,} transcript{'s' if n != 1 else ''}" if n > 0 else "the transcripts"
+        self.win.open_modal(confirm(
+            self.win.panel, f"Delete {what} older than {label}?",
+            f"Keeping transcripts for {label} deletes {what} saved before then from this PC now. Your stats are "
+            "kept. This cannot be undone.", f"Delete {what}",
+            lambda: self._set_or_resync("history_retention_days", days), name="retention_confirm",
+            cancel="Keep them"))
+
+    def _sync_history_limit(self, limit) -> None:
+        self.retention_row.set_sub(f"Older transcripts are deleted automatically. Even with Forever, at most "
+                                   f"{int(limit):,} are kept: the oldest go first.")
 
     def _sync_retention(self, days) -> None:
         opts = list(_RETENTION)

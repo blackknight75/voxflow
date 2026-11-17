@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Dictionary and Snippets pages open at once with long lists (1,500 words took about 30 s). They show the first
   100 entries with *Show more*, and the dictionary search waits for a pause in typing.
 - Dictionary suggestions no longer say you corrected a word: they say what VoxFlow heard and how it wrote it.
+- Choosing a shorter *Keep transcripts for* asks first ("Delete 40 transcripts older than 1 day?") instead of
+  deleting them at once. Settings also says that even *Forever* keeps at most 5,000 transcripts (the size limit).
 
 ## [0.2.1] - 2026-11-15
 
