@@ -203,7 +203,8 @@ def test_any_deletion_also_deletes_the_backup_copies(tmp_path, deletion):
     deletion(h, secret)
     h.flush()                                                     # the app writes within COALESCE_S (0.2 s)
     everything = deletion in (_clear, _import_replacing)
-    assert files_with(folder, SECRET) == ([] if everything else ["history.corrupt.json"]),         "deleted text must not survive in a backup copy; a damaged file's copy goes only with everything"
+    assert files_with(folder, SECRET) == ([] if everything else ["history.corrupt.json"]), \
+        "deleted text must not survive in a backup copy; a damaged file's copy goes only with everything"
     assert not (folder / "history.v1.json").exists()
     assert (folder / "history.corrupt.json").exists() is not everything
     assert (folder / "dictionary.corrupt.json").exists()

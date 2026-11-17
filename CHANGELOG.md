@@ -22,6 +22,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Sounds-like spellings written as one text (`"aliases": "kube"`) are read as a comma-separated list instead of
   letter by letter, which made VoxFlow replace every lone "e" or "k" in a sentence. One-letter spellings are no longer
   accepted.
+- Importing a dictionary CSV saved by Excel with `;` separators or in the Windows "ANSI" encoding (German, French,
+  Dutch and other locales) imports the words, instead of junk terms such as `Kubernetes;cube net ease` or a codec
+  error. A dictionary term can no longer contain `;`.
+- CSV exports of the history and the dictionary show accents correctly in Excel ("Köln", not "KÃ¶ln").
+- A dictionary exported as `.txt` imports back to the same entries when a term holds `:` or a sounds-like spelling
+  holds `,` (they are written as `\:` and `\,`).
+- Importing a large dictionary file is fast (5,000 entries took about 18 s, with the window frozen; now well under
+  a second).
+- Imports say what they changed: "Imported 3 new dictionary entries and updated 2 you already had." Importing a
+  snippets file updates the text of snippets you already have (as a pack import does) instead of silently keeping
+  the old text.
 
 ## [0.2.1] - 2026-11-15
 

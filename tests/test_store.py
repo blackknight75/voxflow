@@ -265,7 +265,7 @@ def test_dictionary_export_import_roundtrip_all_formats(d, tmp_path):
         target = tmp_path / f"dict.{ext}"
         assert d.export(str(target)) == 2
         fresh = Dictionary(tmp_path / f"fresh-{ext}")
-        assert fresh.import_(str(target)) == 2
+        assert fresh.import_(str(target)) == {"added": 2, "updated": 0}
         assert [(e["term"], e["aliases"]) for e in fresh.list()] == [("GitHub", ["get hub", "git hub"]),
                                                                     ("Kubernetes", [])]
 
@@ -273,7 +273,8 @@ def test_dictionary_export_import_roundtrip_all_formats(d, tmp_path):
 def test_dictionary_export_file_contents(d, tmp_path):
     d.add("GitHub", ["get hub"])
     d.export(str(tmp_path / "d.csv"))
-    assert list(csv.reader((tmp_path / "d.csv").read_text(encoding="utf-8").splitlines())) == [
+    assert (tmp_path / "d.csv").read_bytes().startswith(b"\xef\xbb\xbf"), "a BOM, so Excel reads UTF-8 (QA D14)"
+    assert list(csv.reader((tmp_path / "d.csv").read_text(encoding="utf-8-sig").splitlines())) == [
         ["term", "aliases"], ["GitHub", "get hub"]]
     d.export(str(tmp_path / "d.txt"))
     assert (tmp_path / "d.txt").read_text(encoding="utf-8") == "GitHub: get hub\n"
@@ -295,7 +296,7 @@ def test_dictionary_import_merges_skips_invalid_and_conflicting_rows(d, tmp_path
         {"term": "Vercel", "aliases": ["ver sell", 5]},
     ]), encoding="utf-8")
     t = Topics(d)
-    assert d.import_(str(src)) == 2
+    assert d.import_(str(src)) == {"added": 2, "updated": 1}, "GitHub gained a sounds-like spelling"
     by_term = {e["term"]: e["aliases"] for e in d.list()}
     assert by_term == {"GitHub": ["get hub", "gith ub"], "GitLab": ["git lab"], "Kubernetes": [],
                        "Vercel": ["ver sell"]}
@@ -306,10 +307,10 @@ def test_dictionary_import_merges_skips_invalid_and_conflicting_rows(d, tmp_path
 def test_dictionary_import_txt_and_csv_details(d, tmp_path):
     txt = tmp_path / "in.txt"
     txt.write_text("\ufeff# my words\n\nKubernetes\nGitHub: get hub, git hub\n   \n", encoding="utf-8")
-    assert d.import_(str(txt)) == 2
+    assert d.import_(str(txt)) == {"added": 2, "updated": 0}
     csvf = tmp_path / "in.csv"
     csvf.write_text("term,aliases\nVercel,ver sell,\n,,\nSupabase\n", encoding="utf-8")
-    assert d.import_(str(csvf)) == 2
+    assert d.import_(str(csvf)) == {"added": 2, "updated": 0}
     assert {e["term"]: e["aliases"] for e in d.list()} == {
         "GitHub": ["get hub", "git hub"], "Kubernetes": [], "Supabase": [], "Vercel": ["ver sell"]}
 
@@ -562,15 +563,15 @@ def test_snippets_export_import_roundtrip_and_errors(sn, tmp_path):
         {"trigger": "my address", "text": "221B Baker Street\nLondon"}, {"trigger": "sig", "text": "Best,\nDan"}]}
     fresh = Snippets(tmp_path / "fresh")
     t = Topics(fresh)
-    assert fresh.import_(str(out)) == 2
-    assert fresh.import_(str(out)) == 0                             # duplicates are skipped
+    assert fresh.import_(str(out)) == {"added": 2, "updated": 0}
+    assert fresh.import_(str(out)) == {"added": 0, "updated": 0}    # duplicates are skipped
     assert t.take() == ["snippets", "snippets"]
     assert [(e["trigger"], e["text"]) for e in fresh.list()] == [("my address", "221B Baker Street\nLondon"),
                                                                  ("sig", "Best,\nDan")]
     plain = tmp_path / "plain.json"
     plain.write_text("\ufeff" + json.dumps([{"trigger": "eta", "text": "On my way"}, "junk", {"trigger": ""}]),
                      encoding="utf-8")
-    assert fresh.import_(str(plain)) == 1
+    assert fresh.import_(str(plain)) == {"added": 1, "updated": 0}
     for name, content, match in [("missing.json", None, "Couldn't read"), ("bad.json", "{", "not a valid JSON"),
                                  ("num.json", "5", "does not contain a list")]:
         p = tmp_path / name
@@ -760,7 +761,8 @@ def test_history_export_formats(h, tmp_path):
     assert json.loads((tmp_path / "h.json").read_text(encoding="utf-8")) == h.snapshot()
 
     assert h.export(str(tmp_path / "h.csv")) == 2
-    rows = list(csv.reader((tmp_path / "h.csv").read_text(encoding="utf-8").splitlines(keepends=True)))
+    assert (tmp_path / "h.csv").read_bytes().startswith(b"\xef\xbb\xbf"), "a BOM, so Excel reads UTF-8 (QA D14)"
+    rows = list(csv.reader((tmp_path / "h.csv").read_text(encoding="utf-8-sig").splitlines(keepends=True)))
     assert rows[0] == ["time", "app", "window", "mode", "words", "wpm", "duration_s", "text", "raw"]
     assert rows[1][0] == stamp and rows[1][7] == "Plain"
     assert rows[2][1:4] == ["slack.exe", "#general", "dictate"] and rows[2][7] == 'Hello, "world"\nsecond line'

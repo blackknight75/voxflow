@@ -146,3 +146,21 @@ def test_open_data_folder_is_a_notice_action(make_demo):
     demo.c.open_data_folder = lambda: opened.append(True)
     demo.shell.run_action("open_data_folder")
     assert opened == [True]
+
+
+# =========================================================================== Q3
+def test_the_import_toast_reports_new_and_updated_entries(make_demo, monkeypatch, tmp_path):
+    from voxflow.ui import dialogs
+    demo = make_demo(empty=True)
+    page, c = demo.page("dictionary"), demo.c
+    src = tmp_path / "words.csv"
+    src.write_text("term\n", encoding="utf-8")
+    monkeypatch.setattr(dialogs, "ask_open_path", lambda *a, **k: str(src))
+    for result, toast in [({"added": 3, "updated": 2}, "Imported 3 new dictionary entries and updated 2 you already had."),
+                          ({"added": 0, "updated": 2}, "Updated 2 of your dictionary entries from words.csv."),
+                          ({"added": 4, "updated": 0}, "Imported 4 new dictionary entries."),
+                          ({"added": 0, "updated": 0}, "No new dictionary entries found in words.csv."),
+                          (5, "Imported 5 new dictionary entries.")]:
+        monkeypatch.setattr(c.dictionary, "import_", lambda _p, r=result: r)
+        page.do_import()
+        assert demo.toasts()[-1] == toast

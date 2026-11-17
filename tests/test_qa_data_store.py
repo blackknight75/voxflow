@@ -5,6 +5,8 @@ import datetime
 import json
 import time
 
+import pytest
+
 from voxflow import store
 
 
@@ -140,3 +142,128 @@ def test_aliases_written_as_one_string_are_a_comma_separated_list(tmp_path):
     fresh.import_(str(src))
     assert {e["term"]: e["aliases"] for e in fresh.list()} == {"Grafana": ["graph ana"], "Redis": []}
     assert fresh.add("Vim", ["v", "vi m"])["aliases"] == ["vi m"]
+
+
+# =========================================================================== D4
+def test_a_semicolon_csv_from_excel_imports_as_words_not_as_glued_rows(tmp_path):
+    src = tmp_path / "excel_de.csv"
+    src.write_bytes("term;aliases\r\nKubernetes;cube net ease\r\nMüller;mueller\r\n".encode("cp1252"))
+    d = store.Dictionary(tmp_path / "d")
+    assert d.import_(str(src)) == {"added": 2, "updated": 0}, "ANSI (cp1252) is read, not a codec error"
+    assert {e["term"]: e["aliases"] for e in d.list()} == {"Kubernetes": ["cube net ease"], "Müller": ["mueller"]}
+    assert d.apply("we use kubernetes and cube net ease") == "we use Kubernetes and Kubernetes"
+
+    tabbed = tmp_path / "tabs.csv"
+    tabbed.write_text("term\taliases\nGrafana\tgraph ana\n", encoding="utf-8")
+    d.import_(str(tabbed))
+    assert "Grafana" in d.terms()
+    utf16 = tmp_path / "unicode.txt"
+    utf16.write_text("Köln: koeln\n", encoding="utf-16")         # Notepad's "Unicode"
+    d.import_(str(utf16))
+    assert {e["term"]: e["aliases"] for e in d.list()}["Köln"] == ["koeln"]
+
+
+def test_a_term_never_holds_a_semicolon(tmp_path):
+    d = store.Dictionary(tmp_path)
+    with pytest.raises(ValueError, match="can't contain “;”"):
+        d.add("Kubernetes;cube net ease")
+    src = tmp_path / "glued.txt"
+    src.write_text("Kubernetes;cube net ease\nGitHub\n", encoding="utf-8")
+    assert d.import_(str(src)) == {"added": 1, "updated": 0} and d.terms() == ["GitHub"]
+
+
+# =========================================================================== D14
+def test_csv_exports_start_with_a_bom_so_excel_reads_utf8(tmp_path):
+    d = store.Dictionary(tmp_path)
+    d.add("Köln", ["koeln"])
+    d.export(str(tmp_path / "d.csv"))
+    h = store.History(tmp_path)
+    h.add("Grüße aus Köln")
+    h.export(str(tmp_path / "h.csv"))
+    for name in ("d.csv", "h.csv"):
+        raw = (tmp_path / name).read_bytes()
+        assert raw.startswith(b"\xef\xbb\xbf") and "Köln".encode("utf-8") in raw
+    fresh = store.Dictionary(tmp_path / "fresh")
+    assert fresh.import_(str(tmp_path / "d.csv")) == {"added": 1, "updated": 0}, "the BOM is not part of a term"
+    assert fresh.list()[0]["term"] == "Köln"
+
+
+# =========================================================================== D15
+def test_a_txt_export_imports_back_to_the_same_entries(tmp_path):
+    d = store.Dictionary(tmp_path)
+    entries = {"Ratio: 3": ["ratio three"], "Smith, Jones": ["smith and jones", "smith, jones and co"],
+               "#hashtag": ["hash tag"], r"C:\Tools": ["see tools"], "Plain": [], r"a\b": [r"back\slash"]}
+    for term, aliases in entries.items():
+        d.add(term, aliases)
+    d.export(str(tmp_path / "d.txt"))
+    text = (tmp_path / "d.txt").read_text(encoding="utf-8")
+    assert "Ratio\\: 3: ratio three\n" in text and "\\#hashtag: hash tag\n" in text
+    fresh = store.Dictionary(tmp_path / "fresh")
+    fresh.import_(str(tmp_path / "d.txt"))
+    assert {e["term"]: e["aliases"] for e in fresh.list()} == entries
+    hand = tmp_path / "hand.txt"                                  # written by hand: plain lines still work
+    hand.write_text("Kubernetes: kube, cube net\n" + r"x\y: a backslash before a letter stays" + "\n", encoding="utf-8")
+    other = store.Dictionary(tmp_path / "other")
+    other.import_(str(hand))
+    assert {e["term"]: e["aliases"] for e in other.list()} == {"Kubernetes": ["kube", "cube net"],
+                                                               r"x\y": ["a backslash before a letter stays"]}
+
+
+# =========================================================================== D16
+def test_importing_a_large_dictionary_is_linear(tmp_path):
+    src = tmp_path / "big.json"
+    src.write_text(json.dumps([{"term": f"Term{i}", "aliases": [f"alias {i}", f"other {i}", "shared"]}
+                               for i in range(4000)]), encoding="utf-8")
+    d = store.Dictionary(tmp_path / "d")
+    d.add("Owner", ["shared"])
+    t0 = time.perf_counter()
+    assert d.import_(str(src)) == {"added": 4000, "updated": 0}
+    took = time.perf_counter() - t0
+    assert took < 3.0, f"4,000 entries took {took:.1f} s (it was O(n²): about 12 s)"
+    assert all("shared" not in e["aliases"] for e in d.list() if e["term"] != "Owner"), "conflicts still refused"
+    assert d.list()[0]["aliases"] == ["shared"]
+
+
+def test_import_conflict_rules_are_unchanged(tmp_path):
+    d = store.Dictionary(tmp_path)
+    d.add("GitHub", ["get hub"])
+    d.add("GitLab", ["git lab"])
+    src = tmp_path / "in.json"
+    src.write_text(json.dumps([{"term": "get hub", "aliases": ["x y"]},         # someone's alias: not a term
+                               {"term": "GitLab", "aliases": ["github", "gitlab two"]},   # a term is taken
+                               {"term": "New", "aliases": ["git lab", "new one"]},
+                               {"term": "Newer", "aliases": ["new one"]}]), encoding="utf-8")
+    assert d.import_(str(src)) == {"added": 2, "updated": 1}
+    assert {e["term"]: e["aliases"] for e in d.list()} == {
+        "GitHub": ["get hub"], "GitLab": ["git lab", "gitlab two"], "New": ["new one"], "Newer": []}
+
+
+# =========================================================================== Q3
+def test_snippet_import_updates_the_text_and_counts_both(tmp_path):
+    s = store.Snippets(tmp_path)
+    s.add("zoom link", "https://zoom/OLD")
+    s.add("sig", "Best")
+    src = tmp_path / "in.json"
+    src.write_text(json.dumps([{"trigger": "Zoom-link", "text": "https://zoom/NEW"}, {"trigger": "sig", "text": "Best"},
+                               {"trigger": "eta", "text": "On my way"}, {"trigger": "eta", "text": "dup"}]),
+                   encoding="utf-8")
+    assert s.import_(str(src)) == {"added": 1, "updated": 1}
+    assert {e["trigger"]: e["text"] for e in s.list()} == {"zoom link": "https://zoom/NEW", "sig": "Best",
+                                                           "eta": "On my way"}
+    binary = tmp_path / "bin.json"
+    binary.write_bytes(b"\x00\x01")
+    with pytest.raises(ValueError, match="Couldn't read bin.json: it is not a text file"):
+        s.import_(str(binary))
+    bad16 = tmp_path / "bad16.txt"
+    bad16.write_bytes(b"\xff\xfe\x00\xd8")                         # a UTF-16 BOM, then half a character
+    with pytest.raises(ValueError, match="not a text file"):
+        store.Dictionary(tmp_path / "d").import_(str(bad16))
+
+
+def test_a_dictionary_import_that_only_adds_spellings_says_so(tmp_path):
+    d = store.Dictionary(tmp_path)
+    d.add("GitHub", ["get hub"])
+    src = tmp_path / "in.csv"
+    src.write_text("term,aliases\nGitHub,git hub\n", encoding="utf-8")
+    assert d.import_(str(src)) == {"added": 0, "updated": 1}
+    assert d.list()[0]["aliases"] == ["get hub", "git hub"]

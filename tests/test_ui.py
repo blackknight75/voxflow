@@ -616,7 +616,7 @@ def test_dictionary_import_and_export(ui, monkeypatch, tmp_path):
     out = tmp_path / "out.csv"
     monkeypatch.setattr(dialogs, "ask_save_path", lambda *a, **k: str(out))
     ui.find("dict_export").click()
-    assert out.read_text(encoding="utf-8").splitlines()[0] == "term,aliases"
+    assert out.read_text(encoding="utf-8-sig").splitlines()[0] == "term,aliases"
     assert "Exported 2 dictionary entries to out.csv." in ui.toasts()
     monkeypatch.setattr(dialogs, "ask_open_path", lambda *a, **k: str(tmp_path / "missing.json"))
     ui.find("dict_import").click()

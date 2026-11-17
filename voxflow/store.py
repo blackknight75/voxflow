@@ -545,6 +545,81 @@ def _fuzzy_fix(text: str, index: dict) -> str:
     return "".join(out)
 
 
+def _read_import_text(path: Path) -> str:
+    """A file the user picked to import: UTF-8 (with or without a BOM), else the Windows "ANSI" code page that
+    Excel and Notepad use in Western Europe (cp1252), so "Müller" never stops an import with a codec error."""
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"Couldn't read {path.name}: {exc.strerror or exc}") from None
+    try:
+        if raw.startswith((b"\xff\xfe", b"\xfe\xff")):        # Notepad's "Unicode" (UTF-16)
+            return raw.decode("utf-16")
+        if b"\x00" not in raw:
+            try:
+                return raw.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                return raw.decode("cp1252", errors="replace")
+    except UnicodeDecodeError:
+        pass
+    raise ValueError(f"Couldn't read {path.name}: it is not a text file.")
+
+
+# .txt dictionaries: "term: alias, alias". A ":" in the term, a "," in an alias, a backslash, and a "#" that starts
+# the line are written with a backslash in front, so exporting and importing again gives the same entries.
+_TXT_ESCAPABLE = "\\:,#"
+
+
+def _txt_escape(text: str, chars: str) -> str:
+    return "".join("\\" + c if c in chars else c for c in text)
+
+
+def _txt_line(term: str, aliases: list[str]) -> str:
+    head = _txt_escape(term, "\\:")
+    if head.startswith("#"):
+        head = "\\" + head                              # not a comment line
+    return head + (": " + ", ".join(_txt_escape(a, "\\,") for a in aliases) if aliases else "")
+
+
+def _txt_fields(line: str) -> tuple[str, list[str]]:
+    """One line of a .txt dictionary: 'Ratio\\: 3: ratio three, a\\, b' -> ('Ratio: 3', ['ratio three', 'a, b']).
+    A backslash before any other character is kept as it is."""
+    term: str | None = None
+    parts: list[str] = []
+    cur: list[str] = []
+    i = 0
+    while i < len(line):
+        c = line[i]
+        if c == "\\" and i + 1 < len(line) and line[i + 1] in _TXT_ESCAPABLE:
+            cur.append(line[i + 1])
+            i += 2
+            continue
+        if c == ":" and term is None:
+            term, cur = "".join(cur), []
+        elif c == "," and term is not None:
+            parts.append("".join(cur))
+            cur = []
+        else:
+            cur.append(c)
+        i += 1
+    if term is None:
+        return "".join(cur), []
+    parts.append("".join(cur))
+    return term, [a for a in parts if a.strip()]
+
+
+def _index_entry(entry: dict, taken: dict, alias_of: dict, remove: bool = False) -> None:
+    """Add (or remove) an entry's term and aliases in the "who uses this spelling" maps of a bulk import."""
+    keys = [(entry["term"].lower(), (taken,))] + [(a.lower(), (taken, alias_of)) for a in entry["aliases"]]
+    for key, maps in keys:
+        for m in maps:
+            ids = m.setdefault(key, set())
+            if remove:
+                ids.discard(entry["id"])
+            else:
+                ids.add(entry["id"])
+
+
 class Dictionary(_JsonStore):
     """Personal vocabulary: ``{id, term, aliases}`` entries plus an auto-learn suggestion queue."""
 
@@ -613,6 +688,8 @@ class Dictionary(_JsonStore):
             raise ValueError("Type the word or name you want VoxFlow to learn.")
         if len(term) > _MAX_TERM_LEN:
             raise ValueError(f"Dictionary terms can be at most {_MAX_TERM_LEN} characters long.")
+        if ";" in term:                  # a spoken word never has one; a misread spreadsheet row does
+            raise ValueError("A dictionary term can't contain “;”. Put each word in its own entry.")
         return term
 
     @staticmethod
@@ -793,10 +870,7 @@ class Dictionary(_JsonStore):
     # ---- import / export
     @staticmethod
     def _parse_import(path: Path) -> list[tuple[str, list[str]]]:
-        try:
-            text = path.read_text(encoding="utf-8-sig")
-        except (OSError, UnicodeDecodeError) as exc:
-            raise ValueError(f"Couldn't read {path.name}: {exc}") from None
+        text = _read_import_text(path)
         rows: list[tuple[str, list[str]]] = []
         ext = path.suffix.lower()
         if ext == ".json":
@@ -814,7 +888,12 @@ class Dictionary(_JsonStore):
                 elif isinstance(item, dict) and isinstance(item.get("term"), str):
                     rows.append((item["term"], _alias_list(item.get("aliases"))))
         elif ext == ".csv":
-            for i, row in enumerate(csv.reader(io.StringIO(text))):
+            # Excel writes "CSV" with ";" (or a tab) in many locales (German, French, Dutch...)
+            try:
+                delimiter = csv.Sniffer().sniff(text[:4096], ",;\t").delimiter
+            except csv.Error:
+                delimiter = ","
+            for i, row in enumerate(csv.reader(io.StringIO(text), delimiter=delimiter)):
                 cells = [c.strip() for c in row if c.strip()]
                 if not cells or (i == 0 and cells[0].lower() == "term"):
                     continue
@@ -824,44 +903,51 @@ class Dictionary(_JsonStore):
                 line = line.strip()
                 if not line or line.startswith("#"):
                     continue
-                term, _, rest = line.partition(":")
-                rows.append((term, [a for a in rest.split(",") if a.strip()]))
+                rows.append(_txt_fields(line))
         return rows
 
-    def import_(self, path: str) -> int:
-        """Add entries from a .json / .csv / .txt file; existing terms gain any new aliases. Returns #added."""
+    def import_(self, path: str) -> dict:
+        """Add entries from a .json / .csv / .txt file; existing terms gain any new aliases.
+        Returns ``{"added": new entries, "updated": existing entries that gained sounds-like spellings}``."""
         rows = self._parse_import(Path(path))
         added = 0
+        changed: set[str] = set()
         with self._lock:
+            # who uses which spelling, built once: checking every alias against every entry was O(n²) under the
+            # lock (5,000 entries took 10 s, with the window frozen and dictations waiting for the lock)
+            by_term = {e["term"].lower(): e for e in self._entries}
+            taken: dict[str, set[str]] = {}            # term or alias (lower case) -> ids of the entries using it
+            alias_of: dict[str, set[str]] = {}         # alias (lower case) -> ids
+            for e in self._entries:
+                _index_entry(e, taken, alias_of)
             for term, aliases in rows:
                 try:
                     term = self._clean_term(term)
                 except ValueError:
                     continue
-                existing = self._find_term(term)
+                existing = by_term.get(term.lower())
                 target_id = existing["id"] if existing else None
+                if alias_of.get(term.lower(), set()) - {target_id}:
+                    continue                           # the term is another entry's sounds-like spelling
                 merged = self._clean_aliases(term, (existing["aliases"] if existing else []) + list(aliases))
-                usable = []
-                for a in merged:
-                    try:
-                        self._check_alias_conflicts(term, [a], target_id)
-                        usable.append(a)
-                    except ValueError:
-                        continue
+                usable = [a for a in merged if not taken.get(a.lower(), set()) - {target_id}]
                 if existing:
-                    existing["aliases"] = usable
+                    if usable != existing["aliases"]:
+                        _index_entry(existing, taken, alias_of, remove=True)
+                        existing["aliases"] = usable
+                        _index_entry(existing, taken, alias_of)
+                        changed.add(existing["id"])
                     continue
-                try:
-                    self._check_alias_conflicts(term, [], None)
-                except ValueError:
-                    continue
-                self._entries.append({"id": _new_id(), "term": term, "aliases": usable})
+                entry = {"id": _new_id(), "term": term, "aliases": usable}
+                self._entries.append(entry)
+                by_term[term.lower()] = entry
+                _index_entry(entry, taken, alias_of)
                 self._drop_suggestions_for(term)
                 added += 1
             self._changed()
         self._notify("dictionary")
         self._notify("suggestions")
-        return added
+        return {"added": added, "updated": len(changed)}
 
     def export(self, path: str) -> int:
         """Write all entries to ``path`` (.json, .csv or .txt by extension). Returns the number written."""
@@ -874,10 +960,9 @@ class Dictionary(_JsonStore):
             writer.writerow(["term", "aliases"])
             for e in entries:
                 writer.writerow([e["term"]] + e["aliases"])
-            text = buf.getvalue()
+            text = "\ufeff" + buf.getvalue()           # the BOM tells Excel it is UTF-8 ("Köln", not "KÃ¶ln")
         elif ext == ".txt":
-            text = "".join(e["term"] + (": " + ", ".join(e["aliases"]) if e["aliases"] else "") + "\n"
-                           for e in entries)
+            text = "".join(_txt_line(e["term"], e["aliases"]) + "\n" for e in entries)
         else:
             text = json.dumps({"entries": [{"term": e["term"], "aliases": e["aliases"]} for e in entries]},
                               ensure_ascii=False, indent=2)
@@ -1128,6 +1213,14 @@ class Snippets(_JsonStore):
         return next((e for e in self._entries if _trigger_key(e["trigger"]) == key), None)
 
     def _clean(self, trigger, text, skip: dict | None = None) -> tuple[str, str]:
+        trigger, text = self._valid(trigger, text)
+        other = self._find_trigger(trigger)
+        if other is not None and other is not skip:
+            raise ValueError(f"You already have a snippet for “{other['trigger']}”.")
+        return trigger, text
+
+    def _valid(self, trigger, text) -> tuple[str, str]:
+        """The normalised (trigger, text), or ValueError with a message for the user. Duplicates are not checked."""
         if not isinstance(trigger, str) or not _trigger_words(trigger):
             raise ValueError("Type the phrase you will say to insert this snippet.")
         if not isinstance(text, str) or not text.strip():
@@ -1138,9 +1231,6 @@ class Snippets(_JsonStore):
                              else "Type the text this snippet should insert.")
         if len(trigger) > _MAX_TERM_LEN:
             raise ValueError(f"Trigger phrases can be at most {_MAX_TERM_LEN} characters long.")
-        other = self._find_trigger(trigger)
-        if other is not None and other is not skip:
-            raise ValueError(f"You already have a snippet for “{other['trigger']}”.")
         return trigger, text
 
     def list(self) -> list[dict]:
@@ -1301,34 +1391,43 @@ class Snippets(_JsonStore):
     def _around(part: str, transform) -> str:
         return transform(part) if transform and part.strip() else part
 
-    def import_(self, path: str) -> int:
-        """Add snippets from a JSON file (``[{trigger, text}]`` or an export). Returns the number added."""
+    def import_(self, path: str) -> dict:
+        """Add snippets from a JSON file (``[{trigger, text}]`` or an export). A snippet you already have (said
+        the same way) takes the file's text, as a pack import does. Returns ``{"added", "updated"}``."""
         src = Path(path)
         try:
-            data = json.loads(src.read_text(encoding="utf-8-sig"))
-        except (OSError, UnicodeDecodeError) as exc:
-            raise ValueError(f"Couldn't read {src.name}: {exc}") from None
-        except ValueError:
+            data = json.loads(_read_import_text(src))
+        except ValueError as exc:
+            if str(exc).startswith("Couldn't read"):
+                raise
             raise ValueError(f"{src.name} is not a valid JSON file.") from None
         if isinstance(data, dict):
             data = data.get("entries", [])
         if not isinstance(data, list):
             raise ValueError(f"{src.name} does not contain a list of snippets.")
-        added = 0
+        added: set[str] = set()
+        updated: set[str] = set()
         with self._lock:
+            by_key = {_trigger_key(e["trigger"]): e for e in self._entries}
             for item in data:
                 if not isinstance(item, dict):
                     continue
                 try:
-                    trigger, text = self._clean(item.get("trigger"), item.get("text"))
+                    trigger, text = self._valid(item.get("trigger"), item.get("text"))
                 except ValueError:
                     continue
-                self._entries.append({"id": _new_id(), "trigger": trigger, "text": text})
-                added += 1
+                existing = by_key.get(_trigger_key(trigger))
+                if existing is None:
+                    by_key[_trigger_key(trigger)] = entry = {"id": _new_id(), "trigger": trigger, "text": text}
+                    self._entries.append(entry)
+                    added.add(entry["id"])
+                elif existing["text"] != text and existing["id"] not in added:   # in a file twice: the first wins
+                    existing["text"] = text
+                    updated.add(existing["id"])
             self._regex = None
             self._save()
         self._notify("snippets")
-        return added
+        return {"added": len(added), "updated": len(updated)}
 
     def export(self, path: str) -> int:
         entries = self.list()
@@ -1583,7 +1682,7 @@ class History(_JsonStore):
             for e in items:
                 writer.writerow([_stamp(e["ts"]), _csv_safe(e["app_exe"]), _csv_safe(e["app_title"]), e["mode"],
                                  e["words"], e["wpm"], e["duration_s"], _csv_safe(e["text"]), _csv_safe(e["raw"])])
-            text = buf.getvalue()
+            text = "\ufeff" + buf.getvalue()           # the BOM tells Excel it is UTF-8 ("Köln", not "KÃ¶ln")
         else:
             text = "".join(f"[{_stamp(e['ts'])}]" + (f" {e['app_exe']}" if e["app_exe"] else "")
                            + f"\n{e['text']}\n\n" for e in items)

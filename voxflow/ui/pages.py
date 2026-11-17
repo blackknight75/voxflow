@@ -643,11 +643,23 @@ class _ImportExport:
         if path.lower().endswith(suffix):
             self.import_pack(path)
             return
-        n = self.run(self._store().import_, path)
-        if n is not None:
-            n = 0 if n is True else int(n)
-            self.win.toast("success" if n else "info",
-                           f"Imported {n} new {self.noun}." if n else f"No new {self.noun} found in {Path(path).name}.")
+        res = self.run(self._store().import_, path)
+        if res is None:
+            return
+        if isinstance(res, dict):                      # {"added", "updated"}: say both, so nothing changes unseen
+            added, updated = int(res.get("added", 0)), int(res.get("updated", 0))
+        else:
+            added, updated = (0 if res is True else int(res)), 0
+        name = Path(path).name
+        if added and updated:
+            text = f"Imported {added} new {self.noun} and updated {updated} you already had."
+        elif added:
+            text = f"Imported {added} new {self.noun}."
+        elif updated:
+            text = f"Updated {updated} of your {self.noun} from {name}."
+        else:
+            text = f"No new {self.noun} found in {name}."
+        self.win.toast("success" if added or updated else "info", text)
 
     def do_export(self) -> None:
         path = dialogs.ask_save_path(self.win, f"Export {self.noun}", f"{self.file_stub}.json", self.export_filters)
