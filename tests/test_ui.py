@@ -117,6 +117,7 @@ def seed(rig, n=3):
         entry = rig.c.history.add(texts[i % len(texts)], f"raw version {i} um", 500, app_exe="slack.exe",
                                   app_title="#general", duration_s=3.0)
         rig.c.stats.record(entry["words"], 3.0, "slack.exe")
+    rig.c.history.flush()                                       # written behind (QA D17): on disk for the tests
 
 
 # =========================================================================== shell + window chrome

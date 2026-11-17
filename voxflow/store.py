@@ -138,11 +138,15 @@ class _JsonStore:
                 broken = True
         if broken:
             self._skipped = 0
+            self._dirty = False
             self._load(None)
         elif self._skipped:
             log.warning("%s: %d damaged entries were left out; keeping a copy", self.path.name, self._skipped)
         if broken or self._skipped:
             self._report_load_problem(self._keep_corrupt_copy(), self._skipped)
+        if self._dirty:                            # the load changed the data (a migration): write it now,
+            with self._lock:                       # after the copy above, before anything waits on the store
+                self._write()
 
     # What the user is told when the file could not be read (completely, or some entries of it). The controller
     # shows it once at start-up with "Open data folder", where the untouched copy of the file is kept.
@@ -214,22 +218,29 @@ class _JsonStore:
     indent: int | None = 1          # small hand-editable files stay readable; the big history file is compact
 
     COALESCE_S = 0.2                 # saves closer together than this share one write (burst of adds / imports)
+    # The history is written behind the caller, on the write timer's thread: a dictation never waits for it (at
+    # 100,000 transcripts the file is about 40 MB and took about 165 ms per dictation to write).
+    WRITE_BEHIND = False
     _dirty = False
     _last_write = 0.0
     _timer = None
     _batch = 0
+    _changes = 0                     # bumped by every _save: did more come in while a write was being prepared?
+    _seq = 0                         # bumped by every write: an older write never lands after a newer one
 
     def _save(self) -> None:
         """Ask for the file to be written. The first change after a quiet moment is written at once (so a single
-        edit is on disk when the call returns); changes that follow within ``COALESCE_S`` are folded into one
-        trailing write, so a bulk add costs a few writes, not one (with an fsync) per entry. ``flush()`` writes
-        whatever is pending; ``with store.batch():`` holds every save back until the block ends."""
+        edit is on disk when the call returns; a ``WRITE_BEHIND`` store writes it on the timer thread right
+        away); changes that follow within ``COALESCE_S`` are folded into one trailing write, so a bulk add costs a
+        few writes, not one (with an fsync) per entry. ``flush()`` writes whatever is pending; ``with
+        store.batch():`` holds every save back until the block ends."""
         with self._lock:
+            self._changes += 1
             if self._batch:
                 self._dirty = True
                 return
             wait = self._last_write + self.COALESCE_S - time.monotonic()
-            if wait <= 0 and self._timer is None:
+            if wait <= 0 and self._timer is None and not self.WRITE_BEHIND:
                 self._write()
                 return
             self._dirty = True
@@ -240,10 +251,30 @@ class _JsonStore:
                 self._timer.start()
 
     def _timer_fired(self) -> None:
+        if self.WRITE_BEHIND:
+            self._write_behind()
+            return
         with self._lock:
             self._timer = None
             if self._dirty and not self._batch:
                 self._write()
+
+    def _write_behind(self) -> None:
+        """The write of a ``WRITE_BEHIND`` store (timer thread). The data is turned into JSON outside the lock,
+        so a page reading the history or the next dictation filing its transcript does not wait for that; only
+        the file replace itself runs under the lock, where a newer write (``flush``) wins over this one."""
+        with self._lock:
+            self._timer = None
+            if not self._dirty or self._batch:
+                return
+            self._seq += 1
+            seq, changes = self._seq, self._changes
+            purge = (self._purge_backups, self._purge_corrupt)
+            payload = self._dump()                       # a snapshot: the store keeps changing meanwhile
+        text = self._serialise(payload)
+        with self._lock:
+            if seq == self._seq:                         # else a flush() already wrote newer data
+                self._commit(text, purge, current=changes == self._changes)
 
     def flush(self) -> None:
         """Write any pending change now (shutdown, export of the raw file, tests)."""
@@ -284,12 +315,29 @@ class _JsonStore:
         return self._Batch(self)
 
     def _write(self) -> None:
-        """Write the file atomically. Never raises; a failure is remembered in ``last_save_error`` and announced
-        once to the subscribers as the topic ``"save_failed:<file stem>"`` (and ``"save_ok:<stem>"`` when a later save works again)."""
-        self._dirty = False
+        """Write the file atomically, now (call with the lock held). Never raises; a failure is remembered in
+        ``last_save_error`` and announced once to the subscribers as the topic ``"save_failed:<file stem>"`` (and
+        ``"save_ok:<stem>"`` when a later save works again)."""
+        self._seq += 1
+        self._commit(self._serialise(self._dump()), (self._purge_backups, self._purge_corrupt), current=True)
+
+    def _serialise(self, payload):
+        """The file's text, or the exception that stopped it (``_commit`` reports it)."""
+        try:
+            return json.dumps(payload, ensure_ascii=False, indent=self.indent)
+        except (ValueError, TypeError) as exc:
+            return exc
+
+    def _commit(self, text, purge: tuple[bool, bool], current: bool) -> None:
+        """Put ``text`` on disk (lock held). ``current``: it holds every change made so far. ``purge``: the backup
+        purge that was pending when ``text`` was made (it may only run once a file without that data is on disk)."""
+        if current:
+            self._dirty = False
         self._last_write = time.monotonic()
         try:
-            cfgmod._atomic_write(self.path, json.dumps(self._dump(), ensure_ascii=False, indent=self.indent))
+            if isinstance(text, Exception):
+                raise text
+            cfgmod._atomic_write(self.path, text)
         except (OSError, UnicodeError, ValueError, TypeError) as exc:   # lone surrogates raise UnicodeEncodeError
             log.warning("could not save %s: %s", self.path.name, exc)
             first = not self.last_save_error
@@ -297,9 +345,10 @@ class _JsonStore:
             if first:
                 self._notify("save_failed:" + self.path.stem)
             return                               # a pending backup purge waits for a write that works
-        if self._purge_backups:                  # the file without the deleted data is on disk now
-            corrupt, self._purge_backups, self._purge_corrupt = self._purge_corrupt, False, False
-            self._drop_backups(corrupt)
+        if purge[0]:                             # the file without the deleted data is on disk now
+            if current:
+                self._purge_backups = self._purge_corrupt = False
+            self._drop_backups(purge[1])
         if self.last_save_error:
             self.last_save_error = ""
             self._notify("save_ok:" + self.path.stem)
@@ -1544,6 +1593,7 @@ class History(_JsonStore):
     label = "your history"
     BACKUP_TAGS = ("v1",)
     indent = None                   # compact: the file holds thousands of entries and is rewritten per dictation
+    WRITE_BEHIND = True             # see _JsonStore: filing a transcript never waits for the file
 
     def __init__(self, path: str | Path | None = None, limit: int = 5000, retention_days: int = 0,
                  clock=time.time):
@@ -1579,10 +1629,10 @@ class History(_JsonStore):
         if migrated and self._items:
             self._backup("v1")
         if migrated or pruned:                   # pruned: the v1 copy goes once the migrated file is written
-            self._save()
+            self._dirty = True                   # written by _read, after a damaged file's copy is kept
 
     def _dump(self):
-        return {"version": 2, "items": self._items}
+        return {"version": 2, "items": list(self._items)}     # a copy: it may be written outside the lock
 
     def _prune(self) -> bool:
         before = len(self._items)
@@ -1728,16 +1778,18 @@ class History(_JsonStore):
     def search(self, q: str, limit: int | None = None) -> list[dict]:
         """Entries containing every word of ``q`` (case-insensitive) in the text, raw text or app."""
         needles = [n for n in (q or "").lower().split() if n]
+        limit = None if limit is None else max(0, int(limit))
+        found: list[dict] = []
         with self._lock:
-            if not needles:
-                found = [dict(e) for e in self._items]
-            else:
-                found = []
-                for e in self._items:
+            for e in self._items:
+                if limit is not None and len(found) >= limit:
+                    break                         # enough: a page asks for 201, not for all 100,000
+                if needles:
                     hay = " ".join((e["text"], e["raw"], e["app_exe"], e["app_title"])).lower()
-                    if all(n in hay for n in needles):
-                        found.append(dict(e))
-        return found if limit is None else found[:max(0, int(limit))]
+                    if not all(n in hay for n in needles):
+                        continue
+                found.append(dict(e))
+        return found
 
     def export(self, path: str, fmt: str | None = None) -> int:
         """Write the history to ``path`` as txt, json or csv (default: by extension). Returns #entries."""

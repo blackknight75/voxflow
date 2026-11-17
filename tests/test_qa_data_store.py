@@ -286,3 +286,105 @@ def test_spoken_numbers_up_to_99_fire_a_snippet(tmp_path):
     with pytest.raises(ValueError, match="already have a snippet"):
         s.add("room twenty one", "dup")
     assert store._number_words(90) == ["ninety"] and store._number_words(7) == ["seven"]
+
+
+def test_a_damaged_history_is_copied_before_the_load_rewrites_it(tmp_path):
+    now = time.time()
+    v1 = [{"text": "kept", "ts": now - 60}, {"text": 5}, {"text": "old", "ts": now - 90 * 86400}]
+    _write(tmp_path / "history.json", v1)                      # an old layout that is migrated (and pruned) on load
+    h = store.History(tmp_path, retention_days=30)
+    [copy] = tmp_path.glob("history.corrupt-*.json")
+    assert json.loads(copy.read_text(encoding="utf-8")) == v1, "the copy is the file as it was, damage included"
+    assert [e["text"] for e in h.snapshot()] == ["kept"]
+    assert json.loads((tmp_path / "history.json").read_text(encoding="utf-8"))["version"] == 2
+
+
+# =========================================================================== D17
+def _wait(cond, timeout=3.0):
+    end = time.monotonic() + timeout
+    while not cond():
+        assert time.monotonic() < end, "timed out"
+        time.sleep(0.005)
+
+
+def _settled(h) -> None:
+    """Every background write of ``h`` is on disk (a write holds the lock while it replaces the file)."""
+    _wait(lambda: h._timer is None and not h._dirty)
+    with h._lock:
+        pass
+
+
+def test_filing_a_transcript_never_writes_the_history_on_the_callers_thread(tmp_path, monkeypatch):
+    import threading
+    h = store.History(tmp_path)
+    writers: list[str] = []
+    real = store.cfgmod._atomic_write
+    monkeypatch.setattr(store.cfgmod, "_atomic_write",
+                        lambda path, text: (writers.append(threading.current_thread().name), real(path, text)))
+    h.add("first dictation")
+    assert writers == [], "the dictation's thread returns before the file is written"
+    _wait(lambda: writers)
+    assert writers == ["voxflow-store-write"]
+    _settled(h)
+    assert json.loads((tmp_path / "history.json").read_text(encoding="utf-8"))["items"][0]["text"] == "first dictation"
+
+
+def test_an_older_background_write_never_lands_after_a_newer_one(tmp_path):
+    h = store.History(tmp_path)
+    real = h._serialise
+
+    def slow(payload):                                # while the timer thread prepares its text, a flush writes
+        if not getattr(slow, "done", False):
+            slow.done = True
+            h.add("newer")
+            h.flush()
+        return real(payload)
+
+    h._serialise = slow
+    h.add("older")
+    _wait(lambda: getattr(slow, "done", False))
+    _settled(h)
+    on_disk = [e["text"] for e in json.loads((tmp_path / "history.json").read_text(encoding="utf-8"))["items"]]
+    assert on_disk == ["newer", "older"], "the stale snapshot (only 'older') was not written over it"
+
+
+def test_a_change_made_while_writing_is_written_next_and_a_purge_waits_for_it(tmp_path):
+    now = time.time()
+    _write(tmp_path / "history.json", [{"text": "secret", "ts": now - 60}])     # v1: migrated, a v1 copy kept
+    h = store.History(tmp_path)
+    assert (tmp_path / "history.v1.json").exists()
+    real = h._serialise
+
+    def busy(payload):
+        if not getattr(busy, "done", False):
+            busy.done = True
+            h.add("added meanwhile")                  # not in the payload being written
+        return real(payload)
+
+    h._serialise = busy
+    h.delete(h.list()[0]["id"])                        # the purge of the v1 copy waits for this write
+    _wait(lambda: getattr(busy, "done", False))
+    _settled(h)
+    assert not (tmp_path / "history.v1.json").exists(), "the file without 'secret' is on disk: the copy went"
+    assert [e["text"] for e in json.loads((tmp_path / "history.json").read_text(encoding="utf-8"))["items"]] == [
+        "added meanwhile"], "the change made during the write was written right after"
+
+
+def test_a_background_write_that_fails_is_reported(tmp_path, monkeypatch):
+    h = store.History(tmp_path)
+    topics: list[str] = []
+    h.subscribe(topics.append)
+    monkeypatch.setattr(h, "_serialise", lambda payload: ValueError("Out of range float values are not JSON"))
+    h.add("x")
+    _wait(lambda: "save_failed:history" in topics)
+    assert h.last_save_error == "Out of range float values are not JSON"
+
+
+def test_search_stops_at_the_limit(tmp_path):
+    h = store.History(tmp_path)
+    with h.batch():
+        for i in range(50):
+            h.add(f"report number {i}", ts=1_800_000_000.0 + i)
+    assert [e["text"] for e in h.search("report", 3)] == ["report number 49", "report number 48", "report number 47"]
+    assert len(h.search("", 7)) == 7 and h.search("report", 0) == [] and len(h.search("number")) == 50
+    assert h.search("nothing like it", 5) == []

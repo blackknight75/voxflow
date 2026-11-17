@@ -52,6 +52,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Running an older VoxFlow after a newer one no longer drops the newer version's settings from `config.json` or
   lowers its `config_version`.
 
+### Improved
+
+- A dictation no longer waits for the history file to be written: it is saved right after, in the background
+  (with 100,000 transcripts that took about 165 ms per dictation; now about 3 ms). History search stops once it has
+  a page of results.
+
 ## [0.2.1] - 2026-11-15
 
 ### Added

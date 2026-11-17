@@ -437,6 +437,7 @@ def test_t01_retry_saves_reports_a_store_that_still_fails(rig, monkeypatch):
     c = rig.c
     monkeypatch.setattr(cfgmod, "_atomic_write", _refuse)
     c.history.add("something dictated")
+    rig.wait(lambda: c.history.last_save_error)                 # the history is written behind (QA D17)
     result = c.retry_saves()
     assert result["history"]["ok"] is False and result["history"]["error"]
 
