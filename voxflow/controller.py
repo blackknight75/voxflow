@@ -41,6 +41,8 @@ _KEPT_ON_RESET = ("config_version", "onboarding_done", "ui_state", "overlay_posi
 SYNC_INTERVAL_MS, SYNC_DEBOUNCE_MS = 30_000, 2_000
 SPEED_DELAY_MS = 30_000       # idle time after both models are ready before the automatic speed check starts
 SPEED_RETRY_MS = 15_000       # how soon a speed check that had to wait for a dictation looks again
+MIC_RETRY_TICKS = 30         # health ticks (2 s) between tries to open a microphone that is not there; a device
+                             # change (the cheap count probe) tries again at once
 _DIAG = os.environ.get("VOXFLOW_DIAG") == "1"      # extra once-a-minute CPU line in the log, for idle-cost hunts
 
 
@@ -221,6 +223,8 @@ class Controller(QObject):
         self._Rec = self._asr = self._cleaner = None
         self._stub_notes: list[str] = []
         self._build_modules()
+        self._mic_logged = ""                           # the microphone error last written to the log
+        self._mic_retry_tick = 0                        # health tick before which a missing microphone is not retried
         self._recorder = self._make_recorder(cfg.mic_device)
         self._mic_count = -1
         self.command = CommandMode(self._cleaner, self.injector, cfg.command_timeout_s)
@@ -1174,6 +1178,7 @@ class Controller(QObject):
                 self._recorder.reopen(rescan=False)
             except Exception as exc:  # noqa: BLE001
                 log.warning("microphone refresh: %s", exc)
+                self._mic_retry_tick = self._health_ticks + MIC_RETRY_TICKS
             self._check_mic()
         self.microphones_changed.emit(self.microphones())
 
@@ -1194,12 +1199,18 @@ class Controller(QObject):
 
     def _check_mic(self, initial: bool = False) -> None:
         """Translate the recorder's condition into a problem / warning for the status line."""
+        from . import app as appmod
         rec = self._recorder
         err = getattr(rec, "error", None)
         if err is not None:
-            log.warning("microphone unavailable: %s", err)
-            self._problems["mic"] = audiomod.describe_mic_error(err)
+            seen = f"{type(err).__name__}: {err}"
+            if seen != self._mic_logged:                # once per change, not every health tick (QA R5)
+                log.warning("microphone unavailable: %s", err)
+                self._mic_logged = seen
+            self._problems["mic"] = (str(err) if isinstance(err, appmod.DamagedInstall)
+                                     else audiomod.describe_mic_error(err))
         else:
+            self._mic_logged = ""
             self._problems.pop("mic", None)
         if getattr(rec, "using_fallback", False) and err is None:
             self._warnings["mic"] = (f"“{self.config.mic_device}” is not connected, so the system default "
@@ -1240,12 +1251,15 @@ class Controller(QObject):
             self.listener.force_idle()
             self._stop_recording()
             return
+        if getattr(self._recorder, "error", None) is not None and self._health_ticks < self._mic_retry_tick:
+            return            # no microphone: PortAudio is not restarted every 2 s, a device change retries at once
         try:
             self._recorder.reopen()
             if "mic" in self._problems:
                 self.notice.emit("success", "Microphone connected again.")
         except Exception as exc:  # noqa: BLE001
             log.debug("microphone still unavailable: %s", exc)
+            self._mic_retry_tick = self._health_ticks + MIC_RETRY_TICKS
         self._check_mic()
 
     # ================================================================== flow-bar state

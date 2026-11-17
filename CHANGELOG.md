@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   writes a crash report. It is logged, and the first one in a session shows a notice with *Open log folder*.
 - Only the 10 newest crash reports are kept, and `fault.log` is started afresh above 1 MB. After a crash, the next
   start says "VoxFlow closed unexpectedly last time" with *Open log folder*.
+- On a PC without a microphone, VoxFlow no longer restarts the audio system and writes a log line every 2 seconds.
+  It tries again once a minute, or at once when a device is plugged in, and logs each problem once.
 - VoxFlow uses about 480 MB less memory: numpy no longer reserves a buffer for every CPU thread at start.
 
 ## [0.2.1] - 2026-11-15

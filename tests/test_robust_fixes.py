@@ -537,3 +537,72 @@ def test_r17_pruning_and_capping_tolerate_what_they_cannot_change(tmp_path, monk
     monkeypatch.setattr(Path, "unlink", lambda self, missing_ok=False: (_ for _ in ()).throw(PermissionError()))
     system.prune_crash_reports(tmp_path)
     assert len(list(logs.glob("crash-*.log"))) == system.CRASH_KEEP + 2, "a locked report is left for next time"
+
+
+# =========================================================================== R5: a PC without a microphone
+def test_r5_no_microphone_is_logged_once_and_retried_every_minute_not_every_tick(tmp_path, qtbot, monkeypatch, caplog):
+    from tests.controller_rig import make_rig
+    patch_os(monkeypatch)
+    monkeypatch.setattr(ctl_mod.audiomod, "input_device_count", lambda: 0)
+    rig = make_rig(tmp_path, qtbot, monkeypatch, fake=False)
+    try:
+        rec = rig.rec
+        rec.alive = False
+        rec.error = OSError("Error querying device -1")
+        with caplog.at_level(logging.DEBUG, logger="voxflow.controller"):
+            for _ in range(30):                                 # one minute of health ticks
+                rig.c._health_tick()
+        assert rec.reopened == 1, "PortAudio is not restarted every 2 s"
+        assert caplog.text.count("microphone unavailable") == 1
+        assert rig.c.status()["title"] == "Microphone problem"
+        rig.c._health_tick()                                    # the minute is over: one more try
+        assert rec.reopened == 2 and caplog.text.count("microphone unavailable") == 1
+        rec.error = OSError("another reason")
+        rig.c._check_mic()
+        assert caplog.text.count("microphone unavailable") == 2, "a different error is logged again"
+    finally:
+        rig.close()
+
+
+def test_r5_a_device_change_retries_at_once(tmp_path, qtbot, monkeypatch):
+    from tests.controller_rig import make_rig
+    patch_os(monkeypatch)
+    count = {"n": 0}
+    monkeypatch.setattr(ctl_mod.audiomod, "input_device_count", lambda: count["n"])
+    rig = make_rig(tmp_path, qtbot, monkeypatch, fake=False)
+    try:
+        rec = rig.rec
+        rec.alive, rec.error = False, OSError("Error querying device -1")
+        rig.c._health_tick()
+        rig.c._health_tick()
+        assert rec.reopened == 1
+        count["n"] = 1                                          # a microphone was plugged in
+        rec.error = None
+        rig.c._health_tick()
+        assert rec.reopened == 2 and "mic" not in rig.c._problems
+    finally:
+        rig.close()
+
+
+def test_r5_a_failed_refresh_also_waits(tmp_path, qtbot, monkeypatch):
+    from tests.controller_rig import make_rig
+    patch_os(monkeypatch)
+    rig = make_rig(tmp_path, qtbot, monkeypatch, fake=False)
+    try:
+        rig.rec.error = OSError("Error querying device -1")
+        rig.c.refresh_microphones()
+        assert rig.c._mic_retry_tick == rig.c._health_ticks + ctl_mod.MIC_RETRY_TICKS
+    finally:
+        rig.close()
+
+
+def test_r1_a_recorder_of_a_damaged_install_says_to_reinstall(tmp_path, qtbot, monkeypatch):
+    from tests.controller_rig import make_rig
+    patch_os(monkeypatch)
+    rig = make_rig(tmp_path, qtbot, monkeypatch, fake=False)
+    try:
+        rig.rec.error = app.damaged_install("audio")
+        rig.c._check_mic()
+        assert rig.c.status()["detail"].startswith("VoxFlow's installation is damaged")
+    finally:
+        rig.close()
