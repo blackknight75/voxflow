@@ -1604,6 +1604,7 @@ class Cleaner:
         self._abandoned = threading.Event()  # set while a timed-out generation is still unwinding
         self._terms: list[str] | None = None  # preferred spellings for the clean() call in progress
         self._ready = False
+        self.load_error: BaseException | None = None   # why the language model did not load (rules only)
         self.backend = "none"
         self.last_info: dict = dict(_NO_REPORT)   # what the most recent ``clean`` call did
         # the model also reads recogniser text that looks finished but runs clauses together (``looks_unpunctuated``)
@@ -1621,12 +1622,9 @@ class Cleaner:
             repo, fname = m.split(":", 1)
         else:
             raise FileNotFoundError(f"cleanup model not found: {m} ({_FORMAT_NOTE})")
-        from huggingface_hub import hf_hub_download
+        from .modelhub import model_file
 
-        try:
-            return hf_hub_download(repo, fname, local_files_only=True)
-        except Exception:
-            return hf_hub_download(repo, fname)
+        return model_file(repo, fname)          # the pinned commit of a default model (checked by size)
 
     def _build(self, path: str, gpu: bool):
         from llama_cpp import Llama
@@ -1645,6 +1643,7 @@ class Cleaner:
         )
 
     def load(self) -> None:
+        self.load_error = None
         try:
             if not self.use_llm:
                 self._ready = True
@@ -1692,9 +1691,10 @@ class Cleaner:
                     last_err = e
                     log.warning("cleanup load failed (gpu=%s): %s", gpu, e)
                     self._llm = None
-            raise RuntimeError(last_err)
+            raise RuntimeError(last_err) from last_err
         except Exception as e:  # noqa: BLE001 - degrade to rules only
             log.warning("cleanup LLM unavailable, using rule-based pass only: %s", e)
+            self.load_error = e
             self._llm = None
             self.backend = "rules"
             self._ready = True  # rules still work

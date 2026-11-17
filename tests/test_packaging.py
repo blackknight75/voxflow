@@ -33,7 +33,9 @@ def test_the_installer_is_per_user_with_a_stable_id_and_keeps_the_profile():
     assert "{userappdata}" not in iss                                           # profile and models are never removed
     deletes = iss.split("\n[UninstallDelete]\n", 1)[1].split("\n[", 1)[0]
     entries = [ln for ln in deletes.splitlines() if ln.strip() and not ln.lstrip().startswith(";")]
-    assert entries == [r'Type: files; Name: "{app}\managed-by.txt"'], "only the winget marker, in the app folder"
+    assert entries == [r'Type: files; Name: "{app}\managed-by.txt"',              # the winget marker, and the
+                       r'Type: filesandordirs; Name: "{localappdata}\VoxFlow\cuda-cache"',   # GPU kernel cache
+                       r'Type: dirifempty; Name: "{localappdata}\VoxFlow"'], "never the profile or the models"
     assert 'Description: "Launch VoxFlow"' in iss and "postinstall" in iss
 
 
@@ -54,7 +56,8 @@ def test_the_installer_adds_no_autostart_entry_and_the_uninstaller_removes_the_a
     assert iss.count("CurrentVersion\\Run") == 1
     # removal happens in the uninstaller only (an upgrade keeps the user's setting), on HKCU, for that one value
     events = re.findall(r"^(?:procedure|function)\s+(\w+)", code, re.M)
-    assert events == ["RelaunchAfterUpdate", "CurStepChanged", "CurUninstallStepChanged"]
+    assert events == ["StopRunningCopy", "PrepareToInstall", "RelaunchAfterUpdate", "CurStepChanged",
+                      "CurUninstallStepChanged"]
     assert "CurUninstallStep <> usUninstall" in code
     assert code.count("RegDeleteValue(HKEY_CURRENT_USER, '{#RunKey}', '{#RunValue}')") == 1
     assert len(re.findall(r"RegDelete\w+", code)) == 1                          # nothing else is deleted

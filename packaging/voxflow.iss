@@ -69,6 +69,12 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
 
+[InstallDelete]
+; An upgrade starts from an empty runtime folder: DLLs, .pyd files and *.dist-info folders of packages that an older
+; version had and this one does not would otherwise pile up (and two dist-info folders of one package confuse
+; importlib.metadata). VoxFlow is closed by then (PrepareToInstall, Restart Manager). Nothing of the user's is in it.
+Type: filesandordirs; Name: "{app}\_internal"
+
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
@@ -86,10 +92,9 @@ Filename: "{app}\VoxFlow.exe"; Parameters: "--after-update"; Flags: nowait; Chec
 [UninstallDelete]
 ; written by CurStepChanged below for a winget install
 Type: files; Name: "{app}\managed-by.txt"
-
-[UninstallRun]
-; A running copy keeps its files locked and would survive the uninstall half-deleted: stop it first.
-Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM VoxFlow.exe /IM VoxFlow-console.exe"; Flags: runhidden; RunOnceId: "StopVoxFlow"
+; compiled GPU kernels (voxflow/modelhub.py): a cache of this PC's driver, not the user's data
+Type: filesandordirs; Name: "{localappdata}\VoxFlow\cuda-cache"
+Type: dirifempty; Name: "{localappdata}\VoxFlow"
 
 ; The uninstaller removes what the installer put in {app}, plus the app's "Launch at login" entry (below). The user's
 ; profile (%APPDATA%\VoxFlow: settings, history, dictionary, logs) and downloaded models (the Hugging Face cache) are
@@ -97,6 +102,34 @@ Filename: "{sys}\taskkill.exe"; Parameters: "/F /IM VoxFlow.exe /IM VoxFlow-cons
 ; of its own: there is no Registry section, and Setup never writes to the Run key.
 
 [Code]
+// A running VoxFlow keeps its files locked. It is asked to quit the normal way first ("VoxFlow.exe --quit": pending
+// saves are written and apps it muted get their sound back; it waits up to 5 s). Only a copy that is still running
+// after that is ended, and only one started from this folder: a portable or Scoop copy elsewhere is left alone.
+procedure StopRunningCopy;
+var
+  ResultCode: Integer;
+  Folder: String;
+begin
+  if not FileExists(ExpandConstant('{app}\VoxFlow.exe')) then
+    Exit;
+  if Exec(ExpandConstant('{app}\VoxFlow.exe'), '--quit', '', SW_HIDE, ewWaitUntilTerminated, ResultCode)
+     and (ResultCode = 0) then
+    Exit;
+  Folder := ExpandConstant('{app}\');
+  StringChangeEx(Folder, '''', '''''', True);     // a quote in the path, doubled for PowerShell's '...'
+  Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+    '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Get-Process -Name VoxFlow,VoxFlow-console ' +
+    '-ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith(''' + Folder + ''', ' +
+    '[StringComparison]::OrdinalIgnoreCase) } | Stop-Process -Force"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+// An upgrade by hand: VoxFlow is asked to quit before Restart Manager would end it by force (CloseApplications).
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  StopRunningCopy;
+  Result := '';
+end;
+
 // The in-app updater asks for a restart with /RELAUNCH=1 (a normal silent install, e.g. winget's, never starts the app).
 function RelaunchAfterUpdate: Boolean;
 begin
@@ -126,6 +159,7 @@ var
 begin
   if CurUninstallStep <> usUninstall then
     Exit;
+  StopRunningCopy;
   if not RegQueryStringValue(HKEY_CURRENT_USER, '{#RunKey}', '{#RunValue}', Command) then
     Exit;
   if Pos(Lowercase(AddBackslash(ExpandConstant('{app}'))), Lowercase(Command)) > 0 then

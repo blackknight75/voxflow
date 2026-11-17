@@ -15,6 +15,7 @@ import os
 import sys
 import time
 import wave
+from pathlib import Path
 
 import numpy as np
 
@@ -26,13 +27,92 @@ SAMPLE_RATE = 16000
 
 
 # --------------------------------------------------------------------------- module loading w/ fallbacks
+_IMPORT_ERRORS: dict[str, BaseException] = {}       # voxflow.<modname> -> why it could not be imported
+
+
 def _real(modname: str, attr: str):
     """Import voxflow.<modname>.<attr> lazily; return None if the module is missing or its dependency is broken."""
     try:
-        return getattr(importlib.import_module(f"voxflow.{modname}"), attr)
+        found = getattr(importlib.import_module(f"voxflow.{modname}"), attr)
     except Exception as exc:  # ImportError, AttributeError, or a failing dependency import
         log.warning("voxflow.%s.%s unavailable (%s: %s): using a stand-in", modname, attr, type(exc).__name__, exc)
+        _IMPORT_ERRORS[modname] = exc
         return None
+    _IMPORT_ERRORS.pop(modname, None)
+    return found
+
+
+class DamagedInstall(RuntimeError):
+    """Part of VoxFlow's own code could not be imported: only reinstalling helps. The message is for the user."""
+
+
+def damaged_install(modname: str) -> DamagedInstall:
+    exc = _IMPORT_ERRORS.get(modname)
+    why = f"{type(exc).__name__} in {modname}.py" if exc is not None else f"{modname}.py is missing"
+    return DamagedInstall(f"VoxFlow's installation is damaged ({why}). Reinstall VoxFlow.")
+
+
+class BrokenModel:
+    """Takes the place of a model whose code could not be imported, in the real app (never the demo stand-ins:
+    they would paste a canned sentence into the user's window). ``load()`` raises, so the model reports
+    "failed" with a message that says to reinstall; nothing else is ever called on a model that did not load."""
+
+    backend = ""
+    has_llm = False
+    ready = False
+    n_ctx = 4096
+
+    def __init__(self, error: DamagedInstall):
+        self.error = error
+
+    def load(self) -> None:
+        raise self.error
+
+    def transcribe(self, audio) -> str:
+        raise self.error
+
+    def clean(self, text: str, **_options) -> str:
+        return text
+
+    def generate(self, *_a, **_k) -> str:
+        raise self.error
+
+
+class BrokenRecorder:
+    """Takes the place of ``voxflow.audio.Recorder`` when it could not be imported, in the real app: no stream,
+    ``error`` says to reinstall, every attempt to record fails."""
+
+    alive = False
+    using_fallback = False
+    is_recording = False
+    hit_cap = False
+    last_speech_seconds = 0.0
+
+    def __init__(self, device=None, max_seconds: float = 300.0):
+        self.device = device
+        self.level_boost = 1.0
+        self.error = damaged_install("audio")
+
+    def start(self) -> None:
+        raise self.error
+
+    def reopen(self, rescan: bool = True) -> None:
+        raise self.error
+
+    def stop(self) -> np.ndarray:
+        return np.zeros(0, dtype=np.float32)
+
+    def level(self) -> float:
+        return 0.0
+
+    def recent_samples(self, n: int = 1024) -> np.ndarray:
+        return np.zeros(n, dtype=np.float32)
+
+    def set_device(self, device) -> None:
+        self.device = device
+
+    def close(self) -> None:
+        pass
 
 
 # VOXFLOW_DEVICE -> (speech recognition back-end: voxflow.asr.ASR_BACKENDS,
@@ -79,19 +159,22 @@ def make_modules(cfg, fake: bool = False, measured: dict | None = None):
     Rec = None if fake else _real("audio", "Recorder")
     Asr = None if fake else _real("asr", "Transcriber")
     Cln = None if fake else _real("cleanup", "Cleaner")
+    # the stand-ins only with ``fake``: in the real app a module that cannot be imported is a damaged install, and
+    # the demo models would paste a canned sentence into the user's window (QA R1)
     if Rec is None:
-        Rec = fakes.FakeRecorder
-        notes.append("audio stub")
-    if Asr is None:
-        Asr = fakes.FakeTranscriber
-        notes.append("asr stub")
-    if Cln is None:
-        Cln = fakes.FakeCleaner
-        notes.append("cleanup stub")
+        Rec = fakes.FakeRecorder if fake else BrokenRecorder
+        notes.append("audio stub" if fake else "audio broken")
     asr_device, llm_device = model_devices(cfg, measured)
-    asr = Asr(cfg.asr_model, asr_device) if Asr is not fakes.FakeTranscriber else Asr()
-    cleaner = (Cln(cfg.cleanup_model, llm_device, cfg.cleanup_timeout_s)
-               if Cln is not fakes.FakeCleaner else Cln())
+    if Asr is None:
+        asr = fakes.FakeTranscriber() if fake else BrokenModel(damaged_install("asr"))
+        notes.append("asr stub" if fake else "asr broken")
+    else:
+        asr = Asr(cfg.asr_model, asr_device)
+    if Cln is None:
+        cleaner = fakes.FakeCleaner() if fake else BrokenModel(damaged_install("cleanup"))
+        notes.append("cleanup stub" if fake else "cleanup broken")
+    else:
+        cleaner = Cln(cfg.cleanup_model, llm_device, cfg.cleanup_timeout_s)
     return Rec, asr, cleaner, notes
 
 
@@ -342,6 +425,11 @@ _DEMO_CYCLE = [
 ]
 
 
+def _version() -> str:
+    from . import __version__
+    return __version__
+
+
 def _instance_name() -> str:
     try:
         user = getpass.getuser()
@@ -353,9 +441,63 @@ def _instance_name() -> str:
     return f"VoxFlow-instance-{''.join(ch for ch in user if ch.isalnum())}-{where}"
 
 
+def show_start_error(text: str) -> None:
+    """Tell the user why VoxFlow cannot start (the windowed exe has no console). Replaced in tests."""
+    print(text, file=sys.stderr)
+    from PySide6.QtWidgets import QMessageBox
+    QMessageBox.critical(None, "VoxFlow can't start", text)
+
+
+def _folder_problem(folder: Path, reason: str) -> int:
+    log.error("the data folder %s cannot be used: %s", folder, reason)
+    show_start_error(f"VoxFlow can't use its data folder:\n{folder}\n\n{reason}\n\nCheck that the folder (or the "
+                     "drive it is on) is available and that you are allowed to change it: it may be read-only, "
+                     "offline, full or blocked by a sync or security program. Then start VoxFlow again.")
+    return 1
+
+
+QUIT_COMMAND = b"quit"
+
+
+def request_quit(timeout_s: float = 5.0) -> int:
+    """``VoxFlow.exe --quit``: ask the VoxFlow of this user and data folder to quit the normal way (pending saves
+    are written, muted apps get their sound back) and wait until it has. The uninstaller and Setup use it before
+    they replace or remove files, instead of ending the process. Exit code 0 when no VoxFlow is running any more."""
+    from PySide6.QtCore import QCoreApplication, QLockFile
+    from PySide6.QtNetwork import QLocalSocket
+
+    QCoreApplication.instance() or QCoreApplication(sys.argv[:1])
+    try:
+        data_dir = cfgmod.app_dir()
+    except OSError:
+        return 0                               # no data folder: no VoxFlow can be running with it
+    lock = QLockFile(str(data_dir / "voxflow.lock"))
+
+    def stopped() -> bool:
+        if lock.tryLock(0):
+            lock.unlock()
+            return True
+        return False
+
+    if stopped():
+        return 0
+    sock = QLocalSocket()
+    sock.connectToServer(_instance_name())
+    if sock.waitForConnected(1000):
+        sock.write(QUIT_COMMAND)
+        sock.waitForBytesWritten(1000)
+        sock.disconnectFromServer()
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if stopped():
+            return 0
+        time.sleep(0.1)
+    return 1
+
+
 def run_app(demo: bool = False, fake: bool = False, open_settings: bool = False, no_hook: bool = False,
             autostart: bool = False) -> int:
-    from PySide6.QtCore import QLockFile, QTimer
+    from PySide6.QtCore import QLockFile, QThread, QTimer
     from PySide6.QtNetwork import QLocalServer, QLocalSocket
     from PySide6.QtWidgets import QApplication
 
@@ -367,9 +509,19 @@ def run_app(demo: bool = False, fake: bool = False, open_settings: bool = False,
 
     # ---- one instance per user; a second launch brings the first one's window up and exits
     lock = server = None
+    data_dir = None
     if not demo:
-        lock = QLockFile(str(cfgmod.app_dir() / "voxflow.lock"))
+        try:
+            data_dir = cfgmod.app_dir()
+        except OSError as exc:                # APPDATA on a missing drive, a folder that cannot be created
+            return _folder_problem(cfgmod.app_dir_path(), exc.strerror or type(exc).__name__)
+        lock = QLockFile(str(data_dir / "voxflow.lock"))
         if not lock.tryLock(100):
+            if lock.error() != QLockFile.LockError.LockFailedError:   # not "held by another instance" (QA R2)
+                reason = ("Windows did not allow VoxFlow to write there."
+                          if lock.error() == QLockFile.LockError.PermissionError
+                          else "VoxFlow could not create a file there.")
+                return _folder_problem(data_dir, reason)
             sock = QLocalSocket()
             sock.connectToServer(_instance_name())
             if sock.waitForConnected(500):
@@ -379,18 +531,51 @@ def run_app(demo: bool = False, fake: bool = False, open_settings: bool = False,
             print("VoxFlow is already running; its window has been brought to the front.")
             return 0
 
+    # ---- the log and the crash handler first, so that whatever happens while the controller is built (an unreadable
+    # settings file, a microphone that does not open, an exception) is in voxflow.log (QA R9)
+    controller = None
+
+    def on_crash() -> None:
+        if controller is not None:
+            controller.emergency_restore()
+
+    def on_error() -> None:
+        if controller is not None:
+            controller.recover_after_error()
+
+    def ends_app() -> bool:
+        # an exception in a Qt slot is reported while the event loop keeps running: VoxFlow carries on (QA R4)
+        return QThread.currentThread().loopLevel() == 0
+
+    if data_dir is not None:
+        system.setup_logging(data_dir)
+        system.install_crash_handler(data_dir, on_crash, on_error, ends_app)
+        log.info("VoxFlow %s starting (demo=False, fake=%s, data=%s)", _version(), fake, data_dir)
+        from . import modelhub
+        modelhub.move_roaming_cuda_cache()     # before any model starts CUDA (QA R16)
+
     injector = context_fn = None
     if fake and not demo:
         # --fake: stand-in audio and models, but the real hotkeys, paste and app detection
         from .context import foreground_app
         from .inject import Injector
         injector, context_fn = Injector(), foreground_app
-    controller = Controller(demo=demo, fake=fake, install_hook=not no_hook, injector=injector,
-                            context_fn=context_fn)
-    system.setup_logging(controller.data_dir)
-    system.install_crash_handler(controller.data_dir, controller.emergency_restore)
+    try:
+        controller = Controller(demo=demo, fake=fake, install_hook=not no_hook, injector=injector,
+                                context_fn=context_fn)
+    except Exception as exc:  # noqa: BLE001 - logged without its message; the user gets a box, not silence
+        log.critical("VoxFlow could not start\n%s", system.redacted_traceback(exc))
+        if lock is not None:
+            lock.unlock()
+        show_start_error("VoxFlow could not start because of an unexpected error. Details are in the log folder:\n"
+                         f"{system.log_dir(data_dir or cfgmod.app_dir_path())}")
+        system.shutdown_logging()
+        return 1
+    if data_dir is None:                      # demo: a throw-away profile made by the controller
+        system.setup_logging(controller.data_dir)
+        system.install_crash_handler(controller.data_dir, on_crash, on_error, ends_app)
+        log.info("VoxFlow %s starting (demo=True, data=%s)", controller.version, controller.data_dir)
     atexit.register(controller.emergency_restore)
-    log.info("VoxFlow %s starting (demo=%s, fake=%s, data=%s)", controller.version, demo, fake, controller.data_dir)
 
     if not demo:
         server = QLocalServer()
@@ -398,9 +583,17 @@ def run_app(demo: bool = False, fake: bool = False, open_settings: bool = False,
         if server.listen(_instance_name()):
             def on_connection() -> None:
                 conn = server.nextPendingConnection()
+                command = b""
                 if conn is not None:
+                    if not conn.bytesAvailable():
+                        conn.waitForReadyRead(500)
+                    command = bytes(conn.readAll().data()).strip()
                     conn.disconnectFromServer()
-                controller.request_activate()
+                if command == QUIT_COMMAND:    # VoxFlow.exe --quit (the uninstaller, an upgrade): save and close
+                    log.info("asked to quit by another process")
+                    app.quit()
+                else:
+                    controller.request_activate()
             server.newConnection.connect(on_connection)
         else:
             log.warning("single-instance channel unavailable: %s", server.errorString())

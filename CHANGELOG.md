@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The default models are downloaded at a fixed, reviewed version and every file is checked by size and SHA-256,
+  instead of whatever was last pushed to their repositories. Copies already downloaded stay valid. The release
+  build installs every Python package pinned by the SHA-256 of its wheel (`requirements-release.txt`).
+
 ### Fixed
 
 - *Pause for 1 hour* no longer turns dictation back on by itself after you resumed and paused again another way.
@@ -36,6 +42,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Visual effects) motion is reduced as if *Reduce motion* were on, and with a contrast theme on the window, the
   setup guide and the menus use that theme's colours (solid surfaces and lines, no glow). Both follow changes
   while VoxFlow runs. The Flow bar keeps its own dark look.
+- A damaged install (part of VoxFlow's code missing) no longer runs the demo models in the real app, which pasted
+  a canned sentence into your window. The speech model now shows "VoxFlow's installation is damaged. Reinstall
+  VoxFlow."
+- A data folder VoxFlow can't write to (read-only, offline, on a missing drive) is now explained in a message
+  box. VoxFlow used to take it for a copy that was already running and quit without a word.
+- Problems found while VoxFlow starts (an unreadable settings or history file, a microphone that doesn't open) are
+  now written to `voxflow.log`, and an error during start-up shows a message instead of nothing.
+- Dictated text no longer reaches the log through error reports: every logged error keeps its type and place but
+  never its message.
+- An internal error that VoxFlow survives no longer switches *Mute other apps* off for the rest of the session or
+  writes a crash report. It is logged, and the first one in a session shows a notice with *Open log folder*.
+- Only the 10 newest crash reports are kept, and `fault.log` is started afresh above 1 MB. After a crash, the next
+  start says "VoxFlow closed unexpectedly last time" with *Open log folder*.
+- On a PC without a microphone, VoxFlow no longer restarts the audio system and writes a log line every 2 seconds.
+  It tries again once a minute, or at once when a device is plugged in, and logs each problem once.
+- A read-only `config.json` no longer freezes the window for 3.6 seconds on every settings change. The save fails
+  at once and the notice says which file is read-only and where.
+- Damaged model files can be repaired from the app. When a downloaded model fails to load, VoxFlow checks its
+  files and says "The speech model files are damaged. Choose Retry to download them again." Retry downloads only
+  the damaged files. A cut-off file is noticed and replaced at the next start, and a damaged language model is
+  reported instead of quietly falling back to basic clean-up.
+- A full disk during a model download now says "There is not enough disk space", and VoxFlow checks the free space
+  before it starts (for example "Needs 2.7 GB free on C:\, 1.2 GB available"). Unfinished downloads are removed.
+- The uninstaller and an upgrade ask VoxFlow to close instead of ending it by force, so pending changes are saved
+  and apps it muted get their sound back. Only if it doesn't close within 5 seconds is it ended, and only the copy
+  in the folder being uninstalled (no longer every `VoxFlow.exe`, such as a portable or Scoop copy).
+- An upgrade starts from an empty runtime folder, so files of packages that older versions had no longer pile up.
+- The compiled GPU kernels (up to 1 GB) moved from Roaming to Local AppData (`%LOCALAPPDATA%\VoxFlow\cuda-cache`), so
+  a roaming profile no longer copies them at every sign-in. The existing cache is moved, not rebuilt, and the
+  uninstaller removes it.
+- *Launch at login* no longer shows as on when its entry starts nothing. An entry for a program that is gone
+  (the install folder moved) is rewritten for this copy. One that starts another copy of VoxFlow shows "Launch at
+  login starts another copy of VoxFlow" with *Use this copy*.
+- The README explains why Windows shows VoxFlow using the microphone (Privacy): the open microphone keeps the
+  moment before you press the shortcut, in memory only.
+- VoxFlow uses about 480 MB less memory: numpy no longer reserves a buffer for every CPU thread at start.
+
 
 ## [0.2.1] - 2026-11-15
 

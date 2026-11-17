@@ -41,12 +41,17 @@ _KEPT_ON_RESET = ("config_version", "onboarding_done", "ui_state", "overlay_posi
 SYNC_INTERVAL_MS, SYNC_DEBOUNCE_MS = 30_000, 2_000
 SPEED_DELAY_MS = 30_000       # idle time after both models are ready before the automatic speed check starts
 SPEED_RETRY_MS = 15_000       # how soon a speed check that had to wait for a dictation looks again
+MIC_RETRY_TICKS = 30         # health ticks (2 s) between tries to open a microphone that is not there; a device
+                             # change (the cheap count probe) tries again at once
 _DIAG = os.environ.get("VOXFLOW_DIAG") == "1"      # extra once-a-minute CPU line in the log, for idle-cost hunts
 
 
 class _RealAutostart:
     def enabled(self) -> bool:
         return system.autostart_enabled()
+
+    def state(self) -> tuple[str, str]:
+        return system.autostart_state()
 
     def set(self, enabled: bool) -> None:
         system.set_autostart(enabled)
@@ -90,6 +95,7 @@ class Controller(QObject):
     _sig_done = Signal(dict)
     _sig_failed = Signal(str, int)
     _sig_notice = Signal(str, str)
+    _sig_notice_action = Signal(str, str, str, str)  # level, message, action id, button label (from any thread)
     _sig_sync = Signal(str, object)                 # step ("read" | "written"), result or exception
     _sig_speed = Signal(dict)                       # an event of the speed check (voxflow.speedcheck.SpeedCheck)
 
@@ -122,6 +128,10 @@ class Controller(QObject):
         self._startup_notices: list[tuple[str, str]] = []
         if getattr(cfgmod, "last_load_problem", ""):
             self._startup_notices.append(("warning", cfgmod.last_load_problem))
+        self._error_told = False
+        self._autostart_other = ""                      # the program another copy's Run entry starts (QA R19)
+        # the previous run crashed (QA R17): say so once, with the way to the details
+        self._crash_report = None if demo else system.new_crash_report(self.data_dir)
         cfg = self.config
 
         # ---- stores
@@ -151,6 +161,7 @@ class Controller(QObject):
         # ---- desktop back-ends
         self._autostart = autostart if autostart is not None else (
             fakes.FakeAutostart(cfg.launch_at_login) if self._fake else _RealAutostart())
+        self._check_autostart()
         if not self._fake:
             cfg.launch_at_login = self._autostart.enabled()     # the registry is the source of truth
         self._context_fn = context_fn if context_fn is not None else (
@@ -217,6 +228,8 @@ class Controller(QObject):
         self._Rec = self._asr = self._cleaner = None
         self._stub_notes: list[str] = []
         self._build_modules()
+        self._mic_logged = ""                           # the microphone error last written to the log
+        self._mic_retry_tick = 0                        # health tick before which a missing microphone is not retried
         self._recorder = self._make_recorder(cfg.mic_device)
         self._mic_count = -1
         self.command = CommandMode(self._cleaner, self.injector, cfg.command_timeout_s)
@@ -225,6 +238,7 @@ class Controller(QObject):
             "cleanup": {"state": "pending", "detail": "Waiting to load", "progress": None, "backend": ""},
         }
         self._load_generation = 0
+        self._damaged: dict[str, tuple[str, list[str]]] = {}   # model -> (repo, files) to fetch again on Retry
 
         # ---- session state
         self.state, self.mode, self.message = "idle", "dictate", ""
@@ -300,6 +314,7 @@ class Controller(QObject):
         self._sig_done.connect(self._on_done)
         self._sig_failed.connect(self._on_failed)
         self._sig_notice.connect(self.notice)
+        self._sig_notice_action.connect(self._notice_action)
         self._sig_sync.connect(self._on_sync_step)
         self.config_changed.connect(
             lambda key, _value: None if key in syncmod.LOCAL_SETTINGS or key == "sync_folder"
@@ -356,6 +371,14 @@ class Controller(QObject):
         for level, message in self._startup_notices:
             self.notice.emit(level, message)
         self._startup_notices = []
+        if self._autostart_other:
+            self._notice_action("warning", "Launch at login starts another copy of VoxFlow "
+                                           f"({self._autostart_other}).", "autostart_here", "Use this copy")
+        if self._crash_report is not None:
+            log.warning("the previous run ended with a crash: %s", self._crash_report.name)
+            self._notice_action("warning", "VoxFlow closed unexpectedly last time. The details are in the log folder.",
+                                "open_log_folder", "Open log folder")
+            self._crash_report = None
         if self._stub_notes and not self._fake:
             log.warning("running with stand-ins: %s", ", ".join(self._stub_notes))
         self._emit_status()
@@ -419,6 +442,52 @@ class Controller(QObject):
         except Exception:  # noqa: BLE001
             pass
 
+    def _check_autostart(self) -> None:
+        """The Run entry must start this copy (QA R19). One that names a program that is gone (the install folder
+        moved) is rewritten for this copy; one that starts another copy that exists is the user's call: a notice
+        with "Use this copy"."""
+        state = getattr(self._autostart, "state", None)
+        if not callable(state):
+            return
+        what, where = state()
+        if what == "missing":
+            try:
+                self._autostart.set(True)
+                log.info("launch at login pointed at a missing program; it now starts this copy")
+            except ValueError as exc:
+                log.warning("launch at login could not be repaired: %s", exc)
+        elif what == "other":
+            log.info("launch at login starts another copy: %s", where)
+            self._autostart_other = where
+
+    def autostart_here(self) -> None:
+        """"Use this copy": launch at login starts this copy of VoxFlow instead of the other one."""
+        try:
+            self._autostart.set(True)
+        except ValueError as exc:
+            self.notice.emit("error", str(exc))
+            return
+        self._autostart_other = ""
+        if not self.config.launch_at_login:
+            self.config.launch_at_login = True
+            self.config_changed.emit("launch_at_login", True)
+        self.notice.emit("success", "Launch at login now starts this copy of VoxFlow.")
+
+    def recover_after_error(self) -> None:
+        """For the crash handler, after an exception that did not end VoxFlow (a Qt slot, a thread): save what is
+        pending and give other apps their sound back, but switch nothing off: muting keeps working for the next
+        dictation. Any thread. The first time in a session the user is told where the details are."""
+        self._flush_stores()
+        try:
+            self.muter.unmute_now()
+        except Exception:  # noqa: BLE001
+            pass
+        if not self._error_told:
+            self._error_told = True
+            self._sig_notice_action.emit("warning", "Something went wrong inside VoxFlow. It is still running; if "
+                                                    "something stops working, restart it. The details are in the log.",
+                                         "open_log_folder", "Open log folder")
+
     def request_activate(self) -> None:
         """Another launch asked this instance to show itself."""
         self.activate_requested.emit()
@@ -466,8 +535,10 @@ class Controller(QObject):
         except OSError as exc:
             log.warning("could not save settings: %s", exc)
             self._settings_unsaved = True
-            self._notice_action("warning", "Your change is active, but it could not be saved to disk and will be "
-                                           "lost when VoxFlow closes.", "retry_save", "Try again")
+            why = cfgmod.write_problem(self._config_path)       # say why and where when it is the file itself
+            reason = (f" ({why}, in {self._config_path.parent})" if why else "")
+            self._notice_action("warning", f"Your change is active, but it could not be saved to disk{reason} and "
+                                           "will be lost when VoxFlow closes.", "retry_save", "Try again")
             return
         self._settings_unsaved = False
 
@@ -756,7 +827,7 @@ class Controller(QObject):
                 try:
                     payload = self.sync.merge(result)
                 except Exception as exc:  # noqa: BLE001
-                    log.exception("sync merge failed")
+                    log.error("sync merge failed\n%s", system.redacted_traceback(exc))
                     self.sync.note_unavailable(exc)
                     payload = None
                 finally:
@@ -831,6 +902,11 @@ class Controller(QObject):
         ``which``: model names ("asr", "cleanup"), default both."""
         names = ("asr", "cleanup") if which is None else tuple(n for n in ("asr", "cleanup") if n in which)
         self._abort_recording()
+        for name in names:                             # damaged files found by the last load: download them again
+            if name in self._damaged:
+                repo, files = self._damaged.pop(name)
+                log.info("removing damaged model files of %s: %s", repo, ", ".join(files))
+                modelhub.remove_files(repo, files)
         self._speed.cancel()                           # a measurement must not compete with the load
         if self._modules_override is None:
             old_asr, old_cleaner = self._asr, self._cleaner
@@ -851,6 +927,7 @@ class Controller(QObject):
         self._load_generation += 1
         generation = self._load_generation
         asr, cleaner, cfg = self._asr, self._cleaner, self.config
+        from . import app as appmod
 
         def report(name: str, state: str, detail: str, progress=None, backend: str = "") -> None:
             if generation == self._load_generation:
@@ -860,8 +937,8 @@ class Controller(QObject):
         def load_asr() -> None:
             try:
                 self.dictionary.prepare()          # off the dictation path: the word list loads in ~30 ms
-            except Exception:  # noqa: BLE001 - it is built on first use instead
-                log.exception("dictionary matchers could not be prepared")
+            except Exception as exc:  # noqa: BLE001 - it is built on first use instead
+                log.error("dictionary matchers could not be prepared\n%s", system.redacted_traceback(exc))
             repo = "" if self._fake else modelhub.asr_repo(cfg.asr_model)
             cached = modelhub.is_cached(repo)
             report("asr", "loading" if cached else "downloading",
@@ -879,7 +956,8 @@ class Controller(QObject):
                         asr.load()
             except Exception as exc:  # noqa: BLE001
                 log.exception("speech model failed to load")
-                report("asr", "failed", _model_failure("speech", exc))
+                report("asr", "failed", self._file_problem("asr", repo, None, cached, exc)
+                       or _model_failure("speech", exc))
                 return
             backend = str(getattr(asr, "backend", ""))
             report("asr", "ready", _backend_text(backend), None, backend)
@@ -908,12 +986,17 @@ class Controller(QObject):
             except Exception as exc:  # noqa: BLE001
                 log.exception("cleanup model failed to load")
                 slow_hint.cancel()
-                report("cleanup", "failed", "The cleanup model could not be loaded, so dictation is pasted as "
-                                            f"heard. ({_short(exc)})")
+                why = str(exc) if isinstance(exc, appmod.DamagedInstall) else _short(exc)
+                report("cleanup", "failed", f"The cleanup model could not be loaded, so dictation is pasted as "
+                                            f"heard. ({why})")
                 return
             slow_hint.cancel()
             backend = str(getattr(cleaner, "backend", ""))
-            if not getattr(cleaner, "ready", True):
+            problem = (self._file_problem("cleanup", repo, filename or None, cached, cleaner.load_error)
+                       if backend == "rules" and getattr(cleaner, "load_error", None) is not None else "")
+            if problem:
+                report("cleanup", "failed", problem)
+            elif not getattr(cleaner, "ready", True):
                 report("cleanup", "failed", "The cleanup model could not be loaded, so dictation is pasted as heard.")
             elif backend == "rules":
                 report("cleanup", "degraded", "The language model is unavailable, so only basic cleanup rules "
@@ -925,6 +1008,28 @@ class Controller(QObject):
             threading.Thread(target=load_asr, daemon=True, name="voxflow-load-asr").start()
         if "cleanup" in names:
             threading.Thread(target=load_cleanup, daemon=True, name="voxflow-load-cleanup").start()
+
+    _MODEL_WORDS = {"asr": "speech", "cleanup": "cleanup"}
+
+    def _file_problem(self, name: str, repo: str, filename, cached: bool, exc: BaseException) -> str:
+        """A message for a load that failed because of the model's files: the disk is full (unfinished downloads
+        are removed), or the cached files are damaged (Retry downloads them again). "" for anything else.
+        Runs on the loading thread: checking the files reads them all (about 3 s for both default models)."""
+        what = self._MODEL_WORDS[name]
+        if modelhub.disk_full(exc):
+            if repo:
+                modelhub.remove_partial(repo)
+            detail = f" {exc}." if isinstance(exc, modelhub.NotEnoughSpace) else ""
+            return (f"There is not enough disk space for the {what} model.{detail} Free some space, then choose "
+                    "Retry.")
+        if not (cached and repo):
+            return ""
+        bad = modelhub.damaged_files(repo, filename)
+        if not bad:
+            return ""
+        self._damaged[name] = (repo, bad)
+        log.warning("damaged model files in %s: %s", repo, ", ".join(bad))
+        return f"The {what} model files are damaged. Choose Retry to download them again."
 
     # ================================================================== speed check (voxflow.speedcheck)
     def _speed_models(self) -> dict:
@@ -1155,6 +1260,7 @@ class Controller(QObject):
                 self._recorder.reopen(rescan=False)
             except Exception as exc:  # noqa: BLE001
                 log.warning("microphone refresh: %s", exc)
+                self._mic_retry_tick = self._health_ticks + MIC_RETRY_TICKS
             self._check_mic()
         self.microphones_changed.emit(self.microphones())
 
@@ -1175,12 +1281,18 @@ class Controller(QObject):
 
     def _check_mic(self, initial: bool = False) -> None:
         """Translate the recorder's condition into a problem / warning for the status line."""
+        from . import app as appmod
         rec = self._recorder
         err = getattr(rec, "error", None)
         if err is not None:
-            log.warning("microphone unavailable: %s", err)
-            self._problems["mic"] = audiomod.describe_mic_error(err)
+            seen = f"{type(err).__name__}: {err}"
+            if seen != self._mic_logged:                # once per change, not every health tick (QA R5)
+                log.warning("microphone unavailable: %s", err)
+                self._mic_logged = seen
+            self._problems["mic"] = (str(err) if isinstance(err, appmod.DamagedInstall)
+                                     else audiomod.describe_mic_error(err))
         else:
+            self._mic_logged = ""
             self._problems.pop("mic", None)
         if getattr(rec, "using_fallback", False) and err is None:
             self._warnings["mic"] = (f"“{self.config.mic_device}” is not connected, so the system default "
@@ -1221,12 +1333,15 @@ class Controller(QObject):
             self.listener.force_idle()
             self._stop_recording()
             return
+        if getattr(self._recorder, "error", None) is not None and self._health_ticks < self._mic_retry_tick:
+            return            # no microphone: PortAudio is not restarted every 2 s, a device change retries at once
         try:
             self._recorder.reopen()
             if "mic" in self._problems:
                 self.notice.emit("success", "Microphone connected again.")
         except Exception as exc:  # noqa: BLE001
             log.debug("microphone still unavailable: %s", exc)
+            self._mic_retry_tick = self._health_ticks + MIC_RETRY_TICKS
         self._check_mic()
 
     # ================================================================== flow-bar state
@@ -1584,8 +1699,8 @@ class Controller(QObject):
                     self._rule_cleaner = Cleaner(use_llm=False)
                     self._rule_cleaner.load()
                 again = self._rule_cleaner.clean(raw, **kwargs)
-            except Exception:  # noqa: BLE001 - the rules never fail a dictation
-                log.exception("rule clean-up for a snippet failed")
+            except Exception as exc:  # noqa: BLE001 - the rules never fail a dictation
+                log.error("rule clean-up for a snippet failed\n%s", system.redacted_traceback(exc))
                 again = ""
             text = again if again and self.snippets.matches(again) else raw
         return self.snippets.expand(text, transform=self.dictionary.apply)
@@ -1825,11 +1940,14 @@ def _backend_text(backend: str) -> str:
 
 
 def _model_failure(what: str, exc: BaseException) -> str:
+    from .app import DamagedInstall
+    if isinstance(exc, DamagedInstall):            # Retry cannot help: say what can
+        return str(exc)
     text = str(exc).lower()
     if any(k in text for k in ("connection", "timed out", "offline", "name resolution", "max retries", "network")):
         return (f"The {what} model could not be downloaded. Connect to the internet once so VoxFlow can fetch "
                 "it, then choose Retry.")
-    if "space" in text and "disk" in text:
+    if modelhub.disk_full(exc):
         return f"There is not enough disk space for the {what} model."
     return f"The {what} model could not be loaded ({_short(exc)}). Choose Retry, or see the log for details."
 

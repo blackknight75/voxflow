@@ -3,6 +3,9 @@ import multiprocessing
 import os
 import sys
 
+# before anything imports numpy: see voxflow/__main__.py
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
 if __name__ == "__main__":
     multiprocessing.freeze_support()
     # the windowed exe has no console: print() / argparse errors must not crash on a missing stdout

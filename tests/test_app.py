@@ -53,11 +53,12 @@ def test_make_modules_builds_the_real_classes_from_the_config(monkeypatch):
 
 
 def test_make_modules_degrades_per_module_when_a_dependency_is_broken(monkeypatch):
+    # the real app never falls back to the demo models (QA R1): a module that cannot be imported fails to load
     from voxflow.audio import Recorder
     monkeypatch.setattr(app, "_real", lambda mod, attr: Recorder if mod == "audio" else None)
     Rec, asr, cleaner, notes = app.make_modules(Config())
-    assert Rec is Recorder and isinstance(asr, fakes.FakeTranscriber) and isinstance(cleaner, fakes.FakeCleaner)
-    assert notes == ["asr stub", "cleanup stub"]
+    assert Rec is Recorder and isinstance(asr, app.BrokenModel) and isinstance(cleaner, app.BrokenModel)
+    assert notes == ["asr broken", "cleanup broken"]
 
 
 def test_accepts_keywords():
