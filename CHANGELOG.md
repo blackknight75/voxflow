@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A damaged install (part of VoxFlow's code missing) no longer runs the demo models in the real app, which pasted
+  a canned sentence into your window. The speech model now shows "VoxFlow's installation is damaged. Reinstall
+  VoxFlow."
+
 ## [0.2.1] - 2026-11-15
 
 ### Added

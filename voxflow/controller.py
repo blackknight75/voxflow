@@ -843,6 +843,7 @@ class Controller(QObject):
         self._load_generation += 1
         generation = self._load_generation
         asr, cleaner, cfg = self._asr, self._cleaner, self.config
+        from . import app as appmod
 
         def report(name: str, state: str, detail: str, progress=None, backend: str = "") -> None:
             if generation == self._load_generation:
@@ -900,8 +901,9 @@ class Controller(QObject):
             except Exception as exc:  # noqa: BLE001
                 log.exception("cleanup model failed to load")
                 slow_hint.cancel()
-                report("cleanup", "failed", "The cleanup model could not be loaded, so dictation is pasted as "
-                                            f"heard. ({_short(exc)})")
+                why = str(exc) if isinstance(exc, appmod.DamagedInstall) else _short(exc)
+                report("cleanup", "failed", f"The cleanup model could not be loaded, so dictation is pasted as "
+                                            f"heard. ({why})")
                 return
             slow_hint.cancel()
             backend = str(getattr(cleaner, "backend", ""))
@@ -1811,6 +1813,9 @@ def _backend_text(backend: str) -> str:
 
 
 def _model_failure(what: str, exc: BaseException) -> str:
+    from .app import DamagedInstall
+    if isinstance(exc, DamagedInstall):            # Retry cannot help: say what can
+        return str(exc)
     text = str(exc).lower()
     if any(k in text for k in ("connection", "timed out", "offline", "name resolution", "max retries", "network")):
         return (f"The {what} model could not be downloaded. Connect to the internet once so VoxFlow can fetch "

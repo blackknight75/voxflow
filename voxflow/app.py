@@ -26,13 +26,92 @@ SAMPLE_RATE = 16000
 
 
 # --------------------------------------------------------------------------- module loading w/ fallbacks
+_IMPORT_ERRORS: dict[str, BaseException] = {}       # voxflow.<modname> -> why it could not be imported
+
+
 def _real(modname: str, attr: str):
     """Import voxflow.<modname>.<attr> lazily; return None if the module is missing or its dependency is broken."""
     try:
-        return getattr(importlib.import_module(f"voxflow.{modname}"), attr)
+        found = getattr(importlib.import_module(f"voxflow.{modname}"), attr)
     except Exception as exc:  # ImportError, AttributeError, or a failing dependency import
         log.warning("voxflow.%s.%s unavailable (%s: %s): using a stand-in", modname, attr, type(exc).__name__, exc)
+        _IMPORT_ERRORS[modname] = exc
         return None
+    _IMPORT_ERRORS.pop(modname, None)
+    return found
+
+
+class DamagedInstall(RuntimeError):
+    """Part of VoxFlow's own code could not be imported: only reinstalling helps. The message is for the user."""
+
+
+def damaged_install(modname: str) -> DamagedInstall:
+    exc = _IMPORT_ERRORS.get(modname)
+    why = f"{type(exc).__name__} in {modname}.py" if exc is not None else f"{modname}.py is missing"
+    return DamagedInstall(f"VoxFlow's installation is damaged ({why}). Reinstall VoxFlow.")
+
+
+class BrokenModel:
+    """Takes the place of a model whose code could not be imported, in the real app (never the demo stand-ins:
+    they would paste a canned sentence into the user's window). ``load()`` raises, so the model reports
+    "failed" with a message that says to reinstall; nothing else is ever called on a model that did not load."""
+
+    backend = ""
+    has_llm = False
+    ready = False
+    n_ctx = 4096
+
+    def __init__(self, error: DamagedInstall):
+        self.error = error
+
+    def load(self) -> None:
+        raise self.error
+
+    def transcribe(self, audio) -> str:
+        raise self.error
+
+    def clean(self, text: str, **_options) -> str:
+        return text
+
+    def generate(self, *_a, **_k) -> str:
+        raise self.error
+
+
+class BrokenRecorder:
+    """Takes the place of ``voxflow.audio.Recorder`` when it could not be imported, in the real app: no stream,
+    ``error`` says to reinstall, every attempt to record fails."""
+
+    alive = False
+    using_fallback = False
+    is_recording = False
+    hit_cap = False
+    last_speech_seconds = 0.0
+
+    def __init__(self, device=None, max_seconds: float = 300.0):
+        self.device = device
+        self.level_boost = 1.0
+        self.error = damaged_install("audio")
+
+    def start(self) -> None:
+        raise self.error
+
+    def reopen(self, rescan: bool = True) -> None:
+        raise self.error
+
+    def stop(self) -> np.ndarray:
+        return np.zeros(0, dtype=np.float32)
+
+    def level(self) -> float:
+        return 0.0
+
+    def recent_samples(self, n: int = 1024) -> np.ndarray:
+        return np.zeros(n, dtype=np.float32)
+
+    def set_device(self, device) -> None:
+        self.device = device
+
+    def close(self) -> None:
+        pass
 
 
 # VOXFLOW_DEVICE -> (speech recognition back-end: voxflow.asr.ASR_BACKENDS,
@@ -79,19 +158,22 @@ def make_modules(cfg, fake: bool = False, measured: dict | None = None):
     Rec = None if fake else _real("audio", "Recorder")
     Asr = None if fake else _real("asr", "Transcriber")
     Cln = None if fake else _real("cleanup", "Cleaner")
+    # the stand-ins only with ``fake``: in the real app a module that cannot be imported is a damaged install, and
+    # the demo models would paste a canned sentence into the user's window (QA R1)
     if Rec is None:
-        Rec = fakes.FakeRecorder
-        notes.append("audio stub")
-    if Asr is None:
-        Asr = fakes.FakeTranscriber
-        notes.append("asr stub")
-    if Cln is None:
-        Cln = fakes.FakeCleaner
-        notes.append("cleanup stub")
+        Rec = fakes.FakeRecorder if fake else BrokenRecorder
+        notes.append("audio stub" if fake else "audio broken")
     asr_device, llm_device = model_devices(cfg, measured)
-    asr = Asr(cfg.asr_model, asr_device) if Asr is not fakes.FakeTranscriber else Asr()
-    cleaner = (Cln(cfg.cleanup_model, llm_device, cfg.cleanup_timeout_s)
-               if Cln is not fakes.FakeCleaner else Cln())
+    if Asr is None:
+        asr = fakes.FakeTranscriber() if fake else BrokenModel(damaged_install("asr"))
+        notes.append("asr stub" if fake else "asr broken")
+    else:
+        asr = Asr(cfg.asr_model, asr_device)
+    if Cln is None:
+        cleaner = fakes.FakeCleaner() if fake else BrokenModel(damaged_install("cleanup"))
+        notes.append("cleanup stub" if fake else "cleanup broken")
+    else:
+        cleaner = Cln(cfg.cleanup_model, llm_device, cfg.cleanup_timeout_s)
     return Rec, asr, cleaner, notes
 
 
