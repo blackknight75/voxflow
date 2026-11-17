@@ -27,7 +27,7 @@ def test_c02_a_dictation_right_after_a_timeout_waits_for_the_stuck_call_and_gets
     """The stuck generation finishes 0.2 s later: the next dictation must not give up after 0.1 ms."""
     c, llm = with_llm("I pushed the branch to GitHub.", timeout_s=0.3)
     llm.release.clear()
-    assert c.clean(MESSY) == "I pushed the the branch to get hub."          # this one timed out
+    assert c.clean(MESSY) == "I pushed the branch to get hub."          # this one timed out
     assert c.last_info["timeout"] is True
     threading.Timer(0.1, llm.release.set).start()                            # ... and unwinds shortly after
     c.timeout_s = 2.0
@@ -434,3 +434,28 @@ def test_c04_the_whole_pipeline_pastes_the_corrected_date():
     c, llm = with_llm("The deadline is the 12th.")
     assert c.clean("The deadline is the 10th I mean the 12th.") == "The deadline is the 12th."
     assert c.last_info["rejected"] is False
+
+
+# =========================================================================== C-05: stutters
+@pytest.mark.parametrize("spoken, expect", [
+    ("I I think that the problem is in the the database.", "I think that the problem is in the database."),
+    ("we need to to fix it", "We need to fix it."),
+    ("i uh i think so", "I think so."),
+    ("We, we should ship it", "We should ship it."),
+    # real doubles stay
+    ("he had had enough", "He had had enough."),
+    ("I know that that is true", "I know that that is true."),
+    ("what it is is fine", "What it is is fine."),
+    ("come in in five minutes", "Come in in five minutes."),
+    ("he he that is funny", "He he that is funny."),
+])
+def test_c05_the_rules_take_out_stutters_on_words_that_are_never_doubled(spoken, expect):
+    assert rule_clean(spoken) == expect
+
+
+def test_c05_a_refused_model_answer_no_longer_brings_the_stutters_back():
+    """QA case "repeat": the model also dropped "that", the guard refused its answer, the stutters were pasted."""
+    c, llm = with_llm("I think the problem is in the database.")
+    assert c.clean("I I think that the problem is in the the database.") == \
+        "I think that the problem is in the database."
+    assert c.last_info["rejected"] is True

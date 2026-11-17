@@ -423,6 +423,12 @@ _SPOKEN_NUM = re.compile(
     r"fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|"
     r"ninety|hundred|thousand|million|billion|first|second|third)\b", re.I)
 _REPEAT_RE =re.compile(r"\b(\w+)\s+\1\b", re.I)
+# A stutter on a word that is never doubled on purpose ("I I think", "in the the database", "to to"): kept once by
+# the rules, so it is gone even when the model is not asked or its answer is refused (QA C-05). Words with a real
+# double are not here: "had had", "that that", "is is" (what it is is), "so so", "he he", "in in" (come in in
+# five minutes), "on on", "can can", "for for", "with with".
+_STUTTER_RE = re.compile(r"(?<![\w'-])(i|the|a|an|to|we|you|she|they|my|our|your|his|their|of|and|but)"
+                         r"(?:,?\s+\1)+(?![\w'-])", re.I)
 
 
 # a token that is code, not prose: camelCase, snake_case, a.b, path/like, call(
@@ -631,6 +637,7 @@ def rule_clean(text: str, formatting: bool = True, terminal: bool = True, filler
         t = _FILLER_COMMA_RE.sub("", t)
         t = _SOFT_FILLER_RE.sub(lambda m: " ", t)
         t = _YOU_KNOW_MID_RE.sub(", ", t)
+        t = _STUTTER_RE.sub(lambda m: m.group(1), t)
     lead = trail = ""
     if formatting:
         t = apply_formatting_commands(t)

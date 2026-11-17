@@ -376,22 +376,23 @@ def test_model_error_falls_back_to_the_rule_result():
     # the documented contract: an unexpected failure returns the input verbatim; a timeout returns the rule result
     c2, _ = with_llm("x")
     c2._llm_clean = lambda body, max_ms=None: (_ for _ in ()).throw(TimeoutError())
-    assert c2.clean("so we should uh move the the meeting") == "So we should move the the meeting."
+    assert c2.clean("so we should uh move the the meeting") == "So we should move the meeting."
     assert c2.last_info["timeout"] is True
 
 
 def test_each_line_is_cleaned_separately_and_bullets_survive():
     c, llm = with_llm(lambda user, msgs: user.replace("get hub", "GitHub"))
     out = c.clean("shopping list bullet point push to to get hub bullet point eggs new line then we we deploy")
-    assert out.split("\n")[1] == "- Push to to GitHub"
-    assert [call["messages"][-1]["content"] for call in llm.calls] == ["Push to to get hub", "Then we we deploy."]
+    assert out.split("\n")[1] == "- Push to GitHub"
+    # the rules already took the stutters out (QA C-05): the lines still need the model (get hub)
+    assert [call["messages"][-1]["content"] for call in llm.calls] == ["Push to get hub", "Then we deploy."]
 
 
 def test_a_model_that_invents_a_bullet_or_quotes_is_normalised_or_rejected():
     c, _ = with_llm('"I pushed the branch to GitHub."')
     assert c.clean("i pushed the the branch to get hub") == "I pushed the branch to GitHub."
     c, _ = with_llm("- I pushed the branch")
-    assert c.clean("i pushed the the branch to get hub") == "I pushed the the branch to get hub."
+    assert c.clean("i pushed the the branch to get hub") == "I pushed the branch to get hub."
     assert c.last_info["rejected"] is True
 
 
@@ -400,12 +401,12 @@ def test_timeout_abandons_the_generation_then_recovers():
     c, llm = with_llm("I pushed the branch to GitHub.", timeout_s=0.15)
     llm.release.clear()                                      # the model hangs mid-generation
     t0 = time.perf_counter()
-    assert c.clean("i pushed the the branch to get hub") == "I pushed the the branch to get hub."
+    assert c.clean("i pushed the the branch to get hub") == "I pushed the branch to get hub."
     assert time.perf_counter() - t0 < 2.0, "the timeout is a hard bound for the caller"
     assert c.last_info["timeout"] is True and c._abandoned.is_set()
     # while the abandoned generation is still unwinding, a new call waits at most its own budget, then falls back
     t0 = time.perf_counter()
-    assert c.clean("we we should deploy it") == "We we should deploy it."
+    assert c.clean("we we should deploy it") == "We should deploy it."
     assert time.perf_counter() - t0 < 0.15 + 0.2
     assert c.last_info["skipped_busy"] is True and "timeout" not in c.last_info
     llm.release.set()                                        # the old generation finishes
