@@ -178,6 +178,17 @@ def _isolated_profile(tmp_path, monkeypatch):
     yield appdata
 
 
+@pytest.fixture(autouse=True)
+def _no_real_cuda_probe(request, monkeypatch):
+    """Outside the real-model tests the NVIDIA driver is never asked (``gpuprobe.cuda_info`` says "no driver"), so
+    a test with a fake model behaves the same on a PC with an RTX card as on the CI runner. Tests that probe set
+    their own answer."""
+    if "model" in request.keywords:
+        return
+    from voxflow import gpuprobe
+    monkeypatch.setattr(gpuprobe, "_cuda_cache", [None], raising=False)
+
+
 @pytest.fixture
 def data_dir(_isolated_profile) -> Path:
     """The VoxFlow data directory of this test (``<APPDATA>/VoxFlow``), created."""

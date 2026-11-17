@@ -81,7 +81,8 @@ def _setup_dll_paths() -> None:
         if os.path.isdir(cand):
             roots.append(cand)
     for root in roots:
-        for d in glob.glob(os.path.join(root, "*", "bin")):
+        # nvidia/<pkg>/bin (CUDA 12 wheels) and nvidia/cu13/bin/x86_64 (the CUDA 13 cuBLAS of the lib_cuda13 build)
+        for d in glob.glob(os.path.join(root, "*", "bin")) + glob.glob(os.path.join(root, "*", "bin", "x86_64")):
             try:
                 os.add_dll_directory(d)
             except (OSError, AttributeError):
@@ -118,6 +119,35 @@ def _cuda_unusable(asked_for: bool) -> str | None:
     return None if gpuprobe.nvidia_driver() else "no NVIDIA driver (nvcuda.dll)"
 
 
+# The GPU generations each CUDA build carries ready-made machine code (SASS) for, read from the fatbins of its
+# ggml-cuda.dll. Any other GPU makes the driver compile the build's PTX on first use of each kernel module: 25-30 s
+# for the load's warm-up on an RTX 5080 with the CUDA 12 build, then 4-8 s more inside the first dictation of a new
+# prompt length (QA C-01). The driver caches the result in CUDA_CACHE_PATH.
+#   lib          the llama-cpp-python CUDA 12.4 wheel: SASS sm_60-sm_90, PTX sm_90
+#   lib_cuda13   llama.cpp b11312 (the commit llama-cpp-python 0.3.36 vendors) built by ggml-org with CUDA 13.4:
+#                SASS sm_86, sm_89, sm_120, sm_121, PTX sm_75 / sm_80 / sm_90
+_CUDA12_NATIVE = ((6, 0), (6, 1), (7, 0), (7, 5), (8, 0), (8, 6), (8, 9), (9, 0))
+_CUDA13_NATIVE = ((8, 6), (8, 9), (12, 0), (12, 1))
+_CUDA13_MIN_DRIVER = 13000         # a CUDA 13 build needs a driver for CUDA 13.0 or newer (R580+)
+
+
+def _cuda13_unusable(asked_for: bool) -> str | None:
+    """The CUDA 13 build is taken only where it has native code for every GPU and the CUDA 12 build has not (today:
+    RTX 50xx / sm_12x). Everywhere else the CUDA 12 build stays, exactly as before."""
+    if not gpuprobe.nvidia_driver():
+        return "no NVIDIA driver (nvcuda.dll)"
+    info = gpuprobe.cuda_info()
+    if info is None or not info.capabilities:
+        return "the NVIDIA driver reports no CUDA device"
+    if all(cc in _CUDA12_NATIVE for cc in info.capabilities):
+        return f"not needed, the CUDA 12 build has native code for {info}"
+    if not all(cc in _CUDA13_NATIVE for cc in info.capabilities):
+        return f"no native code for every device ({info})"
+    if info.driver_version < _CUDA13_MIN_DRIVER:
+        return f"needs a driver for CUDA 13.0 or newer ({info})"
+    return None
+
+
 def _vulkan_unusable(asked_for: bool) -> str | None:
     # An integrated GPU is not picked by itself: measured on an AMD Radeon integrated GPU, the default model ran
     # several times slower through Vulkan than on the CPU of the same PC. Asking for "vulkan" still tries it.
@@ -140,18 +170,29 @@ class LlamaBackend:
     folder: str                                # next to the llama_cpp package
     gpu: bool
     unusable: Callable[[bool], str | None]
+    native: tuple = ()                         # CUDA: compute capabilities with ready-made machine code (no JIT)
+    label: str = ""                            # in the log, where ``name`` alone is ambiguous
+
+    def __str__(self) -> str:
+        return self.label or self.name
 
 
-# In order of preference. A new back-end (Apple Metal later) is one more line with its own probe.
+# In order of preference. A new back-end (Apple Metal later) is one more line with its own probe. Two builds share
+# the name "cuda": the device setting, the speed check and the UI see one CUDA back-end.
 LLAMA_BACKENDS = (
-    LlamaBackend("cuda", "lib", True, _cuda_unusable),
+    LlamaBackend("cuda", "lib_cuda13", True, _cuda13_unusable, _CUDA13_NATIVE, "cuda 13"),
+    LlamaBackend("cuda", "lib", True, _cuda_unusable, _CUDA12_NATIVE),
     LlamaBackend("vulkan", "lib_vulkan", True, _vulkan_unusable),
     LlamaBackend("cpu", "lib_cpu", False, _cpu_unusable),
 )
 _GPU_DEVICES = ("auto", "gpu") + tuple(b.name for b in LLAMA_BACKENDS if b.gpu)
 _SPEED_CHECK = "i think we should uh move the meeting to friday at three thirty"
+# A user turn of a few tokens: its prefill uses the small-batch kernels that the long warm-up prompt does not, and
+# compiling those for a GPU without native code took 8 s inside the first short dictation (QA C-01).
+_WARM_SHORT = "thanks a lot"
 _UNSET = object()
 _llama_choice = _UNSET        # the back-end whose DLLs this process loaded (None: llama_cpp's own default)
+_llama_build: LlamaBackend | None = None     # ... and its row of LLAMA_BACKENDS
 
 
 def _llama_pkg_dir() -> str | None:
@@ -197,7 +238,7 @@ def _select_llama_libs(device: str = "auto") -> str | None:
     then the CPU build; "cpu" takes the CPU build. None means nothing was chosen (not Windows, a folder set by the
     user in LLAMA_CPP_LIB_PATH, or no build passed): llama_cpp then loads its default folder as it always did.
     """
-    global _llama_choice
+    global _llama_choice, _llama_build
     if _llama_choice is not _UNSET:
         return _llama_choice
     _llama_choice = None
@@ -222,16 +263,25 @@ def _select_llama_libs(device: str = "auto") -> str | None:
             except OSError as e:
                 why = f"did not load ({e})"
         if why is not None:
-            skipped.append(f"{backend.name}: {why}")
+            skipped.append(f"{backend}: {why}")
             continue
         os.environ["LLAMA_CPP_LIB_PATH"] = folder
-        _llama_choice = backend.name
-        log.info("llama.cpp libraries: %s build, %s (device %s%s)", backend.name, folder, device,
+        _llama_choice, _llama_build = backend.name, backend
+        log.info("llama.cpp libraries: %s build, %s (device %s%s)", backend, folder, device,
                  "".join(f"; {s}" for s in skipped))
         return backend.name
     log.warning("no llama.cpp build is usable here (%s); in a source install run "
                 "scripts/fetch_llama_backends.py once", "; ".join(skipped))
     return None
+
+
+def _jit_likely() -> bool:
+    """True when the loaded CUDA build has no ready-made machine code for some GPU of this PC, so the driver
+    compiles kernels on their first use. A build VoxFlow did not choose (LLAMA_CPP_LIB_PATH set outside, not
+    Windows) counts as having none; a driver that does not answer means there is no CUDA GPU to compile for."""
+    native = _llama_build.native if _llama_build is not None else ()
+    info = gpuprobe.cuda_info()
+    return info is not None and any(cc not in native for cc in info.capabilities)
 
 
 def _gpu_offload_supported() -> bool:
@@ -1678,6 +1728,8 @@ class Cleaner:
                     self.backend = (libs or "cuda") if gpu else "cpu"
                     # warm up (also primes the KV cache with the constant few-shot prefix)
                     self._llm_clean("um so what is the capital of france", max_ms=warmup_s * 1000)
+                    if gpu and self.backend == "cuda" and _jit_likely():
+                        self._warm_short(warmup_s)
                     if gpu and libs is not None:
                         # a GPU that loads the model but cannot keep up would make every dictation time out
                         # (basic clean-up only): time one sentence and prefer the CPU if it is that slow
@@ -1705,6 +1757,17 @@ class Cleaner:
             self._llm = None
             self.backend = "rules"
             self._ready = True  # rules still work
+
+    def _warm_short(self, budget_s: float) -> None:
+        """Prefill one short user turn (one output token) so the driver compiles the small-batch kernels during the
+        load, while the UI says "Preparing the GPU", instead of inside a dictation (QA C-01). Measured on an RTX
+        5080 with the CUDA 12 build and an empty cache: 8.0 s here, after which no real dictation stalled; 7-10 ms
+        once compiled. A timeout here only means the compiling goes on: the GPU itself works."""
+        try:
+            self._run_bounded(lambda abort: self._stream(self._messages(_WARM_SHORT), 1, abort), budget_s,
+                              "the short warm-up")
+        except TimeoutError as e:
+            log.warning("cleanup model: %s; the first dictations may wait for the GPU", e)
 
     @property
     def ready(self) -> bool:

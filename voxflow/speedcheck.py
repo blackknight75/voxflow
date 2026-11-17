@@ -294,11 +294,16 @@ def _measure_asr(backend: str, model_name: str) -> dict:
 def _measure_cleanup(backend: str, model_name: str, timeout_s: float) -> dict:
     from . import cleanup
 
-    known = {b.name: b for b in cleanup.LLAMA_BACKENDS}
-    b = known[backend]
     pkg = cleanup._llama_pkg_dir()
-    folder = cleanup._folder_unusable(os.path.join(pkg, b.folder)) if pkg else "llama-cpp-python is not installed"
-    named, auto = folder or b.unusable(True), folder or b.unusable(False)
+
+    def why(b, asked_for: bool):
+        folder = cleanup._folder_unusable(os.path.join(pkg, b.folder)) if pkg else "llama-cpp-python is not installed"
+        return folder or b.unusable(asked_for)
+
+    # several builds can share a name ("cuda": CUDA 13 for RTX 50xx, else CUDA 12): usable when one of them is, and
+    # the load below picks among them as the app does; the reason given is that of the last, most general one
+    rows = [b for b in cleanup.LLAMA_BACKENDS if b.name == backend]
+    named, auto = (next((None for b in rows if why(b, asked) is None), why(rows[-1], asked)) for asked in (True, False))
     if named is not None:
         return {"available": False, "auto": False, "reason": named}
     out = {"available": True, "auto": auto is None, "reason": auto or ""}

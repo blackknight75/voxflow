@@ -32,7 +32,8 @@ def machine(monkeypatch, tmp_path):
     """A PC to script: which drivers answer, which build folders exist, which llama.dll loads."""
     pkg = tmp_path / "site" / "llama_cpp"
     pkg.mkdir(parents=True)
-    state = types.SimpleNamespace(pkg=pkg, nvidia=False, gpus=[], broken=set(), preloaded=[], version="0.3.36")
+    state = types.SimpleNamespace(pkg=pkg, nvidia=False, gpus=[], broken=set(), preloaded=[], version="0.3.36",
+                                  cuda=None)
 
     def add(folder, version=None):
         (pkg / folder).mkdir()
@@ -53,6 +54,8 @@ def machine(monkeypatch, tmp_path):
 
     state.add = add
     monkeypatch.setattr(C, "_llama_choice", C._UNSET)
+    monkeypatch.setattr(C, "_llama_build", None)
+    monkeypatch.setattr(gpuprobe, "cuda_info", lambda: state.cuda)
     monkeypatch.setattr(C.sys, "platform", "win32")
     monkeypatch.setenv("LLAMA_CPP_LIB_PATH", "")                 # restored (removed) after the test
     monkeypatch.setattr(C, "_llama_pkg_dir", lambda: str(pkg))
@@ -71,8 +74,8 @@ def all_builds(machine):
 # =========================================================================== the ordered list
 def test_the_backends_are_an_ordered_list_with_the_cpu_last():
     assert [(b.name, b.folder, b.gpu) for b in C.LLAMA_BACKENDS] == [
-        ("cuda", "lib", True), ("vulkan", "lib_vulkan", True), ("cpu", "lib_cpu", False)]
-    assert C._GPU_DEVICES == ("auto", "gpu", "cuda", "vulkan")
+        ("cuda", "lib_cuda13", True), ("cuda", "lib", True), ("vulkan", "lib_vulkan", True), ("cpu", "lib_cpu", False)]
+    assert C._GPU_DEVICES == ("auto", "gpu", "cuda", "cuda", "vulkan")
     assert C._cpu_unusable(False) is None and C._cpu_unusable(True) is None
 
 
@@ -82,7 +85,41 @@ def test_nvidia_pc_takes_the_cuda_build_and_asks_no_further(machine, caplog):
     with caplog.at_level("INFO"):
         assert C._select_llama_libs("auto") == "cuda"
     assert os.environ["LLAMA_CPP_LIB_PATH"] == cuda and machine.preloaded == ["lib"]
-    assert f"llama.cpp libraries: cuda build, {cuda} (device auto)" in caplog.text
+    assert f"llama.cpp libraries: cuda build, {cuda} (device auto; cuda 13: not installed)" in caplog.text
+    assert C._llama_build.folder == "lib"
+
+
+def test_qa_c01_an_rtx_50_takes_the_cuda13_build_with_native_code(machine, caplog):
+    cuda13 = machine.add("lib_cuda13", "0.3.36")
+    all_builds(machine)
+    machine.nvidia, machine.gpus, machine.cuda = True, [RTX], gpuprobe.CudaInfo(13030, ((12, 0),))
+    with caplog.at_level("INFO"):
+        assert C._select_llama_libs("auto") == "cuda"
+    assert os.environ["LLAMA_CPP_LIB_PATH"] == cuda13 and machine.preloaded == ["lib_cuda13"]
+    assert f"llama.cpp libraries: cuda 13 build, {cuda13} (device auto)" in caplog.text
+    assert C._llama_build.folder == "lib_cuda13" and C._jit_likely() is False
+
+
+def test_qa_c01_a_cuda13_build_that_does_not_load_falls_back_to_the_cuda12_one(machine, caplog):
+    """No CUDA 13 cuBLAS, say: the CUDA 12 build still runs the model (compiling its code on first use)."""
+    machine.add("lib_cuda13", "0.3.36")
+    cuda, _vulkan, _cpu = all_builds(machine)
+    machine.nvidia, machine.cuda, machine.broken = True, gpuprobe.CudaInfo(13030, ((12, 0),)), {"lib_cuda13"}
+    with caplog.at_level("INFO"):
+        assert C._select_llama_libs("cuda") == "cuda"
+    assert os.environ["LLAMA_CPP_LIB_PATH"] == cuda and machine.preloaded == ["lib_cuda13", "lib"]
+    assert "cuda 13: did not load ([WinError 126]" in caplog.text and C._jit_likely() is True
+
+
+def test_qa_c01_an_rtx_40_keeps_the_cuda12_build_as_before(machine, caplog):
+    machine.add("lib_cuda13", "0.3.36")
+    cuda, _vulkan, _cpu = all_builds(machine)
+    machine.nvidia, machine.cuda = True, gpuprobe.CudaInfo(13030, ((8, 9),))
+    with caplog.at_level("INFO"):
+        assert C._select_llama_libs("auto") == "cuda"
+    assert os.environ["LLAMA_CPP_LIB_PATH"] == cuda and machine.preloaded == ["lib"], "the CUDA 13 build is not loaded"
+    assert "cuda 13: not needed, the CUDA 12 build has native code for CUDA 13.3 driver, sm_89" in caplog.text
+    assert C._jit_likely() is False
 
 
 def test_amd_or_intel_card_takes_the_vulkan_build(machine, caplog):
@@ -91,7 +128,8 @@ def test_amd_or_intel_card_takes_the_vulkan_build(machine, caplog):
     with caplog.at_level("INFO"):
         assert C._select_llama_libs("auto") == "vulkan"
     assert os.environ["LLAMA_CPP_LIB_PATH"] == vulkan and machine.preloaded == ["lib_vulkan"]
-    assert "(device auto; cuda: no NVIDIA driver (nvcuda.dll))" in caplog.text, "the log says why CUDA was passed over"
+    assert "(device auto; cuda 13: not installed; cuda: no NVIDIA driver (nvcuda.dll))" in caplog.text, \
+        "the log says why CUDA was passed over"
 
 
 def test_pc_without_a_gpu_driver_takes_the_cpu_build(machine, caplog):
@@ -165,8 +203,8 @@ def test_nothing_usable_leaves_llama_cpp_to_its_default_and_says_how_to_fix_it(m
     with caplog.at_level("WARNING"):
         assert C._select_llama_libs("auto") is None
     assert os.environ["LLAMA_CPP_LIB_PATH"] == "" and machine.preloaded == []
-    assert "no llama.cpp build is usable here (cuda: no NVIDIA driver (nvcuda.dll); vulkan: not installed; " \
-           "cpu: not installed)" in caplog.text
+    assert "no llama.cpp build is usable here (cuda 13: not installed; cuda: no NVIDIA driver (nvcuda.dll); " \
+           "vulkan: not installed; cpu: not installed)" in caplog.text
     assert "scripts/fetch_llama_backends.py" in caplog.text
     assert C._select_llama_libs("auto") is None and machine.preloaded == []      # remembered, not retried
 

@@ -1688,7 +1688,9 @@ class Controller(QObject):
                      res["t_asr"] * 1000, res["t_clean"] * 1000, entry["latency_ms"], entry["words"],
                      ctx.exe or "unknown app")
         # the bar says "Pasted" first; the (slower) file writes follow and can never turn a paste into an error
-        self._sig_done.emit({"entry": entry, "gen": gen, "message": message, "pasted": pasted})
+        # "slow": the model itself ran too long; a skip behind an earlier stuck generation is not counted again
+        self._sig_done.emit({"entry": entry, "gen": gen, "message": message, "pasted": pasted,
+                             "slow": not (res or {}).get("model_skipped")})
         if entry["text"].strip():                      # a lone line break is pasted but is not a transcript
             try:
                 if self.config.save_history:
@@ -1717,7 +1719,7 @@ class Controller(QObject):
         entry = payload["entry"]
         if entry["text"].strip():
             self.last_transcript = entry
-            if entry.get("rules_only"):
+            if entry.get("rules_only") and payload.get("slow", True):
                 self._note_rules_only()
             self.transcript_ready.emit(dict(entry))
         if not payload.get("pasted", True):

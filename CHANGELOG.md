@@ -7,8 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- NVIDIA RTX 50 series: the language model now uses a llama.cpp build with ready-made code for these cards
+  (CUDA 13). The first start no longer spends about 25 seconds preparing the GPU (now about 1 second), and the
+  first dictations no longer wait several seconds and fall back to the basic clean-up. It needs an NVIDIA driver
+  for CUDA 13 (version 580 or newer); with an older driver the previous build is used. Other cards keep the
+  previous build. The installer grows by about 150 MB unpacked.
+
 ### Fixed
 
+- On a graphics card the language model build has no ready-made code for, the GPU code that short dictations
+  need is now prepared while VoxFlow starts, not inside the first such dictation (that one waited up to 8 seconds
+  and got the basic clean-up). Dictations that were only held up by an earlier slow one no longer count towards
+  the "too slow several times" notice.
 - After one dictation timed out in the language model, the next dictations got the basic clean-up at once, and
   command mode said it "took too long", even when the model was free again a moment later. They now wait for it,
   within their own time limit. Command mode says the model is still busy when that is the reason.

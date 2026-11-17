@@ -20,7 +20,7 @@ os.environ.setdefault("DO_NOT_TRACK", "1")
 _base = os.environ.get("APPDATA") or str(Path.home() / ".config")
 os.environ.setdefault("CUDA_CACHE_PATH", str(Path(_base) / "VoxFlow" / "cuda-cache"))
 os.environ.setdefault("CUDA_CACHE_MAXSIZE", str(1 << 30))
-GPU_PREPARE_NOTE = "Preparing the GPU. This takes up to 30 seconds the first time only."
+GPU_PREPARE_NOTE = "Preparing the GPU. This can take up to a minute the first time only."
 
 ASR_REPOS = {
     "nemo-parakeet-tdt-0.6b-v3": "istupakov/parakeet-tdt-0.6b-v3-onnx",
