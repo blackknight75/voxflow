@@ -34,7 +34,7 @@ def test_c02_a_dictation_right_after_a_timeout_waits_for_the_stuck_call_and_gets
     t0 = time.perf_counter()
     assert c.clean(MESSY) == "I pushed the branch to GitHub."
     assert time.perf_counter() - t0 < 1.5
-    assert c.last_info["rules_only"] is False and "skipped_busy" not in c.last_info
+    assert c.last_info["rules_only"] is False and "model_skipped" not in c.last_info
 
 
 def test_c02_the_wait_is_deducted_from_the_callers_budget():
@@ -62,7 +62,7 @@ def test_c02_a_call_that_finds_the_model_busy_for_its_whole_budget_raises_llmbus
         c._run_bounded(lambda abort: "never", 0.05, "job")
     assert isinstance(LlmBusy("x"), TimeoutError), "callers that only know TimeoutError keep working"
     c.clean("we we should deploy it")
-    assert c.last_info["skipped_busy"] is True and c.last_info["rules_only"] is True
+    assert c.last_info["model_skipped"] is True and c.last_info["rules_only"] is True
     assert "timeout" not in c.last_info, "it did not time out: the model was never asked"
     _settle(c, llm)
 
@@ -75,7 +75,7 @@ def test_c02_a_busy_skip_teaches_the_speed_average_nothing():
     learnt = c._ms_per_word
     assert learnt is not None
     c.clean(MESSY)                                     # skipped: the model did not run
-    assert c.last_info["skipped_busy"] is True and c._ms_per_word == learnt
+    assert c.last_info["model_skipped"] is True and c._ms_per_word == learnt
     _settle(c, llm)
 
 
@@ -96,7 +96,7 @@ def test_c02_other_languages_report_a_busy_skip_too():
     llm.release.clear()
     c.clean("eh creo que que deberiamos salir manana no perdon pasado manana", language="es")
     c.clean("eh creo que que deberiamos salir manana no perdon pasado manana", language="es")
-    assert c.last_info["skipped_busy"] is True and c.last_info["rules_only"] is True
+    assert c.last_info["model_skipped"] is True and c.last_info["rules_only"] is True
     _settle(c, llm)
 
 
@@ -338,10 +338,10 @@ class _Reporting:
 
 
 @pytest.mark.parametrize("info, rules_only, skipped", [
-    ({"rules_only": True, "skipped_busy": True}, True, True),
-    ({"rules_only": True, "skipped_busy": True, "timeout": True}, True, False),   # another line really timed out
+    ({"rules_only": True, "model_skipped": True}, True, True),
+    ({"rules_only": True, "model_skipped": True, "timeout": True}, True, False),   # another line really timed out
     ({"rules_only": True, "timeout": True}, True, False),
-    ({"rules_only": False, "skipped_busy": True}, False, False),
+    ({"rules_only": False, "model_skipped": True}, False, False),
     ("garbage", False, False),
 ])
 def test_c01_run_pipeline_tells_a_skip_behind_a_stuck_generation_apart(info, rules_only, skipped):
@@ -366,7 +366,7 @@ def test_c01_dictations_skipped_behind_one_stuck_generation_do_not_raise_the_too
     from voxflow import controller as ctl_mod
     rig.cleaner.last_info = {"rules_only": True, "timeout": True}            # the one that was really slow
     rig.dictate("please send the report")
-    rig.cleaner.last_info = {"rules_only": True, "skipped_busy": True}       # the ones behind it
+    rig.cleaner.last_info = {"rules_only": True, "model_skipped": True}       # the ones behind it
     for _ in range(3):
         events = rig.dictate("please send the report")
         rig.clock[0] += 10
@@ -832,3 +832,11 @@ def test_c12_the_model_is_told_not_to_write_placeholders_at_the_end_of_a_write_r
 ])
 def test_c12_placeholder_lines_are_taken_out_of_what_is_pasted(raw, selection, expect):
     assert tidy_output(raw, selection) == expect
+
+
+def test_c08_a_second_report_of_the_same_move_raises_no_second_notice(rig):
+    from voxflow import controller as ctl_mod
+    status = {"state": "degraded", "detail": ctl_mod.ASR_CPU_FALLBACK, "progress": None, "backend": "cpu"}
+    rig.c._on_model_event("asr", dict(status))
+    rig.c._on_model_event("asr", dict(status))
+    assert rig.spy.notices() == [("warning", ctl_mod.ASR_CPU_FALLBACK)]

@@ -304,7 +304,7 @@ def test_timeout_is_hard_bounded():
     t0 = time.perf_counter()
     c.clean("so we should uh move the meeting to friday")
     assert time.perf_counter() - t0 < 0.4 + 0.3
-    assert c.last_info.get("skipped_busy") and not c.last_info.get("timeout")
+    assert c.last_info.get("model_skipped") and not c.last_info.get("timeout")
     time.sleep(3)  # let the abandoned thread unwind
     assert not c._abandoned.is_set()
 

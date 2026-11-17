@@ -2059,7 +2059,7 @@ class Cleaner:
                     self.last_info["rejected"] = True
                     out_lines.append(line)
             except LlmBusy:
-                self.last_info["skipped_busy"] = self.last_info["rules_only"] = True
+                self.last_info["model_skipped"] = self.last_info["rules_only"] = True
                 out_lines.append(line)
             except TimeoutError:
                 self.last_info["timeout"] = self.last_info["rules_only"] = True
@@ -2123,15 +2123,16 @@ class Cleaner:
         try:
             self.last_info["llm"] = True
             t_call = time.perf_counter()
-            self._waited_s, ran = 0.0, True
+            self._waited_s = 0.0
+            # the time spent waiting for an earlier call is not this call's own
             try:
                 res = self._llm_clean(body, max_ms=remaining * 1000)
             except LlmBusy:
-                ran = False                              # the model never ran: nothing to learn about its speed
+                raise                                    # the model never ran: nothing to learn about its speed
+            except TimeoutError:
+                self._note_speed(body, time.perf_counter() - t_call - self._waited_s)
                 raise
-            finally:
-                if ran:                                  # the time spent waiting for an earlier call is not its own
-                    self._note_speed(body, time.perf_counter() - t_call - self._waited_s)
+            self._note_speed(body, time.perf_counter() - t_call - self._waited_s)
             res = res.strip().strip('"').strip()
             if res[:2] in ("- ", "* ") or res[:1] == "•":
                 res = ""  # model invented a bullet
@@ -2145,7 +2146,7 @@ class Cleaner:
             self.last_info["rejected"] = True
             return _salvage_case(body, res) if res else body
         except LlmBusy:
-            self.last_info["skipped_busy"] = self.last_info["rules_only"] = True
+            self.last_info["model_skipped"] = self.last_info["rules_only"] = True
         except TimeoutError:
             self.last_info["timeout"] = self.last_info["rules_only"] = True
         return body

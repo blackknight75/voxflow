@@ -408,7 +408,7 @@ def test_timeout_abandons_the_generation_then_recovers():
     t0 = time.perf_counter()
     assert c.clean("we we should deploy it") == "We should deploy it."
     assert time.perf_counter() - t0 < 0.15 + 0.2
-    assert c.last_info["skipped_busy"] is True and "timeout" not in c.last_info
+    assert c.last_info["model_skipped"] is True and "timeout" not in c.last_info
     llm.release.set()                                        # the old generation finishes
     deadline = time.time() + 3
     while c._abandoned.is_set() and time.time() < deadline:
