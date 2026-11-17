@@ -406,3 +406,31 @@ def test_c03_scratch_that_takes_back_the_sentence_the_recogniser_ended(spoken, e
 ])
 def test_c03_the_other_languages_take_it_back_the_same_way(lang, spoken, expect):
     assert langs.rule_clean(spoken, langs.get(lang)) == expect
+
+
+# =========================================================================== C-04: corrections written with digits
+def test_c04_the_guard_accepts_the_model_resolving_a_correction_written_with_digits():
+    src = "The deadline is the 10th I mean the 12th."
+    assert cleanup._accept(src, "The deadline is the 12th.")
+    assert cleanup._accept("The deadline is the tenth I mean the twelfth.", "The deadline is the twelfth.")
+    assert not cleanup._accept(src, "The deadline is the 10th."), "keeping the EARLIER value is still refused"
+    assert not cleanup._accept("Send 5 boxes by the 3rd.", "Send boxes by the 3rd."), "a number never just goes"
+
+
+@pytest.mark.parametrize("spoken, expect", [
+    ("the deadline is the 10th i mean the 12th", "The deadline is the 12th."),
+    ("its the 3rd sorry the 4th floor", "It's the 4th floor."),
+    ("meet at 10 i mean the 12th", "Meet at the 12th."),            # the article was not a repeat: it stays
+    ("the red no the blue car", "The blue car."),
+    ("call me at 5 no 6", "Call me at 6."),                        # unchanged
+    ("page one wait 5 minutes", "Page one wait 5 minutes."),        # unchanged: not a correction
+    ("wait the 5 minutes are up", "Wait the 5 minutes are up."),
+])
+def test_c04_the_rules_resolve_digit_corrections_with_a_repeated_article(spoken, expect):
+    assert rule_clean(spoken) == expect
+
+
+def test_c04_the_whole_pipeline_pastes_the_corrected_date():
+    c, llm = with_llm("The deadline is the 12th.")
+    assert c.clean("The deadline is the 10th I mean the 12th.") == "The deadline is the 12th."
+    assert c.last_info["rejected"] is False

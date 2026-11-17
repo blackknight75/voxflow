@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and got the basic clean-up). Dictations that were only held up by an earlier slow one no longer count towards
   the "too slow several times" notice.
 - "Scratch that" right after a sentence the recogniser had already ended with a full stop ("I will call you tomorrow. Scratch that. I will email you.") now removes that sentence; before, only the words "scratch that" went. Also in the other languages ("borra eso", "streich das", ...).
+- A correction with numbers the recogniser writes as digits ("the deadline is the 10th I mean the 12th") was pasted uncorrected: the check on the language model's answer rejected the right one. It is now accepted, and the basic clean-up resolves it too.
 - After one dictation timed out in the language model, the next dictations got the basic clean-up at once, and
   command mode said it "took too long", even when the model was free again a moment later. They now wait for it,
   within their own time limit. Command mode says the model is still busy when that is the reason.

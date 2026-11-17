@@ -369,26 +369,40 @@ _NUMW1 = (r"(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twel
           r"hundred|thousand|million)")
 _NUMPHRASE = rf"(?:{_NUMW1}(?:[\s-]+{_NUMW1}){{0,3}}|\d+(?:[.,]\d+)*)"
 _MARKS = rf"(?:{_CORR_MARK}\b[\s,]+)+"
+# an article repeated after the marker: "the 10th I mean the 12th", "the red I mean the blue" (QA C-04)
+_ART = r"(?:(?P<art>the|a|an)\s+)?"
 # the earlier value (X) and the marker are dropped; the later value (Y) always survives
 _SAMEKIND_RES = [
-    re.compile(rf"\b{k}\b[\s,]+{_MARKS}(?={k}\b)", re.I) for k in (_DAY, _MON, _COL)
+    re.compile(rf"\b{k}\b[\s,]+{_MARKS}{_ART}(?={k}\b)", re.I) for k in (_DAY, _MON, _COL)
 ] + [
     # "fifty dollars no sixty dollars": same unit repeated after the marker
-    re.compile(rf"(?<![\w.:-]){_NUMPHRASE}\s+([A-Za-z]+)\b[\s,]+{_MARKS}(?={_NUMPHRASE}\s+\1\b)", re.I),
+    re.compile(rf"(?<![\w.:-]){_NUMPHRASE}\s+([A-Za-z]+)\b[\s,]+{_MARKS}{_ART}(?={_NUMPHRASE}\s+\1\b)", re.I),
 ]
-# "five wait six": bare number, marker, number. Not a correction when the two numbers are written
-# differently ("page one wait 5 minutes") or when "wait" is followed by a duration ("wait five minutes").
-_NUM_CORR_RE = re.compile(rf"(?<![\w.:-])({_NUMPHRASE})\b[\s,]+({_MARKS})(?=((?:{_NUMW1}|\d)[\w.,-]*)(\s+\w+)?)", re.I)
+# "five wait six", "the 10th I mean the 12th": number (the recogniser writes ordinals as digits), marker, number.
+# Not a correction when the two numbers are written differently ("page one wait 5 minutes") or when "wait" is
+# followed by a duration ("wait five minutes").
+_NUM_CORR_RE = re.compile(rf"(?<![\w.:-])(?P<first>{_NUMPHRASE}(?:st|nd|rd|th)?)\b[\s,]+(?P<marks>{_MARKS}){_ART}"
+                          rf"(?=(?P<second>(?:{_NUMW1}|\d)[\w.,-]*)(?P<after>\s+\w+)?)", re.I)
 _DURATION_RE = re.compile(r"\s*(?:more\s+)?(?:second|minute|hour|day|week|month|year|moment)s?\b", re.I)
 
 
+def _keep_article(m: re.Match) -> str:
+    """What replaces a dropped "X marker [article]": nothing, or the article when X did not have the same one
+    ("at 10 I mean the 12th" keeps "the")."""
+    art = m.group("art")
+    if not art:
+        return ""
+    before = re.findall(r"[A-Za-z']+", m.string[:m.start()])[-1:]
+    return "" if before and before[0].lower() == art.lower() else art + " "
+
+
 def _num_correction(m: re.Match) -> str:
-    first, marks, second, after = m.group(1), m.group(2), m.group(3), m.group(4) or ""
+    first, marks, second, after = m.group("first"), m.group("marks"), m.group("second"), m.group("after") or ""
     if first[0].isdigit() != second[0].isdigit():
         return m.group(0)
     if re.fullmatch(r"wait[\s,]*", marks, re.I) and _DURATION_RE.match(after):
         return m.group(0)
-    return ""
+    return _keep_article(m)
 
 # cues that suggest the LLM is worth running
 _CORRECTION_CUE = re.compile(
@@ -610,7 +624,7 @@ def rule_clean(text: str, formatting: bool = True, terminal: bool = True, filler
     if fillers:
         t = _drop_scratched(t)
         for rx in _SAMEKIND_RES:
-            t = rx.sub("", t)
+            t = rx.sub(_keep_article, t)
         t = _NUM_CORR_RE.sub(_num_correction, t)
         t = _ER_BEFORE_FILLER_RE.sub("", t)
         t = _FILLER_RE.sub("", t)
@@ -967,7 +981,9 @@ def _accept(src: str, out: str) -> bool:
     stoks, otoks = set(_NUM_TOKEN_RE.findall(src)), set(_NUM_TOKEN_RE.findall(out))
     if otoks - stoks and not _SPOKEN_NUM.search(src):
         return False
-    if any(t not in otoks and t not in corrected for t in stoks - otoks):
+    # a number may go only as part of a dropped correction; "10th" was dropped, so was its "10" (QA C-04)
+    dropped_numbers = {n for w in corrected for n in _NUM_TOKEN_RE.findall(w)}
+    if any(t not in otoks and t not in dropped_numbers for t in stoks - otoks):
         return False
     # --- no new symbols that change content ($ % # & * + = ~ ^)
     if set(re.findall(r"[$%#&*+=~^|<>]", out)) - set(re.findall(r"[$%#&*+=~^|<>]", src)):
