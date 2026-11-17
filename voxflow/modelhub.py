@@ -42,7 +42,7 @@ KNOWN_SIZES = {
 
 
 def move_roaming_cuda_cache() -> str:
-    """Versions up to 0.2.1 kept the CUDA cache in Roaming AppData (``%APPDATA%\VoxFlow\cuda-cache``): move it to
+    r"""Versions up to 0.2.1 kept the CUDA cache in Roaming AppData (``%APPDATA%\VoxFlow\cuda-cache``): move it to
     the one in use (a rename on the same drive: the compiled kernels are kept, no 25 s recompile), or delete it
     when that is not possible. Call it before the models load. Returns "moved", "removed" or ""."""
     base = os.environ.get("APPDATA")
