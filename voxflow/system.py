@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import datetime as _dt
 import faulthandler
+import json
 import logging
 import logging.handlers
 import os
 import sys
 import threading
+import time
 import traceback
 from pathlib import Path
 
@@ -122,6 +124,15 @@ def log_dir(data_dir: str | Path) -> Path:
     return Path(data_dir) / "logs"
 
 
+class RedactingFormatter(logging.Formatter):
+    """Prints the stack of a logged exception (``log.exception``, ``exc_info=True``) without its message, which can
+    quote dictated text (see :func:`redacted_exc`). Used by every VoxFlow handler, so no future call can leak."""
+
+    def formatException(self, ei) -> str:
+        exc = ei[1] if ei and isinstance(ei[1], BaseException) else None
+        return redacted_traceback(exc) if exc is not None else super().formatException(ei)
+
+
 def setup_logging(data_dir: str | Path, level: int = logging.INFO) -> Path:
     """Send the ``voxflow`` loggers to ``<data_dir>/logs/voxflow.log`` (1 MB x 3 files). Idempotent.
 
@@ -138,7 +149,7 @@ def setup_logging(data_dir: str | Path, level: int = logging.INFO) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         handler = logging.handlers.RotatingFileHandler(path, maxBytes=1_000_000, backupCount=3, encoding="utf-8",
                                                        delay=True)
-        handler.setFormatter(logging.Formatter(_FORMAT))
+        handler.setFormatter(RedactingFormatter(_FORMAT))
         root.addHandler(handler)
         _file_handler = handler
     except OSError as exc:
@@ -146,7 +157,7 @@ def setup_logging(data_dir: str | Path, level: int = logging.INFO) -> Path:
     if sys.stderr is not None and not any(getattr(h, "_voxflow_console", False) for h in root.handlers):
         console = logging.StreamHandler()
         console.setLevel(logging.WARNING)
-        console.setFormatter(logging.Formatter("[voxflow] %(levelname)s %(name)s: %(message)s"))
+        console.setFormatter(RedactingFormatter("[voxflow] %(levelname)s %(name)s: %(message)s"))
         console._voxflow_console = True
         root.addHandler(console)
     return path
@@ -212,8 +223,14 @@ def _with_tb(exc_type, exc, tb) -> BaseException:
     return exc
 
 
+CRASH_KEEP = 10                  # crash-*.log files kept; older ones are deleted when a new one is written
+FAULT_LOG_MAX = 1_000_000        # above this size fault.log is started afresh (the old one kept as fault.old.log)
+_SEEN = "reports-seen.json"      # the crash reports the user was already told about (see new_crash_report)
+
+
 def write_crash_report(data_dir: str | Path, exc_type, exc, tb, where: str = "main thread") -> Path | None:
-    """Write ``logs/crash-<timestamp>.log`` with the traceback. Returns its path (None if it failed)."""
+    """Write ``logs/crash-<timestamp>.log`` with the traceback. Returns its path (None if it failed).
+    Only the ``CRASH_KEEP`` newest reports are kept."""
     stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     path = log_dir(data_dir) / f"crash-{stamp}.log"
     try:
@@ -223,41 +240,109 @@ def write_crash_report(data_dir: str | Path, exc_type, exc, tb, where: str = "ma
             fh.write(f"where: {where}\npython: {sys.version}\nplatform: {sys.platform}\n\n")
             # frames and error types only: a message can quote dictated text (see redacted_exc)
             fh.write(redacted_traceback(_with_tb(exc_type, exc, tb)) + "\n")
-        return path
     except OSError:
         return None
+    prune_crash_reports(data_dir)
+    return path
 
 
-def install_crash_handler(data_dir: str | Path, on_crash=None) -> None:
-    """Log uncaught exceptions from any thread, write a crash report, then run ``on_crash()``.
+def prune_crash_reports(data_dir: str | Path, keep: int = CRASH_KEEP) -> None:
+    """Delete all but the ``keep`` newest ``crash-*.log`` files (their names sort by time)."""
+    reports = sorted(log_dir(data_dir).glob("crash-*.log"), key=lambda p: p.name, reverse=True)
+    for old in reports[keep:]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
 
-    ``on_crash`` is the place to undo global side effects (unmute other apps, release the keyboard hook).
-    Also enables ``faulthandler`` into ``logs/fault.log`` so native crashes leave a stack trace."""
+
+def new_crash_report(data_dir: str | Path) -> Path | None:
+    """The newest crash report written since the previous call, i.e. by a run that crashed; None otherwise.
+
+    Reports are ``crash-*.log`` (a Python error that ended VoxFlow) and new text in ``fault.log`` that names a
+    fatal error (a native crash). The first call on a profile only takes note of what is already there."""
+    folder = log_dir(data_dir)
+    seen_path = folder / _SEEN
+    try:
+        seen = json.loads(seen_path.read_text(encoding="utf-8"))
+        seen_time, seen_fault = float(seen["time"]), int(seen["fault"])
+    except (OSError, ValueError, KeyError, TypeError):
+        seen, seen_time, seen_fault = None, 0.0, 0
+    found: Path | None = None
+    newest = seen_time
+    for report in folder.glob("crash-*.log"):
+        mtime = report.stat().st_mtime
+        if mtime > newest:
+            found, newest = report, mtime
+    fault = folder / "fault.log"
+    try:
+        fault_size = fault.stat().st_size
+    except OSError:
+        fault_size = 0
+    if found is None and fault_size != seen_fault:
+        try:
+            with fault.open("rb") as fh:
+                fh.seek(seen_fault if fault_size > seen_fault else 0)     # smaller: started afresh, read it all
+                if b"fatal" in fh.read().lower():
+                    found = fault
+        except OSError:
+            pass
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        seen_path.write_text(json.dumps({"time": max(newest, time.time()), "fault": fault_size}), encoding="utf-8")
+    except OSError:
+        pass
+    return found if seen is not None else None
+
+
+def _cap_fault_log(path: Path) -> None:
+    try:
+        if path.stat().st_size > FAULT_LOG_MAX:
+            os.replace(path, path.with_name("fault.old.log"))
+    except OSError:
+        pass
+
+
+def install_crash_handler(data_dir: str | Path, on_crash=None, on_error=None, fatal=None) -> None:
+    """Log uncaught exceptions from any thread; for one that ends VoxFlow also write a crash report and run
+    ``on_crash()``.
+
+    ``on_crash`` is the place to undo global side effects for good (unmute other apps, release the keyboard hook).
+    Most uncaught exceptions do not end VoxFlow: one in a Qt slot is reported while the event loop keeps running,
+    and one in a thread ends only that thread. For those ``on_error()`` runs instead (save what is pending, give
+    other apps their sound back, switch nothing off) and no crash report is written. ``fatal()`` says whether an
+    exception on the main thread ends the app (default: it always does). Also enables ``faulthandler`` into
+    ``logs/fault.log`` (started afresh above about 1 MB) so native crashes leave a stack trace."""
     global _fault_file
 
-    def report(exc_type, exc, tb, where: str) -> None:
+    def report(exc_type, exc, tb, where: str, is_fatal: bool) -> None:
         if issubclass(exc_type, KeyboardInterrupt):
             return
-        logging.getLogger("voxflow").critical("uncaught exception in %s\n%s", where,     # no message: see above
-                                              redacted_traceback(_with_tb(exc_type, exc, tb)))
-        path = write_crash_report(data_dir, exc_type, exc, tb, where)
-        if path is not None:
-            logging.getLogger("voxflow").critical("crash report written to %s", path)
-        if on_crash is not None:
+        text = redacted_traceback(_with_tb(exc_type, exc, tb))            # no message: see redacted_exc
+        root = logging.getLogger("voxflow")
+        if is_fatal:
+            root.critical("uncaught exception in %s\n%s", where, text)
+            path = write_crash_report(data_dir, exc_type, exc, tb, where)
+            if path is not None:
+                root.critical("crash report written to %s", path)
+        else:
+            root.error("uncaught exception in %s (VoxFlow keeps running)\n%s", where, text)
+        callback = on_crash if is_fatal else on_error
+        if callback is not None:
             try:
-                on_crash()
+                callback()
             except Exception:  # noqa: BLE001
-                logging.getLogger("voxflow").exception("crash clean-up failed")
+                root.exception("crash clean-up failed")
 
     def excepthook(exc_type, exc, tb) -> None:
-        report(exc_type, exc, tb, "main thread")
+        report(exc_type, exc, tb, "main thread", fatal is None or bool(fatal()))
         sys.__excepthook__(exc_type, exc, tb)
 
     def thread_hook(args) -> None:
         if args.exc_type is SystemExit:
             return
         name = args.thread.name if args.thread is not None else "unknown"
-        report(args.exc_type, args.exc_value, args.exc_traceback, f"thread {name}")
+        report(args.exc_type, args.exc_value, args.exc_traceback, f"thread {name}", False)
 
     sys.excepthook = excepthook
     threading.excepthook = thread_hook
@@ -265,6 +350,7 @@ def install_crash_handler(data_dir: str | Path, on_crash=None) -> None:
         if _fault_file is None:
             path = log_dir(data_dir) / "fault.log"
             path.parent.mkdir(parents=True, exist_ok=True)
+            _cap_fault_log(path)
             _fault_file = path.open("a", encoding="utf-8")
             faulthandler.enable(_fault_file)
     except (OSError, RuntimeError, ValueError) as exc:

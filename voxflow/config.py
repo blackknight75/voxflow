@@ -37,9 +37,14 @@ HOTKEY_LABELS = {"hotkey": "Dictation", "command_hotkey": "Command mode",
                  "paste_last_hotkey": "Paste last transcript", "undo_hotkey": "Undo last paste"}
 
 
-def app_dir() -> Path:
+def app_dir_path() -> Path:
+    """Where VoxFlow keeps its data (``%APPDATA%\\VoxFlow``), without creating it."""
     base = os.environ.get("APPDATA") or str(Path.home() / ".config")
-    p = Path(base) / "VoxFlow"
+    return Path(base) / "VoxFlow"
+
+
+def app_dir() -> Path:
+    p = app_dir_path()
     p.mkdir(parents=True, exist_ok=True)
     return p
 

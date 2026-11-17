@@ -90,6 +90,7 @@ class Controller(QObject):
     _sig_done = Signal(dict)
     _sig_failed = Signal(str, int)
     _sig_notice = Signal(str, str)
+    _sig_notice_action = Signal(str, str, str, str)  # level, message, action id, button label (from any thread)
     _sig_sync = Signal(str, object)                 # step ("read" | "written"), result or exception
     _sig_speed = Signal(dict)                       # an event of the speed check (voxflow.speedcheck.SpeedCheck)
 
@@ -122,6 +123,9 @@ class Controller(QObject):
         self._startup_notices: list[tuple[str, str]] = []
         if getattr(cfgmod, "last_load_problem", ""):
             self._startup_notices.append(("warning", cfgmod.last_load_problem))
+        self._error_told = False
+        # the previous run crashed (QA R17): say so once, with the way to the details
+        self._crash_report = None if demo else system.new_crash_report(self.data_dir)
         cfg = self.config
 
         # ---- stores
@@ -296,6 +300,7 @@ class Controller(QObject):
         self._sig_done.connect(self._on_done)
         self._sig_failed.connect(self._on_failed)
         self._sig_notice.connect(self.notice)
+        self._sig_notice_action.connect(self._notice_action)
         self._sig_sync.connect(self._on_sync_step)
         self.config_changed.connect(
             lambda key, _value: None if key in syncmod.LOCAL_SETTINGS or key == "sync_folder"
@@ -352,6 +357,11 @@ class Controller(QObject):
         for level, message in self._startup_notices:
             self.notice.emit(level, message)
         self._startup_notices = []
+        if self._crash_report is not None:
+            log.warning("the previous run ended with a crash: %s", self._crash_report.name)
+            self._notice_action("warning", "VoxFlow closed unexpectedly last time. The details are in the log folder.",
+                                "open_log_folder", "Open log folder")
+            self._crash_report = None
         if self._stub_notes and not self._fake:
             log.warning("running with stand-ins: %s", ", ".join(self._stub_notes))
         self._emit_status()
@@ -414,6 +424,21 @@ class Controller(QObject):
             self.injector.close()
         except Exception:  # noqa: BLE001
             pass
+
+    def recover_after_error(self) -> None:
+        """For the crash handler, after an exception that did not end VoxFlow (a Qt slot, a thread): save what is
+        pending and give other apps their sound back, but switch nothing off: muting keeps working for the next
+        dictation. Any thread. The first time in a session the user is told where the details are."""
+        self._flush_stores()
+        try:
+            self.muter.unmute_now()
+        except Exception:  # noqa: BLE001
+            pass
+        if not self._error_told:
+            self._error_told = True
+            self._sig_notice_action.emit("warning", "Something went wrong inside VoxFlow. It is still running; if "
+                                                    "something stops working, restart it. The details are in the log.",
+                                         "open_log_folder", "Open log folder")
 
     def request_activate(self) -> None:
         """Another launch asked this instance to show itself."""
@@ -752,7 +777,7 @@ class Controller(QObject):
                 try:
                     payload = self.sync.merge(result)
                 except Exception as exc:  # noqa: BLE001
-                    log.exception("sync merge failed")
+                    log.error("sync merge failed\n%s", system.redacted_traceback(exc))
                     self.sync.note_unavailable(exc)
                     payload = None
                 finally:
@@ -853,8 +878,8 @@ class Controller(QObject):
         def load_asr() -> None:
             try:
                 self.dictionary.prepare()          # off the dictation path: the word list loads in ~30 ms
-            except Exception:  # noqa: BLE001 - it is built on first use instead
-                log.exception("dictionary matchers could not be prepared")
+            except Exception as exc:  # noqa: BLE001 - it is built on first use instead
+                log.error("dictionary matchers could not be prepared\n%s", system.redacted_traceback(exc))
             repo = "" if self._fake else modelhub.asr_repo(cfg.asr_model)
             cached = modelhub.is_cached(repo)
             report("asr", "loading" if cached else "downloading",
@@ -1572,8 +1597,8 @@ class Controller(QObject):
                     self._rule_cleaner = Cleaner(use_llm=False)
                     self._rule_cleaner.load()
                 again = self._rule_cleaner.clean(raw, **kwargs)
-            except Exception:  # noqa: BLE001 - the rules never fail a dictation
-                log.exception("rule clean-up for a snippet failed")
+            except Exception as exc:  # noqa: BLE001 - the rules never fail a dictation
+                log.error("rule clean-up for a snippet failed\n%s", system.redacted_traceback(exc))
                 again = ""
             text = again if again and self.snippets.matches(again) else raw
         return self.snippets.expand(text, transform=self.dictionary.apply)

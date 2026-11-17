@@ -12,6 +12,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A damaged install (part of VoxFlow's code missing) no longer runs the demo models in the real app, which pasted
   a canned sentence into your window. The speech model now shows "VoxFlow's installation is damaged. Reinstall
   VoxFlow."
+- A data folder VoxFlow can't write to (read-only, offline, on a missing drive) is now explained in a message
+  box. VoxFlow used to take it for a copy that was already running and quit without a word.
+- Problems found while VoxFlow starts (an unreadable settings or history file, a microphone that doesn't open) are
+  now written to `voxflow.log`, and an error during start-up shows a message instead of nothing.
+- Dictated text no longer reaches the log through error reports: every logged error keeps its type and place but
+  never its message.
+- An internal error that VoxFlow survives no longer switches *Mute other apps* off for the rest of the session or
+  writes a crash report. It is logged, and the first one in a session shows a notice with *Open log folder*.
+- Only the 10 newest crash reports are kept, and `fault.log` is started afresh above 1 MB. After a crash, the next
+  start says "VoxFlow closed unexpectedly last time" with *Open log folder*.
 - VoxFlow uses about 480 MB less memory: numpy no longer reserves a buffer for every CPU thread at start.
 
 ## [0.2.1] - 2026-11-15

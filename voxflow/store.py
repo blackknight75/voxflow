@@ -25,7 +25,7 @@ import uuid
 import weakref
 from pathlib import Path
 
-from . import config as cfgmod
+from . import config as cfgmod, system
 
 log = logging.getLogger("voxflow.store")
 
@@ -103,7 +103,8 @@ class _JsonStore:
         try:
             self._load(data)
         except Exception as exc:  # noqa: BLE001 - a malformed file must never stop the app
-            log.warning("%s has an unexpected layout (%s); starting empty and keeping a copy", self.path.name, exc)
+            log.warning("%s has an unexpected layout (%s); starting empty and keeping a copy", self.path.name,
+                        system.redacted_exc(exc))           # never the message: it can quote an entry
             self._backup("corrupt")
             self._load(None)
 
@@ -243,8 +244,8 @@ class _JsonStore:
         for cb in listeners:
             try:
                 cb(topic)
-            except Exception:  # noqa: BLE001
-                log.exception("store listener failed")
+            except Exception as exc:  # noqa: BLE001
+                log.error("store listener failed\n%s", system.redacted_traceback(exc))
 
 
 # =========================================================================== dictionary

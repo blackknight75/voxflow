@@ -15,6 +15,7 @@ import os
 import sys
 import time
 import wave
+from pathlib import Path
 
 import numpy as np
 
@@ -424,6 +425,11 @@ _DEMO_CYCLE = [
 ]
 
 
+def _version() -> str:
+    from . import __version__
+    return __version__
+
+
 def _instance_name() -> str:
     try:
         user = getpass.getuser()
@@ -435,9 +441,24 @@ def _instance_name() -> str:
     return f"VoxFlow-instance-{''.join(ch for ch in user if ch.isalnum())}-{where}"
 
 
+def show_start_error(text: str) -> None:
+    """Tell the user why VoxFlow cannot start (the windowed exe has no console). Replaced in tests."""
+    print(text, file=sys.stderr)
+    from PySide6.QtWidgets import QMessageBox
+    QMessageBox.critical(None, "VoxFlow can't start", text)
+
+
+def _folder_problem(folder: Path, reason: str) -> int:
+    log.error("the data folder %s cannot be used: %s", folder, reason)
+    show_start_error(f"VoxFlow can't use its data folder:\n{folder}\n\n{reason}\n\nCheck that the folder (or the "
+                     "drive it is on) is available and that you are allowed to change it: it may be read-only, "
+                     "offline, full or blocked by a sync or security program. Then start VoxFlow again.")
+    return 1
+
+
 def run_app(demo: bool = False, fake: bool = False, open_settings: bool = False, no_hook: bool = False,
             autostart: bool = False) -> int:
-    from PySide6.QtCore import QLockFile, QTimer
+    from PySide6.QtCore import QLockFile, QThread, QTimer
     from PySide6.QtNetwork import QLocalServer, QLocalSocket
     from PySide6.QtWidgets import QApplication
 
@@ -449,9 +470,19 @@ def run_app(demo: bool = False, fake: bool = False, open_settings: bool = False,
 
     # ---- one instance per user; a second launch brings the first one's window up and exits
     lock = server = None
+    data_dir = None
     if not demo:
-        lock = QLockFile(str(cfgmod.app_dir() / "voxflow.lock"))
+        try:
+            data_dir = cfgmod.app_dir()
+        except OSError as exc:                # APPDATA on a missing drive, a folder that cannot be created
+            return _folder_problem(cfgmod.app_dir_path(), exc.strerror or type(exc).__name__)
+        lock = QLockFile(str(data_dir / "voxflow.lock"))
         if not lock.tryLock(100):
+            if lock.error() != QLockFile.LockError.LockFailedError:   # not "held by another instance" (QA R2)
+                reason = ("Windows did not allow VoxFlow to write there."
+                          if lock.error() == QLockFile.LockError.PermissionError
+                          else "VoxFlow could not create a file there.")
+                return _folder_problem(data_dir, reason)
             sock = QLocalSocket()
             sock.connectToServer(_instance_name())
             if sock.waitForConnected(500):
@@ -461,18 +492,49 @@ def run_app(demo: bool = False, fake: bool = False, open_settings: bool = False,
             print("VoxFlow is already running; its window has been brought to the front.")
             return 0
 
+    # ---- the log and the crash handler first, so that whatever happens while the controller is built (an unreadable
+    # settings file, a microphone that does not open, an exception) is in voxflow.log (QA R9)
+    controller = None
+
+    def on_crash() -> None:
+        if controller is not None:
+            controller.emergency_restore()
+
+    def on_error() -> None:
+        if controller is not None:
+            controller.recover_after_error()
+
+    def ends_app() -> bool:
+        # an exception in a Qt slot is reported while the event loop keeps running: VoxFlow carries on (QA R4)
+        return QThread.currentThread().loopLevel() == 0
+
+    if data_dir is not None:
+        system.setup_logging(data_dir)
+        system.install_crash_handler(data_dir, on_crash, on_error, ends_app)
+        log.info("VoxFlow %s starting (demo=False, fake=%s, data=%s)", _version(), fake, data_dir)
+
     injector = context_fn = None
     if fake and not demo:
         # --fake: stand-in audio and models, but the real hotkeys, paste and app detection
         from .context import foreground_app
         from .inject import Injector
         injector, context_fn = Injector(), foreground_app
-    controller = Controller(demo=demo, fake=fake, install_hook=not no_hook, injector=injector,
-                            context_fn=context_fn)
-    system.setup_logging(controller.data_dir)
-    system.install_crash_handler(controller.data_dir, controller.emergency_restore)
+    try:
+        controller = Controller(demo=demo, fake=fake, install_hook=not no_hook, injector=injector,
+                                context_fn=context_fn)
+    except Exception as exc:  # noqa: BLE001 - logged without its message; the user gets a box, not silence
+        log.critical("VoxFlow could not start\n%s", system.redacted_traceback(exc))
+        if lock is not None:
+            lock.unlock()
+        show_start_error("VoxFlow could not start because of an unexpected error. Details are in the log folder:\n"
+                         f"{system.log_dir(data_dir or cfgmod.app_dir_path())}")
+        system.shutdown_logging()
+        return 1
+    if data_dir is None:                      # demo: a throw-away profile made by the controller
+        system.setup_logging(controller.data_dir)
+        system.install_crash_handler(controller.data_dir, on_crash, on_error, ends_app)
+        log.info("VoxFlow %s starting (demo=True, data=%s)", controller.version, controller.data_dir)
     atexit.register(controller.emergency_restore)
-    log.info("VoxFlow %s starting (demo=%s, fake=%s, data=%s)", controller.version, demo, fake, controller.data_dir)
 
     if not demo:
         server = QLocalServer()

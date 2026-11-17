@@ -356,6 +356,11 @@ class MediaMuter:
         self._closing = True
         self._do_unmute()
 
+    def unmute_now(self) -> None:
+        """Synchronous unmute after an error VoxFlow survives (any thread). Unlike ``restore_now`` it leaves
+        muting switched on for the next dictation."""
+        self._do_unmute()
+
     def close(self) -> None:
         """Stop the worker (letting a mute in flight finish first), then give every app its sound back."""
         self._closing = True

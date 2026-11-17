@@ -318,16 +318,18 @@ def test_crash_handler_reports_main_thread_exceptions_and_runs_cleanup(tmp_path,
     assert (tmp_path / "logs" / "fault.log").exists(), "faulthandler must be armed for native crashes"
 
 
-def test_crash_handler_reports_worker_thread_exceptions(tmp_path, clean_logging):
+def test_crash_handler_reports_worker_thread_exceptions(tmp_path, clean_logging, caplog):
+    # a thread's exception ends only that thread: logged, the light clean-up runs, no crash report (QA R4)
     cleaned = []
-    sysmod.install_crash_handler(tmp_path, on_crash=lambda: cleaned.append(1))
+    sysmod.install_crash_handler(tmp_path, on_crash=lambda: cleaned.append("crash"),
+                                 on_error=lambda: cleaned.append("error"))
     th = threading.Thread(target=lambda: 1 / 0, name="pipeline-worker")
-    th.start()
-    th.join()
-    reports = list((tmp_path / "logs").glob("crash-*.log"))
-    assert len(reports) == 1 and cleaned == [1]
-    text = reports[0].read_text(encoding="utf-8")
-    assert "where: thread pipeline-worker" in text and "ZeroDivisionError" in text
+    with caplog.at_level("ERROR"):
+        th.start()
+        th.join()
+    assert list((tmp_path / "logs").glob("crash-*.log")) == [] and cleaned == ["error"]
+    assert "uncaught exception in thread pipeline-worker (VoxFlow keeps running)" in caplog.text
+    assert "ZeroDivisionError" in caplog.text
 
 
 def test_crash_handler_ignores_ctrl_c_and_thread_exit_and_survives_a_failing_cleanup(tmp_path, clean_logging,

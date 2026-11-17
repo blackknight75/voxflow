@@ -24,7 +24,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import __version__, config as cfgmod, store
+from . import __version__, config as cfgmod, store, system
 
 log = logging.getLogger("voxflow.sync")
 
@@ -365,8 +365,8 @@ def _import(ds: DataSet, incoming: dict, history, stats, mode: str, overwrite: b
             counts["history"] = ds.history.import_entries(history, replace=(mode == "replace"))
         if stats_before is not None:
             counts["stats"] = ds.stats.import_days(stats, replace=(mode == "replace"))
-    except Exception:  # noqa: BLE001 - all or nothing: put everything back the way it was
-        log.exception("import failed; restoring the previous state")
+    except Exception as exc:  # noqa: BLE001 - all or nothing: put everything back the way it was
+        log.error("import failed; restoring the previous state\n%s", system.redacted_traceback(exc))
         try:
             now = snapshot(ds, every_setting=True)
             _apply(ds, {kind: _diff(now[kind], before[kind])[0] for kind in KINDS})
@@ -374,8 +374,8 @@ def _import(ds: DataSet, incoming: dict, history, stats, mode: str, overwrite: b
                 ds.history.import_entries(history_before, replace=True)
             if stats_before is not None:
                 ds.stats.import_days(stats_before, replace=True)
-        except Exception:  # noqa: BLE001
-            log.exception("restoring after a failed import also failed")
+        except Exception as exc2:  # noqa: BLE001
+            log.error("restoring after a failed import also failed\n%s", system.redacted_traceback(exc2))
         raise ValueError("The import could not be completed, so nothing was changed.") from None
     return {"mode": mode, "counts": counts, "details": details, "settings_skipped": skipped_settings}
 
