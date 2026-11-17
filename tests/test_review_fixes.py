@@ -270,12 +270,12 @@ def test_p1_the_private_cuda_cache_is_configured_before_cuda_starts(tmp_path):
     import sys
     code = "import os, voxflow.modelhub; print(os.environ['CUDA_CACHE_PATH']); print(os.environ['CUDA_CACHE_MAXSIZE'])"
     env = {k: v for k, v in os.environ.items() if not k.startswith("CUDA_CACHE")}
-    env["APPDATA"] = str(tmp_path)
+    env["APPDATA"], env["LOCALAPPDATA"] = str(tmp_path / "roaming"), str(tmp_path)
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     out = subprocess.run([sys.executable, "-c", code], cwd=root, env={**env, "PYTHONPATH": root},
                          capture_output=True, text=True, timeout=60)
     path, size = out.stdout.split()
-    assert path == str(tmp_path / "VoxFlow" / "cuda-cache"), out
+    assert path == str(tmp_path / "VoxFlow" / "cuda-cache"), out          # Local AppData, never Roaming (QA R16)
     assert int(size) >= 1 << 30
     env["CUDA_CACHE_PATH"] = str(tmp_path / "mine")                       # an explicit setting always wins
     out = subprocess.run([sys.executable, "-c", code], cwd=root, env={**env, "PYTHONPATH": root},

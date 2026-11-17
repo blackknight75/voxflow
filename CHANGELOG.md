@@ -38,6 +38,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reported instead of quietly falling back to basic clean-up.
 - A full disk during a model download now says "There is not enough disk space", and VoxFlow checks the free space
   before it starts (for example "Needs 2.7 GB free on C:\, 1.2 GB available"). Unfinished downloads are removed.
+- The uninstaller and an upgrade ask VoxFlow to close instead of ending it by force, so pending changes are saved
+  and apps it muted get their sound back. Only if it doesn't close within 5 seconds is it ended, and only the copy
+  in the folder being uninstalled (no longer every `VoxFlow.exe`, such as a portable or Scoop copy).
+- An upgrade starts from an empty runtime folder, so files of packages that older versions had no longer pile up.
+- The compiled GPU kernels (up to 1 GB) moved from Roaming to Local AppData (`%LOCALAPPDATA%\VoxFlow\cuda-cache`), so
+  a roaming profile no longer copies them at every sign-in. The existing cache is moved, not rebuilt, and the
+  uninstaller removes it.
 - VoxFlow uses about 480 MB less memory: numpy no longer reserves a buffer for every CPU thread at start.
 
 ## [0.2.1] - 2026-11-15

@@ -24,7 +24,12 @@ def main(argv=None) -> int:
     ap.add_argument("--speed-check", nargs="+", metavar="ARG", help=argparse.SUPPRESS)
     # Setup starts VoxFlow again with this after an in-app update, while it still holds its mutex
     ap.add_argument("--after-update", action="store_true", help=argparse.SUPPRESS)
+    # the uninstaller and Setup: ask a running VoxFlow to save and quit, and wait for it (exit code 0: none runs)
+    ap.add_argument("--quit", action="store_true", help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
+    if args.quit:
+        from .app import request_quit
+        return request_quit()
     if args.speed_check is not None:
         from .speedcheck import child_main
         return child_main(args.speed_check)

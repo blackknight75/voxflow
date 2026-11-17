@@ -272,7 +272,7 @@ VoxFlow is built so that there is nothing to trust: audio and text are processed
 | `%APPDATA%\VoxFlow\history.json`, `stats.json` | Transcripts (if "save history" is on) and usage statistics |
 | `%APPDATA%\VoxFlow\dictionary.json`, `snippets.json`, `styles.json` | Your dictionary, snippets and per-app styles |
 | `%APPDATA%\VoxFlow\logs\` | `voxflow.log` (rotating, 1 MB x 3) and `crash-*.log`. They stay on your PC. |
-| `%APPDATA%\VoxFlow\cuda-cache\` | Compiled GPU kernels, so later starts are fast |
+| `%LOCALAPPDATA%\VoxFlow\cuda-cache\` | Compiled GPU kernels, so later starts are fast. Removed by the uninstaller |
 | `%APPDATA%\VoxFlow\speedcheck.json` | How fast each device ran the models on this PC (the speed check). Never in a backup or the sync folder |
 | `%APPDATA%\VoxFlow\updates.json` | The last update check: when, its result, the newest version seen and your choices (skip, remind later) |
 | `%TEMP%\VoxFlow-update\` | At most one downloaded update installer, while it waits to be installed. Deleted after the update, when you skip that version or switch updates off |
@@ -383,8 +383,9 @@ language model change applies when VoxFlow restarts. `VOXFLOW_DEVICE` (see Troub
 * **Install details:** the installer is per-user (no administrator rights), installs to
   `%LOCALAPPDATA%\Programs\VoxFlow`, adds a Start menu entry and an optional desktop shortcut. *Launch at login*
   is the app's own switch (Settings > General); the installer does not add a second one.
-* **Uninstall:** Windows Settings > Apps, or the uninstaller in the install folder. It removes the program files
-  and the *Launch at login* entry, nothing else. For a complete removal, also delete `%APPDATA%\VoxFlow` (settings, history, dictionary) and
+* **Uninstall:** Windows Settings > Apps, or the uninstaller in the install folder. It first asks a running
+  VoxFlow to close (so what it has not saved yet is saved, and apps it muted get their sound back), then removes
+  the program files, the *Launch at login* entry and the GPU kernel cache, nothing else. For a complete removal, also delete `%APPDATA%\VoxFlow` (settings, history, dictionary) and
   the two model folders in `%USERPROFILE%\.cache\huggingface\hub` (`models--istupakov--parakeet-tdt-0.6b-v3-onnx`
   and `models--bartowski--Qwen_Qwen3-4B-Instruct-2507-GGUF`).
 

@@ -23,9 +23,10 @@ os.environ.setdefault("DO_NOT_TRACK", "1")
 # The CUDA kernels of llama.cpp are JIT-compiled for newer GPUs (about 25 s the first time, 1.5 s from the driver's
 # cache afterwards). The driver cache is shared with every CUDA program and capped at 256 MiB by default, so other
 # programs can evict VoxFlow's kernels and the next start costs 25 s again. Keep VoxFlow's own, large cache.
-# Must be set before CUDA is initialised; an explicit user / test setting always wins.
-_base = os.environ.get("APPDATA") or str(Path.home() / ".config")
-os.environ.setdefault("CUDA_CACHE_PATH", str(Path(_base) / "VoxFlow" / "cuda-cache"))
+# Must be set before CUDA is initialised; an explicit user / test setting always wins. Local AppData, not Roaming: a
+# 1 GiB cache of machine-specific kernels must not be copied around by a roaming profile at every sign-in (QA R16).
+_local = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or str(Path.home() / ".config")
+os.environ.setdefault("CUDA_CACHE_PATH", str(Path(_local) / "VoxFlow" / "cuda-cache"))
 os.environ.setdefault("CUDA_CACHE_MAXSIZE", str(1 << 30))
 GPU_PREPARE_NOTE = "Preparing the GPU. This takes up to 30 seconds the first time only."
 
@@ -38,6 +39,28 @@ KNOWN_SIZES = {
     "istupakov/parakeet-tdt-0.6b-v3-onnx": 2_549_805_955,
     "bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF": 2_497_280_736,
 }
+
+
+def move_roaming_cuda_cache() -> str:
+    """Versions up to 0.2.1 kept the CUDA cache in Roaming AppData (``%APPDATA%\VoxFlow\cuda-cache``): move it to
+    the one in use (a rename on the same drive: the compiled kernels are kept, no 25 s recompile), or delete it
+    when that is not possible. Call it before the models load. Returns "moved", "removed" or ""."""
+    base = os.environ.get("APPDATA")
+    if not base:
+        return ""
+    old, new = Path(base) / "VoxFlow" / "cuda-cache", Path(os.environ.get("CUDA_CACHE_PATH", ""))
+    if not old.is_dir() or new == old:
+        return ""
+    if not new.exists():
+        try:
+            new.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(old, new)
+            log.info("moved the GPU kernel cache from Roaming to Local AppData")
+            return "moved"
+        except OSError as exc:
+            log.info("could not move the GPU kernel cache (%s); removing it", exc)
+    shutil.rmtree(old, ignore_errors=True)
+    return "removed"
 
 
 def cache_root() -> Path:

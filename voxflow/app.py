@@ -456,6 +456,45 @@ def _folder_problem(folder: Path, reason: str) -> int:
     return 1
 
 
+QUIT_COMMAND = b"quit"
+
+
+def request_quit(timeout_s: float = 5.0) -> int:
+    """``VoxFlow.exe --quit``: ask the VoxFlow of this user and data folder to quit the normal way (pending saves
+    are written, muted apps get their sound back) and wait until it has. The uninstaller and Setup use it before
+    they replace or remove files, instead of ending the process. Exit code 0 when no VoxFlow is running any more."""
+    from PySide6.QtCore import QCoreApplication, QLockFile
+    from PySide6.QtNetwork import QLocalSocket
+
+    QCoreApplication.instance() or QCoreApplication(sys.argv[:1])
+    try:
+        data_dir = cfgmod.app_dir()
+    except OSError:
+        return 0                               # no data folder: no VoxFlow can be running with it
+    lock = QLockFile(str(data_dir / "voxflow.lock"))
+
+    def stopped() -> bool:
+        if lock.tryLock(0):
+            lock.unlock()
+            return True
+        return False
+
+    if stopped():
+        return 0
+    sock = QLocalSocket()
+    sock.connectToServer(_instance_name())
+    if sock.waitForConnected(1000):
+        sock.write(QUIT_COMMAND)
+        sock.waitForBytesWritten(1000)
+        sock.disconnectFromServer()
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if stopped():
+            return 0
+        time.sleep(0.1)
+    return 1
+
+
 def run_app(demo: bool = False, fake: bool = False, open_settings: bool = False, no_hook: bool = False,
             autostart: bool = False) -> int:
     from PySide6.QtCore import QLockFile, QThread, QTimer
@@ -512,6 +551,8 @@ def run_app(demo: bool = False, fake: bool = False, open_settings: bool = False,
         system.setup_logging(data_dir)
         system.install_crash_handler(data_dir, on_crash, on_error, ends_app)
         log.info("VoxFlow %s starting (demo=False, fake=%s, data=%s)", _version(), fake, data_dir)
+        from . import modelhub
+        modelhub.move_roaming_cuda_cache()     # before any model starts CUDA (QA R16)
 
     injector = context_fn = None
     if fake and not demo:
@@ -542,9 +583,17 @@ def run_app(demo: bool = False, fake: bool = False, open_settings: bool = False,
         if server.listen(_instance_name()):
             def on_connection() -> None:
                 conn = server.nextPendingConnection()
+                command = b""
                 if conn is not None:
+                    if not conn.bytesAvailable():
+                        conn.waitForReadyRead(500)
+                    command = bytes(conn.readAll().data()).strip()
                     conn.disconnectFromServer()
-                controller.request_activate()
+                if command == QUIT_COMMAND:    # VoxFlow.exe --quit (the uninstaller, an upgrade): save and close
+                    log.info("asked to quit by another process")
+                    app.quit()
+                else:
+                    controller.request_activate()
             server.newConnection.connect(on_connection)
         else:
             log.warning("single-instance channel unavailable: %s", server.errorString())

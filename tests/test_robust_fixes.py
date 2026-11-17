@@ -19,6 +19,8 @@ from voxflow.config import Config
 from voxflow.context import AppContext
 from voxflow.controller import Controller
 
+_REAL_INSTANCE_NAME = app._instance_name        # before tests/test_app.py's fixture gives each test a private one
+
 
 def _real_controller(tmp_path, **kw):
     kw.setdefault("injector", TInjector())
@@ -1086,3 +1088,96 @@ def test_r18_the_lock_script_lists_the_whole_dependency_tree_and_only_wheels_for
     pypi["urls"] = pypi["urls"][1:]
     with pytest.raises(SystemExit, match="no wheel of pkg==1.0"):
         lock.wheel_hashes("pkg", "1.0")
+
+
+# =========================================================================== R16: the CUDA cache in Local AppData
+def test_r16_the_roaming_cuda_cache_is_moved_once_keeping_the_kernels(tmp_path, monkeypatch):
+    roaming, local = tmp_path / "Roaming", tmp_path / "Local"
+    old = roaming / "VoxFlow" / "cuda-cache"
+    (old / "ComputeCache").mkdir(parents=True)
+    (old / "ComputeCache" / "index").write_bytes(b"kernels")
+    monkeypatch.setenv("APPDATA", str(roaming))
+    monkeypatch.setenv("CUDA_CACHE_PATH", str(local / "VoxFlow" / "cuda-cache"))
+    assert modelhub.move_roaming_cuda_cache() == "moved"
+    assert not old.exists() and (local / "VoxFlow" / "cuda-cache" / "ComputeCache" / "index").read_bytes() == b"kernels"
+    assert modelhub.move_roaming_cuda_cache() == "", "once"
+    old.mkdir(parents=True)                                      # the new one exists already: the old one goes
+    assert modelhub.move_roaming_cuda_cache() == "removed" and not old.exists()
+    old.mkdir(parents=True)
+    monkeypatch.setenv("CUDA_CACHE_PATH", str(old))             # a setting that points there: left alone
+    assert modelhub.move_roaming_cuda_cache() == "" and old.exists()
+    monkeypatch.setenv("CUDA_CACHE_PATH", str(local / "elsewhere" / "cache"))
+    monkeypatch.setattr(modelhub.os, "replace", lambda a, b: (_ for _ in ()).throw(OSError(17, "other drive")))
+    assert modelhub.move_roaming_cuda_cache() == "removed" and not old.exists()
+    monkeypatch.delenv("APPDATA")
+    assert modelhub.move_roaming_cuda_cache() == ""
+
+
+def test_r16_the_app_moves_it_before_the_models_load(qapp, clean_process_state, data_dir, monkeypatch):
+    calls = []
+    monkeypatch.setattr(modelhub, "move_roaming_cuda_cache", lambda: calls.append("moved") or "")
+    real_init = ctl_mod.Controller.__init__
+    monkeypatch.setattr(ctl_mod.Controller, "__init__",
+                        lambda self, *a, **k: calls.append("controller") or real_init(self, *a, **k))
+    quit_after(200)
+    assert app.run_app(fake=True, no_hook=True) == 0
+    assert calls == ["moved", "controller"]
+    iss = (ROOT / "packaging" / "voxflow.iss").read_text(encoding="utf-8")
+    assert r'Type: filesandordirs; Name: "{localappdata}\VoxFlow\cuda-cache"' in iss
+
+
+# =========================================================================== R12 / R13: installer and uninstaller
+def test_r12_voxflow_quit_closes_a_running_copy_the_normal_way(qapp, clean_process_state, data_dir, monkeypatch):
+    import subprocess
+    # the child names the channel the real way; with this test's own data folder in it, that name is this test's
+    monkeypatch.setattr(app, "_instance_name", _REAL_INSTANCE_NAME)
+    from PySide6.QtCore import QTimer
+    child = {}
+
+    def ask():
+        child["p"] = subprocess.Popen([sys.executable, "-m", "voxflow", "--quit"], cwd=ROOT,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    QTimer.singleShot(300, ask)
+    quit_after(20000)                                               # safety net only
+    assert app.run_app(fake=True, no_hook=True) == 0
+    _out, err = child["p"].communicate(timeout=20)
+    assert child["p"].returncode == 0, err
+    log_text = (data_dir / "logs" / "voxflow.log").read_text(encoding="utf-8")
+    assert "asked to quit by another process" in log_text and "VoxFlow stopped (exit code 0)" in log_text
+
+
+def test_r12_quit_without_a_running_copy_and_with_one_that_does_not_answer(data_dir, monkeypatch):
+    from PySide6.QtCore import QLockFile
+    assert app.request_quit(0.2) == 0                               # nothing running
+    lock = QLockFile(str(data_dir / "voxflow.lock"))
+    assert lock.tryLock(100)
+    try:
+        assert app.request_quit(0.3) == 1, "an old version ignores the request: the caller ends it instead"
+    finally:
+        lock.unlock()
+    monkeypatch.setattr(app.cfgmod, "app_dir", lambda: (_ for _ in ()).throw(FileNotFoundError(3, "no drive")))
+    assert app.request_quit(0.2) == 0
+
+
+def test_r12_main_routes_quit_before_anything_else(monkeypatch):
+    from voxflow import __main__ as main_mod, system
+    monkeypatch.setattr(app, "request_quit", lambda: 7)
+    monkeypatch.setattr(system, "update_setup_running", lambda: pytest.fail("--quit must work while Setup runs"))
+    assert main_mod.main(["--quit"]) == 7
+
+
+def test_r12_r13_the_installer_asks_voxflow_to_quit_and_starts_from_an_empty_runtime_folder():
+    iss = (ROOT / "packaging" / "voxflow.iss").read_text(encoding="utf-8")
+    assert "taskkill" not in iss.lower(), "no longer every VoxFlow.exe of every copy, by force"
+    code = iss.split("\n[Code]\n", 1)[1]
+    stop = code.split("procedure StopRunningCopy;", 1)[1].split("\nend;", 1)[0]
+    assert "'--quit'" in stop and "ewWaitUntilTerminated" in stop
+    assert "StartsWith(''' + Folder + '''" in stop and "StringChangeEx(Folder, '''', '''''', True)" in stop
+    prepare = code.split("function PrepareToInstall", 1)[1].split("\nend;", 1)[0]
+    uninstall = code.split("procedure CurUninstallStepChanged", 1)[1]
+    assert "StopRunningCopy;" in prepare and "StopRunningCopy;" in uninstall
+    deletes = iss.split("\n[InstallDelete]\n", 1)[1].split("\n[", 1)[0]
+    assert [ln for ln in deletes.splitlines() if ln and not ln.startswith(";")] == [
+        r'Type: filesandordirs; Name: "{app}\_internal"']
+    assert iss.index("[InstallDelete]") < iss.index("[Files]")
