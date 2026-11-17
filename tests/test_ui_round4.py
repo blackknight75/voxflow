@@ -590,7 +590,7 @@ def test_tag_explains_itself_on_hover_and_to_screen_readers(make_ui):
     card = lst._card_rect(next(i for i, it in enumerate(lst.items) if it["id"] == made["plain"]["id"]))
     ui.qtbot.mouseMove(lst, QPoint(card.left() + 30, card.bottom() - 12))
     QApplication.processEvents()
-    assert lst.toolTip() == "", "the explanation goes away with the pointer"
+    assert lst.toolTip() == lst.KEYS_HELP, "the explanation goes away with the pointer"
 
     lst.setFocus()
     index = next(i for i, it in enumerate(lst.items) if it["id"] == made["basic"]["id"])
@@ -599,9 +599,9 @@ def test_tag_explains_itself_on_hover_and_to_screen_readers(make_ui):
         if lst.selected() and lst.selected()["id"] == made["basic"]["id"]:
             break
     assert lst.selected()["id"] == made["basic"]["id"]
-    assert "basic clean-up only" in lst.accessibleDescription()
+    assert "basic clean-up only" in lst.a11y_value()
     ui.qtbot.keyClick(lst, Qt.Key.Key_Down if index + 1 < len(lst.items) else Qt.Key.Key_Up)
-    assert "basic clean-up only" not in lst.accessibleDescription()
+    assert "basic clean-up only" not in lst.a11y_value()
 
 
 def test_tag_hover_does_not_break_the_row_actions(make_ui):

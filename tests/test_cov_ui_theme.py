@@ -122,3 +122,104 @@ def test_colour_helpers():
     assert T.ease_out(-1) == 0 and T.ease_out(2) == 1 and 0.5 < T.ease_out(0.5) < 1
     assert T.smooth(0.0, 1.0, 0.0, 10) == 0.0 and T.smooth(0.0, 1.0, 100.0, 10) == pytest.approx(1.0)
     assert 'QLineEdit[invalid="true"]' in T.qss() and T.css(T.RED) in T.qss()
+
+
+# =========================================================================== QA UI-14: Windows accessibility settings
+class _Access:
+    def __init__(self, motion=Qt.MotionPreference.NoPreference, contrast=Qt.ContrastPreference.NoPreference):
+        self.motion, self.contrast = motion, contrast
+        self.connected: list = []
+        self.motionPreferenceChanged = self.contrastPreferenceChanged = self
+
+    def motionPreference(self):
+        return self.motion
+
+    def contrastPreference(self):
+        return self.contrast
+
+    def connect(self, slot):
+        self.connected.append(slot)
+
+
+class _NewHints(_Hints):
+    def __init__(self, scheme, access):
+        super().__init__(scheme)
+        self._access = access
+
+    def accessibility(self):
+        return self._access
+
+
+def _new_app(monkeypatch, access, platform="offscreen", palette=None):
+    from PySide6.QtGui import QPalette
+    hints = _NewHints(Qt.ColorScheme.Dark, access)
+    app = _fake_app(monkeypatch, hints)
+    app.platformName = staticmethod(lambda: platform)
+    app.palette = staticmethod(lambda: palette or QPalette())
+    app.applicationStateChanged = hints
+    return app, hints
+
+
+def test_ui14_a_windows_contrast_theme_replaces_the_palette(monkeypatch):
+    from PySide6.QtGui import QColor, QPalette
+    pal = QPalette()
+    role = QPalette.ColorRole
+    for r, c in ((role.Window, QColor(0, 0, 0)), (role.WindowText, QColor(255, 255, 255)),
+                 (role.Highlight, QColor(26, 235, 255)), (role.HighlightedText, QColor(0, 0, 0))):
+        pal.setColor(r, c)
+    access = _Access(contrast=Qt.ContrastPreference.HighContrast)
+    _new_app(monkeypatch, access, palette=pal)
+    seen = Signals(changed=T.bus().changed)
+    T.apply_theme("light")
+    assert T.HIGH_CONTRAST and T.RESOLVED == "dark", "the contrast theme wins over the app's own choice"
+    assert T.PANEL == T.BG0 == QColor(0, 0, 0) and T.TEXT == T.TEXT_DIM == T.STROKE == QColor(255, 255, 255)
+    assert T.CYAN == T.VIOLET == QColor(26, 235, 255) and T.ON_ACCENT == QColor(0, 0, 0) and T.BLOOM == 0
+    assert T.SCRIM.alpha() == 110 and seen.changed
+    pal.setColor(role.Window, QColor(255, 255, 255))
+    T.apply_theme("dark")
+    assert T.RESOLVED == "light", "a white contrast theme counts as light"
+    access.contrast = Qt.ContrastPreference.NoPreference
+    T._on_system_prefs()                                       # Windows switched the contrast theme off
+    assert not T.HIGH_CONTRAST and T.TEXT == T.DARK.TEXT
+
+
+def test_ui14_windows_reduced_motion_is_followed_and_the_switch_cannot_undo_it(monkeypatch):
+    access = _Access(motion=Qt.MotionPreference.ReducedMotion)
+    _, hints = _new_app(monkeypatch, access)
+    monkeypatch.setattr(T, "_hooked_system", False)
+    T.apply_theme("dark", False)
+    assert T.REDUCED_MOTION and T.dur(200) == 0
+    assert hints.connected == [T._on_system_scheme, T._on_system_prefs]
+    assert access.connected == [T._on_system_prefs, T._on_system_prefs]
+    T.set_reduced_motion(False)
+    assert T.REDUCED_MOTION, "Windows' setting keeps motion reduced"
+    seen = Signals(changed=T.bus().changed)
+    T._on_system_prefs()                                       # nothing changed: nothing redrawn
+    assert seen.changed == []
+    access.motion = Qt.MotionPreference.NoPreference
+    T._on_system_prefs()
+    assert not T.REDUCED_MOTION and len(seen.changed) == 1
+    T.set_reduced_motion(True)
+    assert T.REDUCED_MOTION
+
+
+@pytest.mark.parametrize("value, ok, reduced", [(0, 1, True), (1, 1, False), (0, 0, False)])
+def test_ui14_the_animation_effects_setting_is_read_on_the_real_desktop(monkeypatch, value, ok, reduced):
+    calls: list = []
+
+    class User32:
+        @staticmethod
+        def SystemParametersInfoW(action, _p, ref, _w):
+            calls.append(action)
+            ref._obj.value = value
+            return ok
+
+    monkeypatch.setattr(T, "_user32", lambda: User32)
+    _new_app(monkeypatch, _Access(), platform="windows")
+    T.apply_theme("dark", False)
+    assert T.REDUCED_MOTION is reduced and calls == [T.SPI_GETCLIENTAREAANIMATION]
+
+
+def test_ui14_user32_is_a_private_copy():
+    import ctypes
+    assert isinstance(T._user32(), ctypes.WinDLL)

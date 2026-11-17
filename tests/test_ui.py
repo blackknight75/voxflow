@@ -960,7 +960,7 @@ def test_support_buttons_and_about(ui, monkeypatch):
     ui.find("settings_open_logs").click()
     assert opened == [ui.rig.data_dir, ui.rig.data_dir / "logs"]
     about = " ".join(w.text() for w in ui.find("settings_about").findChildren(QWidget) if hasattr(w, "text") and callable(w.text))
-    assert f"VoxFlow {ui.c.version}" in about and "No cloud" in about and "never leaves this PC" in about
+    assert "About VoxFlow" in about and "No cloud" in about and "never leaves this PC" in about
     ui.find("settings_onboarding").click()
     assert ui.shell.onboarding is not None and ui.shell.onboarding.isVisible()
     ui.shell.onboarding.skip()
@@ -1069,7 +1069,7 @@ def test_onboarding_can_be_skipped_every_way_and_never_returns(make_ui, how):
     ob.finished.connect(done.append)
     ob.btn_next.click()                                        # leave from the mic step: monitor must be released
     {"skip": ob.btn_skip.click, "close_button": ob.btn_close.click,
-     "escape": lambda: ui.qtbot.keyClick(ob, Qt.Key.Key_Escape), "window_close": ob.close}[how]()
+     "escape": lambda: [ui.qtbot.keyClick(ob, Qt.Key.Key_Escape) for _ in "12"], "window_close": ob.close}[how]()
     assert done == [False] and ui.c.get("onboarding_done") is True and not ui.c._monitor
     assert ui.shell.onboarding is None
     saved = json.loads((ui.rig.data_dir / "config.json").read_text(encoding="utf-8"))
@@ -1668,3 +1668,16 @@ def test_style_page_describes_what_the_tone_pass_really_does(ui):
                 for name in ("Sam", "Friday", "Thursday"):
                     assert (name in shown) == (name in sample)
     ui.render()
+
+
+def test_ui09_a_stray_delete_key_in_history_is_undone_from_the_toast(make_ui):
+    ui = make_ui(prepare=lambda rig: seed(rig, 3))
+    lst = ui.page("history").list
+    lst.setFocus()
+    ui.qtbot.keyClick(lst, Qt.Key.Key_Down)
+    selected = lst.selected()
+    ui.qtbot.keyClick(lst, Qt.Key.Key_Delete)
+    ui.wait(lambda: ui.c.history.count() == 2)
+    ui.toast_action("Transcript deleted.")
+    ui.wait(lambda: ui.c.history.count() == 3)
+    assert ui.c.history.get(selected["id"])["text"] == selected["text"]

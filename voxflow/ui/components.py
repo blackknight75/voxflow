@@ -9,9 +9,10 @@ from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, QSize, Qt, QTimer, QV
 from PySide6.QtGui import QColor, QFontMetricsF, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 
+from . import a11y
 from . import theme as T
 from .icons import paint_icon
-from .widgets import Button, Caption, IconButton, Label, Spinner, _Hover, _KBD_REASONS, painter
+from .widgets import Button, Caption, IconButton, Label, Spinner, _Hover, _KBD_REASONS, painter, wrap_lines
 
 
 # --------------------------------------------------------------------------- formatting helpers
@@ -111,6 +112,10 @@ class Row(QWidget):
         lay.addLayout(col, 1)
         if control is not None:
             lay.addWidget(control, 0, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
+            context = f"{title}. {sub}" if sub else title     # "Open" alone means nothing to a screen-reader user
+            for b in [control, *control.findChildren(Button)]:
+                if isinstance(b, Button) and b._auto_name and not b.accessibleDescription():
+                    b.setAccessibleDescription(context)
             if not control.accessibleName():
                 control.setAccessibleName(title)
             if sub and not control.accessibleDescription():
@@ -448,19 +453,36 @@ class EmptyState(QWidget):
 
 
 class StatusChip(QWidget):
-    """Status dot (a spinner while something is loading) + title + detail, in the sidebar footer."""
+    """Status dot (a spinner while something is loading) + title + up to three lines of detail, in the sidebar
+    footer. It takes keyboard focus (a screen reader then reads the whole detail) and Enter, Space or a click
+    emits ``activated`` (the window shows the full text as a toast)."""
+
+    activated = Signal()
 
     LEVEL_ROLES = {"ok": "GREEN", "demo": "GREEN", "loading": "AMBER", "warning": "AMBER", "error": "RED",
                    "paused": "TEXT_DIM"}
+    LINES, LINE_H = 3, 15
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.level, self.title, self.detail = "loading", "Starting…", ""
-        self._two_lines = False
-        self.setFixedHeight(60)          # constant: room for a two-line detail without ever resizing the window
+        self._lines: list[str] = []
+        self._kbd = False
+        self.setFixedHeight(30 + self.LINES * self.LINE_H + 1)  # constant: a three-line detail never resizes the window
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.spinner = Spinner(14, self)
         T.bus().changed.connect(self.update)
+
+    def a11y_role(self):
+        return a11y.Role.StatusBar
+
+    def a11y_value(self) -> str:
+        return self.detail
+
+    def a11y_state(self, state):
+        return state
 
     def set_status(self, status: dict) -> None:
         self.level = str(status.get("level", "ok"))
@@ -477,22 +499,39 @@ class StatusChip(QWidget):
         self._fit()
 
     def _fit(self) -> None:
-        """One line of detail when it fits, two when it does not; a single line sits vertically centred."""
-        f = T.font(T.F_CAPTION - 0.3)
-        self._two_lines = QFontMetricsF(f).horizontalAdvance(self.detail) > self.width() - 37
+        """Wrap the detail into at most three lines (the last one elided); the text block sits vertically centred."""
+        self._lines = wrap_lines(QFontMetricsF(T.font(T.F_CAPTION - 0.3)), self.detail, self.width() - 37, self.LINES)
         self.spinner.move(9, 9 + self._dy())
 
     def _dy(self) -> int:
-        return 0 if self._two_lines else 7
+        return max(0, (self.height() - 30 - self.LINE_H * len(self._lines)) // 2)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton and self.rect().contains(e.position().toPoint()):
+            self.activated.emit()
+
+    def keyPressEvent(self, e):
+        if e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            self.activated.emit()
+        else:
+            super().keyPressEvent(e)
+
+    def focusInEvent(self, e):
+        self._kbd = e.reason() in _KBD_REASONS
+        self.update()
+
+    def focusOutEvent(self, e):
+        self._kbd = False
+        self.update()
 
     def paintEvent(self, _):
         p = painter(self)
-        r = QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
+        frame = QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
         col = T.token(self.LEVEL_ROLES.get(self.level, "GREEN"))
-        p.fillPath(T.rounded(r, T.R_MD), T.alpha(col, 0.09))
+        p.fillPath(T.rounded(frame, T.R_MD), T.alpha(col, 0.09))
         p.setPen(QPen(T.alpha(col, 0.32), 1))
-        p.drawRoundedRect(r, T.R_MD, T.R_MD)
-        r = r.translated(0, self._dy())               # text block origin (the frame above is already painted)
+        p.drawRoundedRect(frame, T.R_MD, T.R_MD)
+        r = frame.translated(0, self._dy())           # text block origin (the frame above is already painted)
         if self.level != "loading":
             cx, cy = r.left() + 16, r.top() + 16
             p.setPen(Qt.PenStyle.NoPen)
@@ -507,20 +546,12 @@ class StatusChip(QWidget):
         p.drawText(QRectF(r.left() + 28, r.top() + 6, w, 20), Qt.AlignmentFlag.AlignVCenter,
                    p.fontMetrics().elidedText(self.title, Qt.TextElideMode.ElideRight, w))
         p.setPen(T.TEXT_DIM)
-        df = T.font(T.F_CAPTION - 0.3)
-        p.setFont(df)
-        if self._two_lines:
-            # second line elided by hand: Qt cannot elide the last line of wrapped text
-            words, first = self.detail.split(), ""
-            fm = QFontMetricsF(df)
-            while words and fm.horizontalAdvance((first + " " + words[0]).strip()) <= w:
-                first = (first + " " + words.pop(0)).strip()
-            p.drawText(QRectF(r.left() + 28, r.top() + 24, w, 16), Qt.AlignmentFlag.AlignVCenter, first)
-            p.drawText(QRectF(r.left() + 28, r.top() + 39, w, 16), Qt.AlignmentFlag.AlignVCenter,
-                       p.fontMetrics().elidedText(" ".join(words), Qt.TextElideMode.ElideRight, w))
-        else:
-            p.drawText(QRectF(r.left() + 28, r.top() + 24, w, 18), Qt.AlignmentFlag.AlignVCenter,
-                       p.fontMetrics().elidedText(self.detail, Qt.TextElideMode.ElideRight, w))
+        p.setFont(T.font(T.F_CAPTION - 0.3))
+        for i, line in enumerate(self._lines):
+            p.drawText(QRectF(r.left() + 28, r.top() + 24 + i * self.LINE_H, w, 16), Qt.AlignmentFlag.AlignVCenter,
+                       line)
+        if self._kbd and self.hasFocus():
+            T.paint_focus_ring(p, frame, T.R_MD)
 
 
 # --------------------------------------------------------------------------- toasts
@@ -892,6 +923,19 @@ class NavButton(_Hover):
         self.setFixedHeight(38)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
+    # a page tab, "selected", rather than a check box that is "checked" (see voxflow.ui.a11y)
+    def a11y_role(self):
+        return a11y.Role.PageTab
+
+    def a11y_value(self) -> str:
+        return ""
+
+    def a11y_state(self, state):
+        state.checkable = state.checked = False
+        state.selectable = True
+        state.selected = self.isChecked()
+        return state
+
     def set_badge(self, n: int) -> None:
         self.badge = int(n)
         self.setAccessibleDescription(f"{n} new" if n else "")
@@ -972,6 +1016,7 @@ class TranscriptList(QWidget):
     RULES_ONLY_TIP = ("The language model was too slow for this one, so only the basic clean-up was applied. "
                       "The words are as you said them.")
     ACTIONS = (("copy", "Copy"), ("paste", "Paste again"), ("trash", "Delete"))
+    KEYS_HELP = "Up and Down choose a transcript, Enter or C copies it, P pastes it again, Delete removes it."
 
     def __init__(self, parent=None, group_by_day: bool = True, show_delete: bool = True):
         super().__init__(parent)
@@ -990,6 +1035,8 @@ class TranscriptList(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAccessibleName("Transcripts")
+        self.setAccessibleDescription(self.KEYS_HELP)
+        self.setToolTip(self.KEYS_HELP)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self._tick = QTimer(self)
         self._tick.setInterval(120)
@@ -1015,12 +1062,25 @@ class TranscriptList(QWidget):
     def selected(self) -> dict | None:
         return self.items[self._sel] if 0 <= self._sel < len(self.items) else None
 
-    def _select(self, index: int) -> None:
-        self._sel = index
+    # a list whose value is the chosen transcript (see voxflow.ui.a11y)
+    def a11y_role(self):
+        return a11y.Role.List
+
+    def a11y_value(self) -> str:
         it = self.selected()
-        self.setAccessibleDescription(
-            f"{day_label(it.get('ts', 0))} {clock_label(it.get('ts', 0))}"
-            f"{', basic clean-up only' if it.get('rules_only') else ''}: {self.body_text(it)}" if it else "")
+        return (f"{day_label(it.get('ts', 0))} {clock_label(it.get('ts', 0))}"
+                f"{', basic clean-up only' if it.get('rules_only') else ''}: {self.body_text(it)}") if it else ""
+
+    def a11y_state(self, state):
+        return state
+
+    def _select(self, index: int) -> None:
+        changed = index != self._sel
+        self._sel = index
+        if changed and self.hasFocus():       # focus stays on the list, so say the new entry out loud
+            value = self.a11y_value()
+            a11y.value_changed(self, value)
+            a11y.announce(self, f"{value}. {index + 1} of {len(self.items)}")
         self.update()
 
     # ---- layout
@@ -1097,7 +1157,7 @@ class TranscriptList(QWidget):
         pos = e.position().toPoint()
         hit = self._hit(pos)
         on_tag = hit[0] >= 0 and hit[1] < 0 and self._tags.get(hit[0]) is not None and self._tags[hit[0]].contains(pos)
-        tip = self.actions[hit[1]][1] if hit[1] >= 0 else (self.RULES_ONLY_TIP if on_tag else "")
+        tip = self.actions[hit[1]][1] if hit[1] >= 0 else (self.RULES_ONLY_TIP if on_tag else self.KEYS_HELP)
         if tip != self.toolTip():
             self.setToolTip(tip)
         if hit != self._hover:

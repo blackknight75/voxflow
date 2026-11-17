@@ -657,3 +657,11 @@ def test_sync_status_messages(ctl, tmp_path):
     ctl.sync_now()
     assert len(seen.sync) == n + 1 and seen.sync[-1][0]["state"] == "idle" and seen.sync[-1][0]["error"] == ""
     assert seen.sync[-1][0]["last_sync"] > 1234.5
+
+
+def test_ui01_the_preview_controller_shows_a_timed_pause(ctl):
+    ctl.set_paused(True, for_s=60)
+    assert ctl.status()["title"].startswith("Paused until ") and ctl.paused_until is not None
+    ctl.set_paused(True)
+    assert ctl.status()["title"] == "Paused" and ctl.paused_until is None
+    ctl.set_paused(False)

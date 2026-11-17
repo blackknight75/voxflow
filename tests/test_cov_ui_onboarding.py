@@ -106,7 +106,7 @@ def test_every_way_out_marks_setup_as_done(make_guide, qtbot, how):
     qtbot.keyClick(guide, Qt.Key.Key_A)                        # any other key is not a way out
     assert guide.isVisible()
     {"skip_button": guide.btn_skip.click, "close_button": guide.btn_close.click,
-     "escape": lambda: qtbot.keyClick(guide, Qt.Key.Key_Escape), "window_close": guide.close}[how]()
+     "escape": lambda: [qtbot.keyClick(guide, Qt.Key.Key_Escape) for _ in "12"], "window_close": guide.close}[how]()
     assert seen.finished == [(False,)] and not guide.isVisible() and c.get("onboarding_done") is True
     assert not guide._poll.isActive() and not c._monitor, "the microphone is released on the way out"
 
@@ -404,3 +404,78 @@ def test_the_last_step_lists_only_the_hotkeys_that_are_set(make_guide):
     assert guide._tips_box.count() == 2
     assert tips() == ["Dictate", "Teach it your words"], "the old tips are replaced, not added to"
     assert guide.grab()
+
+
+# =========================================================================== QA-ui fixes
+class _SmallScreen:
+    """A work area shorter than the guide: 1920x1080 at 225 % leaves 853 x 432 logical px."""
+
+    def __init__(self, w=853, h=432):
+        from PySide6.QtCore import QRect
+        self.rect = QRect(0, 0, w, h)
+
+    def availableGeometry(self):
+        return self.rect
+
+
+def test_ui02_the_guide_fits_a_small_screen_and_its_steps_scroll(make_guide, monkeypatch):
+    small = _SmallScreen()
+    monkeypatch.setattr(ob_mod.QGuiApplication, "screenAt", staticmethod(lambda _p: small))
+    guide, _c = make_guide(show=False)
+    guide.show()
+    QApplication.processEvents()
+    m = guide.M
+    assert guide.height() == 432 + 2 * m and guide.width() == guide.W + 2 * m
+    panel_top, panel_bottom = guide.y() + m, guide.y() + guide.height() - m
+    assert panel_top >= 0 and panel_bottom <= 432, "Continue and Skip stay on the screen"
+    step(guide, "hotkey")
+    assert isinstance(guide.stack.currentWidget(), ob_mod.ScrollArea)
+    assert guide.btn_next.isVisible() and guide.btn_next.mapTo(guide, QPoint(0, 0)).y() < panel_bottom - guide.y()
+
+
+def test_ui02_on_a_roomy_screen_the_guide_keeps_its_size(make_guide):
+    guide, _c = make_guide()
+    assert (guide.width(), guide.height()) == (guide.W + 2 * guide.M, guide.H + 2 * guide.M)
+
+
+def test_ui13_esc_in_the_middle_of_setup_asks_first(make_guide, qtbot):
+    guide, c = make_guide()
+    seen = Signals(finished=guide.finished)
+    step(guide, "hotkey")
+    qtbot.keyClick(guide, Qt.Key.Key_Escape)                   # e.g. a late Esc meant for a recording
+    assert guide.isVisible() and seen.finished == [] and guide.btn_skip.text() == "Press Esc again to skip"
+    guide._esc.timeout.emit()                                  # the question times out
+    guide._esc.stop()
+    assert guide.btn_skip.text() == "Skip setup"
+    qtbot.keyClick(guide, Qt.Key.Key_Escape)
+    step(guide, "mic")                                         # moving on forgets the question
+    assert guide.btn_skip.text() == "Skip setup" and not guide._esc.isActive()
+    qtbot.keyClick(guide, Qt.Key.Key_Escape)
+    qtbot.keyClick(guide, Qt.Key.Key_Escape)
+    assert seen.finished == [(False,)] and c.get("onboarding_done") is True
+
+
+@pytest.mark.parametrize("name", ["welcome", "done"])
+def test_ui13_esc_on_the_first_or_last_step_closes_at_once(make_guide, qtbot, name):
+    guide, _c = make_guide()
+    seen = Signals(finished=guide.finished)
+    step(guide, name)
+    qtbot.keyClick(guide, Qt.Key.Key_Escape)
+    assert seen.finished == [(False,)] and not guide.isVisible()
+
+
+def test_ui15_the_mic_help_goes_once_the_microphone_is_heard(make_guide):
+    guide, c = make_guide()
+    step(guide, "mic")
+    assert guide.mic_help.isVisible()
+    c.level = lambda: 0.5
+    for _ in range(4):
+        guide._poll_level()
+    assert guide.mic_status.text().startswith("Loud and clear") and not guide.mic_help.isVisible()
+    guide._pick_mic(None)                                      # another microphone: the help is back
+    assert guide.mic_help.isVisible()
+    for _ in range(4):
+        guide._poll_level()
+    step(guide, "welcome")
+    step(guide, "mic")
+    assert guide.mic_help.isVisible(), "coming back to the step starts over"

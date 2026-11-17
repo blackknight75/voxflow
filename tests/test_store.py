@@ -1002,3 +1002,16 @@ def test_styles_app_overrides(sty):
             sty.set_app_category(bad, "work")
     with pytest.raises(ValueError, match="not a style category"):
         sty.set_app_category("x.exe", "boss")
+
+
+def test_ui09_history_restore_puts_a_deleted_entry_back_once(h):
+    a = h.add("one", raw="won", ts=NOW - 2, app_exe="notepad.exe")
+    h.add("two", ts=NOW - 1)
+    assert h.delete(a["id"])
+    assert h.restore(a) is True
+    back = h.get(a["id"])
+    assert back["text"] == "one" and back["raw"] == "won" and back["ts"] == a["ts"] and back["app_exe"] == "notepad.exe"
+    assert [e["text"] for e in h.list()] == ["two", "one"], "back in its place by time"
+    assert h.restore(a) is False, "already there: no duplicate"
+    assert h.restore({"id": "x"}) is False, "not a transcript"
+    assert History(h.path).get(a["id"]) is not None, "written to disk"

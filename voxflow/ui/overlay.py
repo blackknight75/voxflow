@@ -19,6 +19,7 @@ from PySide6.QtGui import (QColor, QConicalGradient, QCursor, QFontMetricsF, QGu
                            QPainterPath, QPen, QPixmap, QRadialGradient, QRegion)
 from PySide6.QtWidgets import QWidget
 
+from . import a11y
 from . import theme as T
 from .icons import paint_icon
 
@@ -161,6 +162,7 @@ class OverlayPill(QWidget):
         if state == "locked" and self.state != "locked":
             self._lock_t = now
         was_listening = self.state in ("listening", "locked")
+        prev = (self.state, self.text)
         if state != self.state:
             self._state_t = now
             if state == "error":
@@ -172,10 +174,22 @@ class OverlayPill(QWidget):
             if (self.state == "idle" and state != "idle") or (state == "listening" and not was_listening):
                 self._place()                      # every new utterance appears on the screen in use at that moment
         self.state, self.text, self.progress = state, text, progress
+        self._announce(prev)
         if state in _TEXT_STATES:
             shown = self._display_text()
             self._text_w = min(MAX_TEXT_W, QFontMetricsF(self._font).horizontalAdvance(shown))
         self._kick()
+
+    _SPOKEN = {"done": "Pasted", "error": "Something went wrong", "loading": "Getting ready…"}
+
+    def _announce(self, prev: tuple[str, str]) -> None:
+        """The bar never has focus, so a screen reader hears its results only as announcements. Not while
+        listening: speech from the speakers would end up in the dictation. Download progress is said once."""
+        if self.state not in self._SPOKEN or prev == (self.state, self.text) or (
+                self.state == "loading" and prev[0] == "loading"):
+            return
+        text = (self.text or self._SPOKEN[self.state]).replace(HINT_SEP, ". ")
+        a11y.announce(self, text, assertive=self.state == "error")
 
     def set_locked(self, locked: bool) -> None:
         """Hands-free lock indicator; only meaningful while listening."""

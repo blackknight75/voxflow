@@ -284,3 +284,43 @@ def test_a_window_that_was_never_shown_has_nothing_to_drag(qapp, native):
         c.deleteLater()
         flush()
         T.apply_theme("dark", False)
+
+
+# =========================================================================== QA-ui fixes
+class _Screen:
+    def __init__(self, w, h):
+        from PySide6.QtCore import QRect
+        self.rect = QRect(0, 0, w, h)
+
+    def availableGeometry(self):
+        return self.rect
+
+
+def test_ui02_the_window_fits_a_small_work_area(make_demo, monkeypatch):
+    from voxflow.ui import overlay as overlay_mod
+    from voxflow.ui import window as window_mod
+    small = _Screen(960, 492)                                  # 1920x1080 at 200 %
+    demo = make_demo(show_window=False)
+    win, m = demo.win, demo.win.M
+    monkeypatch.setattr(window_mod.QGuiApplication, "screens", staticmethod(lambda: [small]))
+    monkeypatch.setattr(overlay_mod, "active_screen", lambda: small)
+    win.show()
+    QApplication.processEvents()
+    assert win.minimumHeight() == 492 + 2 * m and win.minimumWidth() == 800 + 2 * m
+    assert win.y() + m >= 0 and win.y() + win.height() - m <= 492, "the bottom of the window is on the screen"
+    win._fit_minimum(_Screen(600, 300))                        # tinier than the floor: the floor holds
+    assert (win.minimumWidth(), win.minimumHeight()) == (640 + 2 * m, 460 + 2 * m)
+    win._fit_minimum(_Screen(2560, 1400))                      # moved to a big monitor: the usual minimum
+    assert (win.minimumWidth(), win.minimumHeight()) == (800 + 2 * m, 580 + 2 * m)
+
+
+def test_ui02_a_saved_size_is_fitted_to_the_small_screen_it_is_on(make_demo, monkeypatch):
+    from voxflow.ui import window as window_mod
+    small = _Screen(1097, 569)                                 # 1920x1080 at 175 %
+    demo = make_demo(show_window=False, ui_state={"page": "home", "maximized": False,
+                                                  "window": [0, 0, 1108, 748]})
+    monkeypatch.setattr(window_mod.QGuiApplication, "screens", staticmethod(lambda: [small]))
+    demo.win.show()
+    QApplication.processEvents()
+    m = demo.win.M
+    assert demo.win.minimumHeight() == 569 + 2 * m and demo.win.height() == 569 + 2 * m

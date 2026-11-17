@@ -127,7 +127,7 @@ class UpdatesSection(Section):
         al.addWidget(self.btn_check)
         self.bar = ProgressBar()
         self.bar.hide()
-        self.status_row = self.add(Row(f"VoxFlow {ctl.version}", "", actions, icon="info", below=self.bar))
+        self.status_row = self.add(Row(f"Version {ctl.version}", "", actions, icon="info", below=self.bar))
         self.status_row.setObjectName("settings_update_status")
         for key in ("update_mode", "update_install_when", "update_time"):
             page._sync[key] = lambda _v: self.refresh()

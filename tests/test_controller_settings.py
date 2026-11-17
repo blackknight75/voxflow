@@ -733,3 +733,29 @@ def test_helper_texts():
     assert ctl_mod._backend_text("") == "Ready." and ctl_mod._backend_text("rules") == "Basic rules only."
     assert ctl_mod.STATES == ("idle", "listening", "locked", "processing", "done", "error")
     assert ctl_mod.MODES == ("dictate", "command")
+
+
+def test_ui01_a_timed_pause_ends_by_itself_and_any_resume_cancels_it(rig, qtbot):
+    c = rig.c
+    seen = []
+    c.status_changed.connect(seen.append)
+    c.set_paused(True, for_s=0.05)
+    assert c.paused and c.paused_until is not None and not c.listener.enabled
+    at = time.strftime("%H:%M", time.localtime(c.paused_until))
+    assert c.status()["title"] == f"Paused until {at}" and at in c.status()["detail"]
+    qtbot.waitUntil(lambda: not c.paused, timeout=2000)
+    assert c.paused_until is None and c.listener.enabled and c.status()["title"] == "Ready"
+    # QA UI-01: pause for a while, resume another way, pause again: the old deadline must not un-pause it
+    c.set_paused(True, for_s=0.05)
+    c.set_paused(False)
+    c.set_paused(True)
+    qtbot.wait(200)
+    assert c.paused and c.paused_until is None and c.status()["title"] == "Paused"
+    n = len(seen)
+    c.set_paused(True, for_s=3600)                       # already paused: becoming a timed pause still tells the UI
+    assert len(seen) == n + 1 and c.status()["title"].startswith("Paused until ")
+    c.set_paused(True)                                   # ... and so does going back to an open-ended pause
+    assert len(seen) == n + 2 and c.paused_until is None and not c._unpause_timer.isActive()
+    c.set_paused(True)
+    assert len(seen) == n + 2, "nothing changed, nothing sent"
+    c.set_paused(False)

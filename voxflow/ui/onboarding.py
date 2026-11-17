@@ -14,11 +14,12 @@ from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication, QLinearGradient, QPainter, QPen, QRadialGradient
 from PySide6.QtWidgets import QHBoxLayout, QStackedWidget, QVBoxLayout, QWidget
 
+from . import a11y
 from . import theme as T
 from .components import WindowButton
 from .icons import paint_icon
-from .widgets import (Button, ChoiceButton, HotkeyRecorder, KeyCaps, Label, LevelMeter, ProgressBar, TextArea,
-                      paint_logo, painter)
+from .widgets import (Button, ChoiceButton, HotkeyRecorder, KeyCaps, Label, LevelMeter, ProgressBar, ScrollArea,
+                      TextArea, paint_logo, painter)
 
 STEPS = ("welcome", "mic", "models", "hotkey", "done")
 SLOW_LOAD_MS = 20_000          # after this long on the model step without a ready speech model, say why
@@ -119,6 +120,7 @@ class Onboarding(QWidget):
 
     M = 14
     W, H = 640, 490
+    ESC_CONFIRM_MS = 2500
 
     def __init__(self, controller):
         super().__init__(None)
@@ -149,7 +151,7 @@ class Onboarding(QWidget):
 
         self.stack = QStackedWidget()
         for build in (self._welcome, self._mic, self._models, self._hotkey, self._finish_page):
-            self.stack.addWidget(build())
+            self.stack.addWidget(ScrollArea(build()))      # a short screen scrolls the step; the footer stays put
         root.addWidget(self.stack, 1)
 
         foot = QHBoxLayout()
@@ -184,6 +186,10 @@ class Onboarding(QWidget):
         self._slow_timer.setSingleShot(True)
         self._slow_timer.setInterval(SLOW_LOAD_MS)
         self._slow_timer.timeout.connect(self._on_slow)
+        self._esc = QTimer(self)                 # a first Esc in the middle of setup only asks (see keyPressEvent)
+        self._esc.setSingleShot(True)
+        self._esc.setInterval(self.ESC_CONFIRM_MS)
+        self._esc.timeout.connect(self._disarm_esc)
         c = self.ctl
         c.state_changed.connect(self._on_state)
         c.transcript_ready.connect(self._on_transcript)
@@ -343,6 +349,7 @@ class Onboarding(QWidget):
     def go(self, index: int) -> None:
         index = max(0, min(len(STEPS) - 1, index))
         self._leave_step()
+        self._disarm_esc()
         self._slow_timer.stop()
         self.index = index
         self.stack.setCurrentIndex(index)
@@ -358,6 +365,7 @@ class Onboarding(QWidget):
             self._heard = 0
             self.mic_status.set_role("TEXT_DIM")
             self.mic_status.setText("Listening… say something.")
+            self.mic_help.show()
             self.meter.set_source(self.ctl.level)
             self._monitor(True)
             self._poll.start()
@@ -428,16 +436,28 @@ class Onboarding(QWidget):
         e.accept()
 
     def keyPressEvent(self, e):
-        if e.key() == Qt.Key.Key_Escape:
+        """Esc closes the welcome and the last step at once. In between it asks first ("Press Esc again to skip"):
+        an Esc meant for a recording that lands a moment late must not throw the whole setup away."""
+        if e.key() != Qt.Key.Key_Escape:
+            super().keyPressEvent(e)
+        elif self.index in (0, len(STEPS) - 1) or self._esc.isActive():
             self.skip()
         else:
-            super().keyPressEvent(e)
+            self._esc.start()
+            self.btn_skip.setText("Press Esc again to skip")
+            a11y.announce(self, "Press Esc again to skip setup.")
+
+    def _disarm_esc(self) -> None:
+        self._esc.stop()
+        self.btn_skip.setText("Skip setup")
 
     def showEvent(self, e):
         super().showEvent(e)
         screen = QGuiApplication.screenAt(self.geometry().center()) or QGuiApplication.primaryScreen()
         g = screen.availableGeometry()
-        self.move(g.center().x() - self.width() // 2, g.center().y() - self.height() // 2)
+        # on a small screen (1920x1080 at 200 %) the guide shrinks to the work area and its steps scroll
+        self.setFixedSize(min(self.W, g.width()) + 2 * self.M, min(self.H, g.height()) + 2 * self.M)
+        self.move(g.x() + (g.width() - self.width()) // 2, g.y() + (g.height() - self.height()) // 2)
 
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton and e.position().y() < self.M + 60 and self.windowHandle():
@@ -477,6 +497,7 @@ class Onboarding(QWidget):
         self._heard = 0
         self.mic_status.set_role("TEXT_DIM")
         self.mic_status.setText("Listening… say something.")
+        self.mic_help.show()
 
     def _poll_level(self) -> None:
         try:
@@ -488,6 +509,7 @@ class Onboarding(QWidget):
         if self._heard == 4:
             self.mic_status.set_role("GREEN")
             self.mic_status.setText("Loud and clear. Your microphone works.")
+            self.mic_help.hide()                 # the "no movement?" troubleshooting no longer applies
 
     def _on_state(self, state: str, mode: str, message: str) -> None:
         if STEPS[self.index] != "hotkey" or self._practised and state == "idle":

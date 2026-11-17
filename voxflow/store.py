@@ -1421,6 +1421,11 @@ class History(_JsonStore):
             self._notify("history")
         return removed
 
+    def restore(self, entry: dict) -> bool:
+        """Put back an entry that was just deleted (the Undo after History > Delete), with its id and time.
+        False when it is still there, or is not a transcript."""
+        return self.import_entries([entry]) == 1
+
     def clear(self) -> None:
         """Delete every transcript: the file is rewritten at once, then the backup copies are deleted too."""
         with self._lock:

@@ -229,6 +229,7 @@ class Controller(QObject):
         # ---- session state
         self.state, self.mode, self.message = "idle", "dictate", ""
         self.paused = False
+        self.paused_until: float | None = None         # wall-clock time a timed pause ends (set_paused(for_s=...))
         self._problems: dict[str, str] = {}            # subsystem -> human message (hook, asr, mic)
         self._warnings: dict[str, str] = {}
         self._gen = 0
@@ -286,6 +287,9 @@ class Controller(QObject):
         self._speed_timer = QTimer(self)
         self._speed_timer.setSingleShot(True)
         self._speed_timer.timeout.connect(self._speed_tick)
+        self._unpause_timer = QTimer(self)             # ends a timed pause ("Pause for 1 hour")
+        self._unpause_timer.setSingleShot(True)
+        self._unpause_timer.timeout.connect(lambda: self.set_paused(False))
 
         self._sig_hotkey.connect(self._on_hotkey)
         self._sig_speed.connect(self._on_speed)
@@ -776,6 +780,11 @@ class Controller(QObject):
                      "mic": "Microphone problem"}.get(key, "Problem")
             return {"level": "error", "title": title, "detail": self._problems[key]}
         if self.paused:
+            if self.paused_until is not None:
+                at = time.strftime("%H:%M", time.localtime(self.paused_until))
+                return {"level": "paused", "title": f"Paused until {at}",
+                        "detail": f"Dictation resumes by itself at {at}. Resume it sooner from the tray or the "
+                                  "main window."}
             return {"level": "paused", "title": "Paused", "detail": "Dictation is paused. Resume it from the tray "
                                                                     "or the main window."}
         asr = self._models["asr"]
@@ -783,8 +792,7 @@ class Controller(QObject):
             title = "Downloading speech model…" if asr["state"] == "downloading" else "Loading speech model…"
             return {"level": "loading", "title": title, "detail": asr["detail"]}
         if self.is_demo:
-            return {"level": "demo", "title": "Demo mode", "detail": "No models, microphone or shortcuts: "
-                                                                     "everything you see is simulated."}
+            return {"level": "demo", "title": "Demo mode", "detail": "Simulated: no models, mic or hotkeys."}
         if self._warnings:
             return {"level": "warning", "title": "Ready", "detail": next(iter(self._warnings.values()))}
         cleanup = self._models["cleanup"]
@@ -1464,14 +1472,20 @@ class Controller(QObject):
             self.listener.force_idle()
             self._stop_recording()
 
-    def set_paused(self, paused: bool) -> None:
-        """Pause / resume dictation. While paused the shortcuts are ignored and keys pass through untouched."""
+    def set_paused(self, paused: bool, for_s: float | None = None) -> None:
+        """Pause / resume dictation. While paused the shortcuts are ignored and keys pass through untouched.
+        ``for_s`` pauses for that many seconds and then resumes by itself. Every call replaces the previous one, so
+        resuming (or pausing again) by any route cancels a pending timed resume."""
         paused = bool(paused)
-        if paused == self.paused:
+        until = time.time() + for_s if paused and for_s else None
+        self._unpause_timer.stop()
+        if until is not None:
+            self._unpause_timer.start(max(1, round(for_s * 1000)))
+        if paused == self.paused and until is None and self.paused_until is None:
             return
-        if paused:
+        if paused and not self.paused:
             self._abort_recording()
-        self.paused = paused
+        self.paused, self.paused_until = paused, until
         self.listener.enabled = not paused
         self._emit_status()
 

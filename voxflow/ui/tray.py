@@ -1,7 +1,7 @@
 """System tray: state-aware icon, custom popup menu with status, quick toggles and the microphone picker."""
 from __future__ import annotations
 
-from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QCursor, QIcon, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import QSystemTrayIcon
 
@@ -97,9 +97,6 @@ class Tray(QObject):
         self.menu = PopupMenu(296)
         self.menu.setObjectName("tray_menu")
         self._page = "main"
-        self._resume = QTimer(self)             # "Pause for 1 hour": the UI resumes dictation when it fires
-        self._resume.setSingleShot(True)
-        self._resume.timeout.connect(self._resume_now)
         c = controller
         c.state_changed.connect(self.refresh)
         c.status_changed.connect(self.refresh)
@@ -201,19 +198,14 @@ class Tray(QObject):
             self.notify("error", str(exc))
         self._refill_if_open()
 
-    PAUSE_FOR_MS = 3_600_000
+    PAUSE_FOR_S = 3600
 
     def pause_for_hour(self) -> None:
-        self.ctl.set_paused(True)
-        self._resume.start(self.PAUSE_FOR_MS)
+        """The controller owns the deadline, so resuming by any route (sidebar, Flow bar, this menu) cancels it."""
+        self.ctl.set_paused(True, for_s=self.PAUSE_FOR_S)
         self._refill_if_open()
 
-    def _resume_now(self) -> None:
-        if self.ctl.paused:
-            self.ctl.set_paused(False)
-
     def _toggle_pause(self, on: bool) -> None:
-        self._resume.stop()                      # a manual choice always wins over the pending auto-resume
         self.ctl.set_paused(bool(on))
 
     def _mic_name(self) -> str:
