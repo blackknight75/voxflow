@@ -20,7 +20,7 @@ from typing import Any, Callable
 import numpy as np
 
 from . import gpuprobe
-from . import modelhub  # noqa: F401  (import side effect: Hugging Face telemetry is switched off)
+from . import modelhub  # also switches Hugging Face telemetry off (import side effect)
 
 log = logging.getLogger("voxflow.asr")
 
@@ -184,7 +184,7 @@ def _build_cuda(name: str):
                                             # allocate what is asked, not the next power of two: ~0.3-0.8 GB less VRAM
                                             "arena_extend_strategy": "kSameAsRequested"}),
                  "CPUExecutionProvider"]
-    return _decoder_on_cpu(onnx_asr.load_model(name, sess_options=_session_options(), providers=providers))
+    return _decoder_on_cpu(onnx_asr.load_model(name, path=modelhub.model_folder(name), sess_options=_session_options(), providers=providers))
 
 
 def _build_webgpu(name: str):
@@ -201,14 +201,14 @@ def _build_webgpu(name: str):
                                      {} if adapter.index in ("", "0") else {"adapterIndex": adapter.index})
     log.info("WebGPU adapter: %s", adapter)
     # onnx-asr always passes ``providers``: the CPU for its preprocessor, these options for the model itself
-    return _decoder_on_cpu(onnx_asr.load_model(name, providers=["CPUExecutionProvider"],
+    return _decoder_on_cpu(onnx_asr.load_model(name, path=modelhub.model_folder(name), providers=["CPUExecutionProvider"],
                                                asr_config={"sess_options": options}))
 
 
 def _build_cpu(name: str):
     import onnx_asr
 
-    return onnx_asr.load_model(name, sess_options=_session_options(), providers=["CPUExecutionProvider"])
+    return onnx_asr.load_model(name, path=modelhub.model_folder(name), sess_options=_session_options(), providers=["CPUExecutionProvider"])
 
 
 @dataclass(frozen=True)

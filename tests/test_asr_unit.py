@@ -88,6 +88,7 @@ def fake_ort(monkeypatch):
         return types.SimpleNamespace(asr=types.SimpleNamespace(_decoder_joint=decoder))
 
     onnx_asr.load_model = load_model
+    monkeypatch.setattr("voxflow.modelhub.model_folder", lambda name: None)     # never the real model cache
     monkeypatch.setitem(sys.modules, "onnxruntime", ort)
     monkeypatch.setitem(sys.modules, "onnxruntime_ep_webgpu", plugin)
     monkeypatch.setitem(sys.modules, "onnx_asr", onnx_asr)

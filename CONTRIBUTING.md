@@ -49,6 +49,11 @@ Maintainers: the manual pre-release checks and the release steps are in [docs/RE
 This runs PyInstaller and then Inno Setup 6 (`winget install --id JRSoftware.InnoSetup -e --scope user`).
 Output goes to `dist\`; `build\` and `dist\` are git-ignored.
 
+The release workflow installs `requirements-release.txt`: the requirements with every dependency pinned by the
+SHA-256 of its wheel. After changing `requirements.txt` or `requirements-dev.txt` (and installing them), run
+`.venv\Scripts\python.exe scripts\lock_requirements.py` and commit the result. The default models are pinned in
+the same way, by commit and file hash, in `voxflow/modelhub.py` (`PINNED`).
+
 ## Pull requests
 
 * Keep changes focused and add or update tests for behaviour you change.

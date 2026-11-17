@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The default models are downloaded at a fixed, reviewed version and every file is checked by size and SHA-256,
+  instead of whatever was last pushed to their repositories. Copies already downloaded stay valid. The release
+  build installs every Python package pinned by the SHA-256 of its wheel (`requirements-release.txt`).
+
 ### Fixed
 
 - A damaged install (part of VoxFlow's code missing) no longer runs the demo models in the real app, which pasted
@@ -26,6 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   It tries again once a minute, or at once when a device is plugged in, and logs each problem once.
 - A read-only `config.json` no longer freezes the window for 3.6 seconds on every settings change. The save fails
   at once and the notice says which file is read-only and where.
+- Damaged model files can be repaired from the app. When a downloaded model fails to load, VoxFlow checks its
+  files and says "The speech model files are damaged. Choose Retry to download them again." Retry downloads only
+  the damaged files. A cut-off file is noticed and replaced at the next start, and a damaged language model is
+  reported instead of quietly falling back to basic clean-up.
+- A full disk during a model download now says "There is not enough disk space", and VoxFlow checks the free space
+  before it starts (for example "Needs 2.7 GB free on C:\, 1.2 GB available"). Unfinished downloads are removed.
 - VoxFlow uses about 480 MB less memory: numpy no longer reserves a buffer for every CPU thread at start.
 
 ## [0.2.1] - 2026-11-15

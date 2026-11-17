@@ -233,6 +233,7 @@ class Controller(QObject):
             "cleanup": {"state": "pending", "detail": "Waiting to load", "progress": None, "backend": ""},
         }
         self._load_generation = 0
+        self._damaged: dict[str, tuple[str, list[str]]] = {}   # model -> (repo, files) to fetch again on Retry
 
         # ---- session state
         self.state, self.mode, self.message = "idle", "dictate", ""
@@ -854,6 +855,11 @@ class Controller(QObject):
         ``which``: model names ("asr", "cleanup"), default both."""
         names = ("asr", "cleanup") if which is None else tuple(n for n in ("asr", "cleanup") if n in which)
         self._abort_recording()
+        for name in names:                             # damaged files found by the last load: download them again
+            if name in self._damaged:
+                repo, files = self._damaged.pop(name)
+                log.info("removing damaged model files of %s: %s", repo, ", ".join(files))
+                modelhub.remove_files(repo, files)
         self._speed.cancel()                           # a measurement must not compete with the load
         if self._modules_override is None:
             old_asr, old_cleaner = self._asr, self._cleaner
@@ -903,7 +909,8 @@ class Controller(QObject):
                         asr.load()
             except Exception as exc:  # noqa: BLE001
                 log.exception("speech model failed to load")
-                report("asr", "failed", _model_failure("speech", exc))
+                report("asr", "failed", self._file_problem("asr", repo, None, cached, exc)
+                       or _model_failure("speech", exc))
                 return
             backend = str(getattr(asr, "backend", ""))
             report("asr", "ready", _backend_text(backend), None, backend)
@@ -938,7 +945,11 @@ class Controller(QObject):
                 return
             slow_hint.cancel()
             backend = str(getattr(cleaner, "backend", ""))
-            if not getattr(cleaner, "ready", True):
+            problem = (self._file_problem("cleanup", repo, filename or None, cached, cleaner.load_error)
+                       if backend == "rules" and getattr(cleaner, "load_error", None) is not None else "")
+            if problem:
+                report("cleanup", "failed", problem)
+            elif not getattr(cleaner, "ready", True):
                 report("cleanup", "failed", "The cleanup model could not be loaded, so dictation is pasted as heard.")
             elif backend == "rules":
                 report("cleanup", "degraded", "The language model is unavailable, so only basic cleanup rules "
@@ -950,6 +961,28 @@ class Controller(QObject):
             threading.Thread(target=load_asr, daemon=True, name="voxflow-load-asr").start()
         if "cleanup" in names:
             threading.Thread(target=load_cleanup, daemon=True, name="voxflow-load-cleanup").start()
+
+    _MODEL_WORDS = {"asr": "speech", "cleanup": "cleanup"}
+
+    def _file_problem(self, name: str, repo: str, filename, cached: bool, exc: BaseException) -> str:
+        """A message for a load that failed because of the model's files: the disk is full (unfinished downloads
+        are removed), or the cached files are damaged (Retry downloads them again). "" for anything else.
+        Runs on the loading thread: checking the files reads them all (about 3 s for both default models)."""
+        what = self._MODEL_WORDS[name]
+        if modelhub.disk_full(exc):
+            if repo:
+                modelhub.remove_partial(repo)
+            detail = f" {exc}." if isinstance(exc, modelhub.NotEnoughSpace) else ""
+            return (f"There is not enough disk space for the {what} model.{detail} Free some space, then choose "
+                    "Retry.")
+        if not (cached and repo):
+            return ""
+        bad = modelhub.damaged_files(repo, filename)
+        if not bad:
+            return ""
+        self._damaged[name] = (repo, bad)
+        log.warning("damaged model files in %s: %s", repo, ", ".join(bad))
+        return f"The {what} model files are damaged. Choose Retry to download them again."
 
     # ================================================================== speed check (voxflow.speedcheck)
     def _speed_models(self) -> dict:
@@ -1861,7 +1894,7 @@ def _model_failure(what: str, exc: BaseException) -> str:
     if any(k in text for k in ("connection", "timed out", "offline", "name resolution", "max retries", "network")):
         return (f"The {what} model could not be downloaded. Connect to the internet once so VoxFlow can fetch "
                 "it, then choose Retry.")
-    if "space" in text and "disk" in text:
+    if modelhub.disk_full(exc):
         return f"There is not enough disk space for the {what} model."
     return f"The {what} model could not be loaded ({_short(exc)}). Choose Retry, or see the log for details."
 

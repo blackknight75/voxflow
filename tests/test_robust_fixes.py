@@ -4,7 +4,10 @@ model files, a full disk, the CUDA cache location, crash reports and launch at l
 from __future__ import annotations
 
 import logging
+import re
+import os
 import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -713,3 +716,373 @@ def test_r6_a_save_failure_that_is_not_about_the_file_keeps_the_general_message(
                                "VoxFlow closes.")
     finally:
         rig.close()
+
+
+# =========================================================================== R7 / R10 / R18: model files
+import hashlib  # noqa: E402
+
+from voxflow import modelhub  # noqa: E402
+
+REPO = "org/tiny-onnx"
+REV = "a" * 40
+FILES = {"config.json": b'{"model_type": "x"}', "encoder-model.onnx": b"\x08\x01" * 500, "vocab.txt": b"a\nb\n"}
+
+
+def _git(data: bytes) -> str:
+    return "git:" + hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+@pytest.fixture
+def hub(tmp_path, monkeypatch):
+    """A Hugging Face cache in a temp folder with one pinned repo, fully downloaded; nothing reaches the network."""
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hf"))
+    manifest = {name: (len(data), _git(data) if name.endswith((".json", ".txt"))
+                       else hashlib.sha256(data).hexdigest()) for name, data in FILES.items()}
+    monkeypatch.setitem(modelhub.PINNED, REPO, (REV, manifest))
+    monkeypatch.setitem(modelhub.ASR_REPOS, "tiny", REPO)
+    snap = modelhub.snapshot_dir(REPO)
+    snap.mkdir(parents=True)
+    for name, data in FILES.items():
+        (snap / name).write_bytes(data)
+    fetched = []
+
+    def snapshot_download(repo, revision=None, allow_patterns=None, **kw):
+        fetched.append(("snapshot", repo, revision, tuple(allow_patterns)))
+        for name in allow_patterns:
+            (snap / name).write_bytes(FILES[name])
+        return str(snap)
+
+    def hf_hub_download(repo, filename, revision=None, local_files_only=False, **kw):
+        fetched.append(("file", repo, revision, filename, local_files_only))
+        if repo != REPO:
+            if local_files_only:
+                raise FileNotFoundError(filename)
+            return f"/downloaded/{repo}/{filename}"
+        (snap / filename).write_bytes(FILES[filename])
+        return str(snap / filename)
+
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", snapshot_download)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", hf_hub_download)
+    monkeypatch.setattr(modelhub.shutil, "disk_usage", lambda p: type("U", (), {"free": 10 ** 12})())
+    return type("Hub", (), {"snap": snap, "fetched": fetched, "manifest": manifest})
+
+
+def test_r18_the_default_models_are_pinned_to_a_commit_with_every_file_hashed():
+    for repo in (modelhub.ASR_REPOS["nemo-parakeet-tdt-0.6b-v3"], "bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF"):
+        rev, files = modelhub.PINNED[repo]
+        assert len(rev) == 40 and files
+        for size, digest in files.values():
+            assert size > 0 and len(digest.rpartition(":")[2]) in (40, 64)
+    v3 = modelhub.ASR_REPOS["nemo-parakeet-tdt-0.6b-v3"]
+    assert sum(s for s, _ in modelhub.PINNED[v3][1].values()) == modelhub.KNOWN_SIZES[v3]
+    from voxflow import cleanup
+    repo, filename = modelhub.cleanup_repo(cleanup.DEFAULT_MODEL)
+    assert filename in modelhub.PINNED[repo][1], "the default cleanup model is pinned"
+
+
+def test_r18_a_pinned_model_is_cached_only_with_every_file_at_its_size(hub):
+    assert modelhub.is_cached(REPO) and modelhub.is_cached(REPO, "vocab.txt")
+    (hub.snap / "encoder-model.onnx").write_bytes(b"cut")
+    assert not modelhub.is_cached(REPO) and modelhub.is_cached(REPO, "vocab.txt")
+    assert (hub.snap / "encoder-model.onnx").exists(), "a question never deletes anything"
+    assert not modelhub.is_cached(REPO, "other.gguf"), "a file outside the pin: the plain cache check"
+
+
+def test_r18_model_folder_fetches_the_pinned_commit_and_replaces_a_cut_off_file(hub):
+    assert modelhub.model_folder("not-pinned") is None
+    assert modelhub.model_folder("tiny") == str(hub.snap) and hub.fetched == []
+    (hub.snap / "encoder-model.onnx").write_bytes(b"cut")           # truncated: removed and fetched again
+    (hub.snap / "vocab.txt").unlink()
+    assert modelhub.model_folder("tiny") == str(hub.snap)
+    assert hub.fetched == [("snapshot", REPO, REV, ("encoder-model.onnx", "vocab.txt"))]
+    assert (hub.snap / "encoder-model.onnx").read_bytes() == FILES["encoder-model.onnx"]
+
+
+def test_r18_model_file_uses_the_pin_and_falls_back_to_main_for_other_files(hub):
+    assert modelhub.model_file(REPO, "vocab.txt") == str(hub.snap / "vocab.txt") and hub.fetched == []
+    (hub.snap / "vocab.txt").unlink()
+    assert modelhub.model_file(REPO, "vocab.txt") == str(hub.snap / "vocab.txt")
+    assert hub.fetched == [("file", REPO, REV, "vocab.txt", False)]
+    hub.fetched.clear()
+    assert modelhub.model_file("org/other", "x.gguf") == "/downloaded/org/other/x.gguf"
+    assert hub.fetched == [("file", "org/other", None, "x.gguf", True), ("file", "org/other", None, "x.gguf", False)]
+
+
+def test_r10_a_download_that_does_not_fit_is_refused_with_the_numbers(hub, monkeypatch, tmp_path):
+    monkeypatch.setattr(modelhub.shutil, "disk_usage", lambda p: type("U", (), {"free": 1_200_000_000})())
+    monkeypatch.setitem(modelhub.PINNED, REPO, (REV, dict(hub.manifest, **{"big.bin": (2_500_000_000, "0" * 64)})))
+    with pytest.raises(modelhub.NotEnoughSpace) as err:
+        modelhub.model_folder("tiny")
+    assert str(err.value) == f"Needs 2.7 GB free on {tmp_path.anchor}, 1.2 GB available" and err.value.errno == 28
+    assert hub.fetched == []
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "not" / "yet" / "there"))   # measured on the parent
+    with pytest.raises(modelhub.NotEnoughSpace):
+        modelhub.check_space(REPO, 2_000_000_000)
+    monkeypatch.setattr(modelhub.shutil, "disk_usage", lambda p: (_ for _ in ()).throw(OSError("no drive")))
+    modelhub.check_space(REPO, 2_000_000_000)                       # cannot tell: let the download try
+
+
+def test_r10_a_full_disk_is_recognised_by_its_error_code(monkeypatch):
+    assert modelhub.disk_full(OSError(28, os.strerror(28)))
+    full = OSError(0, "x")
+    full.winerror = 112
+    assert modelhub.disk_full(full)
+    try:
+        try:
+            raise OSError(28, "No space left on device")
+        except OSError as inner:
+            raise RuntimeError("download failed") from inner
+    except RuntimeError as outer:
+        assert modelhub.disk_full(outer)
+    assert modelhub.disk_full(RuntimeError("not enough space on the disk"))
+    assert not modelhub.disk_full(RuntimeError("other")) and not modelhub.disk_full(None)
+    from voxflow.controller import _model_failure
+    assert _model_failure("speech", OSError(28, os.strerror(28))) == "There is not enough disk space for the speech model."
+
+
+def test_r10_unfinished_downloads_and_damaged_files_can_be_removed(hub, monkeypatch):
+    blobs = modelhub.repo_dir(REPO) / "blobs"
+    blobs.mkdir()
+    (blobs / "abc.incomplete").write_bytes(b"x")
+    (blobs / "keep").write_bytes(b"x")
+    real_unlink = Path.unlink
+    assert modelhub.remove_partial(REPO) == 1 and sorted(p.name for p in blobs.iterdir()) == ["keep"]
+    (blobs / "locked.incomplete").write_bytes(b"x")
+    monkeypatch.setattr(Path, "unlink", lambda self, missing_ok=False: (_ for _ in ()).throw(PermissionError()))
+    assert modelhub.remove_partial(REPO) == 0
+    modelhub.remove_files(REPO, ["vocab.txt"])                      # a locked file stays; no error
+    monkeypatch.setattr(Path, "unlink", real_unlink)
+    # a snapshot entry that links to its blob: both go
+    link = hub.snap / "vocab.txt"
+    monkeypatch.setattr(Path, "is_symlink", lambda self: self == link)
+    monkeypatch.setattr(Path, "resolve", lambda self, strict=False: blobs / "keep" if self == link else self)
+    modelhub.remove_files(REPO, ["vocab.txt", "config.json"])
+    assert not link.exists() and not (blobs / "keep").exists() and not (hub.snap / "config.json").exists()
+    assert modelhub._snapshots("org/none") == []
+
+
+def test_r7_damaged_files_are_found_by_their_hash(hub, monkeypatch):
+    assert modelhub.damaged_files("") == [] and modelhub.damaged_files(REPO) == []
+    data = bytearray(FILES["encoder-model.onnx"])
+    data[10] ^= 0xFF                                                # same size, different bytes
+    (hub.snap / "encoder-model.onnx").write_bytes(bytes(data))
+    (hub.snap / "vocab.txt").write_bytes(b"a\nc\n")
+    assert modelhub.damaged_files(REPO) == ["encoder-model.onnx", "vocab.txt"]
+    assert modelhub.damaged_files(REPO, "vocab.txt") == ["vocab.txt"]
+    monkeypatch.setattr(modelhub, "file_hash", lambda path, kind: (_ for _ in ()).throw(OSError("locked")))
+    assert modelhub.damaged_files(REPO, "config.json") == ["config.json"], "a file that cannot be read is damaged"
+
+
+def test_r7_an_unpinned_model_is_checked_against_the_hubs_list(hub, monkeypatch):
+    other = "org/custom-gguf"
+    snap = modelhub.repo_dir(other) / "snapshots" / ("b" * 40)
+    snap.mkdir(parents=True)
+    (snap / "good.gguf").write_bytes(b"good")
+    (snap / "bad.gguf").write_bytes(b"bad!")
+    (snap / "local-only.txt").write_bytes(b"x")
+    (modelhub.repo_dir(other) / "snapshots" / ("c" * 40)).mkdir()      # an empty snapshot is skipped
+    asked = []
+
+    class Api:
+        def model_info(self, repo, revision=None, files_metadata=False):
+            asked.append((repo, revision, files_metadata))
+            sib = lambda name, data, lfs: type("S", (), {           # noqa: E731
+                "rfilename": name, "size": len(data), "blob_id": _git(data)[4:],
+                "lfs": type("L", (), {"sha256": hashlib.sha256(data).hexdigest()})() if lfs else None})()
+            return type("I", (), {"siblings": [sib("good.gguf", b"good", True), sib("bad.gguf", b"BAD!", True),
+                                                sib("README.md", b"r", False),
+                                                type("S", (), {"rfilename": "x", "size": None})()]})()
+
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, "HfApi", Api)
+    assert modelhub.damaged_files(other) == ["bad.gguf"]
+    assert ("org/custom-gguf", "b" * 40, True) in asked
+    assert modelhub.damaged_files(other, "good.gguf") == []
+
+    class Offline:
+        def model_info(self, *a, **k):
+            raise ConnectionError("offline")
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", Offline)
+    assert modelhub.damaged_files(other) == [], "offline: nothing can be checked, nothing is called damaged"
+
+
+# ---- the controller: messages and Retry
+class _FailingAsr:
+    backend = ""
+
+    def __init__(self, exc):
+        self.exc = exc
+
+    def load(self):
+        raise self.exc
+
+
+def _model_rig(tmp_path, qtbot, monkeypatch, asr=None, cleaner=None):
+    from tests.controller_rig import TCleaner, make_rig
+    monkeypatch.setattr(ctl_mod.modelhub, "asr_repo", lambda model: REPO)
+    monkeypatch.setattr(ctl_mod.modelhub, "cleanup_repo", lambda model: (REPO, "vocab.txt"))
+    return make_rig(tmp_path, qtbot, monkeypatch, fake=False, asr=asr, cleaner=cleaner or TCleaner())
+
+
+def test_r7_damaged_speech_model_files_are_named_and_retry_downloads_them_again(hub, tmp_path, qtbot, monkeypatch):
+    monkeypatch.setattr(ctl_mod.audiomod, "input_device_count", lambda: 1)
+    (hub.snap / "vocab.txt").write_bytes(b"a\nc\n")                 # damaged, same size: "cached"
+    rig = _model_rig(tmp_path, qtbot, monkeypatch, asr=_FailingAsr(RuntimeError("INVALID_PROTOBUF : Load model "
+                                                                                "from C:\\Users\\someone\\x")))
+    try:
+        st = rig.c.model_status("asr")
+        assert st["state"] == "failed"
+        assert st["detail"] == "The speech model files are damaged. Choose Retry to download them again."
+        rig.c.reload_models(["asr"])                                # Retry
+        assert not (hub.snap / "vocab.txt").exists(), "the damaged file is removed, so it is downloaded again"
+        rig.wait(lambda: rig.c.model_status("asr")["state"] == "failed")
+        assert "asr" not in rig.c._damaged
+    finally:
+        rig.close()
+
+
+def test_r7_a_load_failure_with_intact_files_keeps_the_usual_message(hub, tmp_path, qtbot, monkeypatch):
+    monkeypatch.setattr(ctl_mod.audiomod, "input_device_count", lambda: 1)
+    rig = _model_rig(tmp_path, qtbot, monkeypatch, asr=_FailingAsr(RuntimeError("driver")))
+    try:
+        assert rig.c.model_status("asr")["detail"].startswith("The speech model could not be loaded (RuntimeError")
+        assert rig.c._damaged == {}
+    finally:
+        rig.close()
+
+
+def test_r10_a_full_disk_while_downloading_says_so_and_cleans_up(hub, tmp_path, qtbot, monkeypatch):
+    monkeypatch.setattr(ctl_mod.audiomod, "input_device_count", lambda: 1)
+    (hub.snap / "vocab.txt").unlink()                               # not cached: a download
+    blobs = modelhub.repo_dir(REPO) / "blobs"
+    blobs.mkdir()
+    (blobs / "x.incomplete").write_bytes(b"x")
+    rig = _model_rig(tmp_path, qtbot, monkeypatch, asr=_FailingAsr(modelhub.NotEnoughSpace(3_000_000_000,
+                                                                                         1_000_000_000, "D:\\")))
+    try:
+        assert rig.c.model_status("asr")["detail"] == ("There is not enough disk space for the speech model. Needs "
+                                                       "3.0 GB free on D:\\, 1.0 GB available. Free some space, "
+                                                       "then choose Retry.")
+        assert not (blobs / "x.incomplete").exists()
+    finally:
+        rig.close()
+
+
+def test_r7_r10_cleanup_model_file_problems_are_reported_not_hidden_behind_basic_rules(hub, tmp_path, qtbot,
+                                                                                      monkeypatch):
+    from tests.controller_rig import TAsr, TCleaner
+    monkeypatch.setattr(ctl_mod.audiomod, "input_device_count", lambda: 1)
+
+    class RulesOnly(TCleaner):
+        def __init__(self, error):
+            super().__init__()
+            self.error = error
+
+        def load(self):
+            self.backend, self.ready, self.load_error = "rules", True, self.error
+
+    (hub.snap / "vocab.txt").write_bytes(b"a\nc\n")
+    rig = _model_rig(tmp_path, qtbot, monkeypatch, asr=TAsr(), cleaner=RulesOnly(RuntimeError("bad magic")))
+    try:
+        assert rig.c.model_status("cleanup") == {
+            "state": "failed", "detail": "The cleanup model files are damaged. Choose Retry to download them again.",
+            "progress": None, "backend": ""}
+    finally:
+        rig.close()
+    rig = _model_rig(tmp_path, qtbot, monkeypatch, asr=TAsr(), cleaner=RulesOnly(OSError(28, "No space")))
+    try:
+        assert rig.c.model_status("cleanup")["detail"].startswith("There is not enough disk space for the cleanup")
+    finally:
+        rig.close()
+    rig = _model_rig(tmp_path, qtbot, monkeypatch, asr=TAsr(), cleaner=RulesOnly(None))
+    try:
+        assert rig.c.model_status("cleanup")["state"] == "degraded", "no error: the usual basic-rules notice"
+    finally:
+        rig.close()
+
+
+def test_r7_the_cleaner_remembers_why_the_language_model_did_not_load(monkeypatch):
+    from voxflow import cleanup
+    c = cleanup.Cleaner(model="org/repo:file.gguf", device="cpu")
+    monkeypatch.setattr(cleanup, "_setup_dll_paths", lambda: None)
+    monkeypatch.setattr(c, "_resolve_path", lambda: (_ for _ in ()).throw(OSError(28, "No space left on device")))
+    c.load()
+    assert c.backend == "rules" and isinstance(c.load_error, OSError)
+    monkeypatch.setattr(c, "_resolve_path", lambda: "x.gguf")
+    monkeypatch.setattr(cleanup, "_select_llama_libs", lambda device: "cpu")
+    monkeypatch.setattr(c, "_build", lambda path, gpu: (_ for _ in ()).throw(ValueError("bad magic")))
+    c.load()
+    assert isinstance(c.load_error, RuntimeError) and isinstance(c.load_error.__cause__, ValueError)
+    c.use_llm = False
+    c.load()
+    assert c.load_error is None
+
+
+def test_r7_a_cut_off_file_is_damaged_without_reading_it(hub, monkeypatch):
+    (hub.snap / "encoder-model.onnx").write_bytes(b"cut")
+    monkeypatch.setattr(modelhub, "file_hash", lambda path, kind: pytest.fail("the size already tells"))
+    assert modelhub.damaged_files(REPO, "encoder-model.onnx") == ["encoder-model.onnx"]
+
+
+def test_r18_the_speech_model_is_loaded_from_the_pinned_folder(monkeypatch):
+    import types
+    from voxflow import asr
+    seen = []
+    fake = types.ModuleType("onnx_asr")
+    fake.load_model = lambda name, path=None, **kw: seen.append((name, path)) or "model"
+    monkeypatch.setitem(sys.modules, "onnx_asr", fake)
+    monkeypatch.setattr(asr.modelhub, "model_folder", lambda name: f"C:/cache/{name}")
+    asr._build_cpu("nemo-parakeet-tdt-0.6b-v3")
+    assert seen == [("nemo-parakeet-tdt-0.6b-v3", "C:/cache/nemo-parakeet-tdt-0.6b-v3")]
+
+
+# =========================================================================== R18: dependencies pinned by hash
+def _pins(path: Path) -> dict[str, str]:
+    from packaging.utils import canonicalize_name
+    out = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"^([A-Za-z0-9_.\-]+)==([^\s\;#]+)", line.strip())
+        if m:
+            out[canonicalize_name(m.group(1))] = m.group(2)
+    return out
+
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def test_r18_the_release_installs_every_dependency_pinned_by_hash():
+    lock = (ROOT / "requirements-release.txt").read_text(encoding="utf-8")
+    entries = re.split(r"\n(?=[a-z0-9])", lock.split("\n", 4)[-1].strip())
+    for entry in entries:
+        assert "--hash=sha256:" in entry, entry.splitlines()[0]
+    pinned = _pins(ROOT / "requirements-release.txt")
+    for req in ("requirements.txt", "requirements-dev.txt"):
+        for name, version in _pins(ROOT / req).items():
+            assert pinned.get(name) == version, f"{name} {version} in {req} but {pinned.get(name)} in the lock"
+    assert "--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu124" in lock
+    release = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    assert "pip install --require-hashes --only-binary=:all: -r requirements-release.txt" in release
+    assert "-r requirements-dev.txt" not in release
+
+
+def test_r18_the_lock_script_lists_the_whole_dependency_tree_and_only_wheels_for_this_platform(monkeypatch):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("lock_requirements", ROOT / "scripts" / "lock_requirements.py")
+    lock = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(lock)
+    assert "pytest" in lock.roots(ROOT / "requirements-dev.txt") and "numpy" in lock.roots(ROOT / "requirements-dev.txt")
+    tree = lock.closure(["pytest"])
+    assert {"pytest", "pluggy", "iniconfig", "packaging"} <= set(tree)
+    pypi = {"urls": [{"filename": "pkg-1.0-py3-none-any.whl", "digests": {"sha256": "a" * 64}},
+                     {"filename": "pkg-1.0-cp312-cp312-manylinux_2_17_x86_64.whl", "digests": {"sha256": "b" * 64}},
+                     {"filename": "pkg-1.0.tar.gz", "digests": {"sha256": "c" * 64}}]}
+    gh = {"assets": [{"name": "llama_cpp_python-0.3.36-py3-none-win_amd64.whl", "digest": "sha256:" + "d" * 64},
+                     {"name": "notes.txt"}]}
+    monkeypatch.setattr(lock, "_get", lambda url: gh if "github" in url else pypi)
+    assert lock.wheel_hashes("pkg", "1.0") == ["a" * 64]
+    assert lock.wheel_hashes("llama-cpp-python", "0.3.36") == ["d" * 64]
+    pypi["urls"] = pypi["urls"][1:]
+    with pytest.raises(SystemExit, match="no wheel of pkg==1.0"):
+        lock.wheel_hashes("pkg", "1.0")
