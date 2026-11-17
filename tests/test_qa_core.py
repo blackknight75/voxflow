@@ -626,3 +626,65 @@ def test_c07_the_corrected_day_is_pasted():
     c, llm = with_llm("Let's meet on Tuesday.")
     assert c.clean("let's meet on monday actually let's make it tuesday") == "Let's meet on Tuesday."
     assert c.last_info["rejected"] is False
+
+
+# =========================================================================== C-08 (and QA-robust R11): ASR on the CPU
+def _gpu_error_once(rig):
+    """The transcriber's own behaviour (voxflow.asr): a GPU error mid-dictation, rebuilt on the CPU, text returned."""
+    real = rig.asr.transcribe
+
+    def transcribe(audio):
+        rig.asr.backend = "cpu"
+        return real(audio)
+
+    rig.asr.transcribe = transcribe
+
+
+def test_c08_a_dictation_that_moved_speech_to_the_cpu_is_reported_once_with_a_way_back(rig):
+    from voxflow import controller as ctl_mod
+    actions = []
+    rig.c.notice_action.connect(lambda *a: actions.append(a))
+    assert rig.c.model_status("asr")["backend"] == "cuda"
+    _gpu_error_once(rig)
+    events = rig.dictate("please send the report")
+    rig.wait(lambda: rig.c.model_status("asr")["state"] == "degraded")
+    assert rig.injector.pasted[-1] == "Please send the report.", "the dictation itself still went through"
+    status = rig.c.model_status("asr")
+    assert (status["backend"], status["detail"]) == ("cpu", ctl_mod.ASR_CPU_FALLBACK)
+    assert rig.spy.notices() == [("warning", ctl_mod.ASR_CPU_FALLBACK)]
+    assert actions == [(ctl_mod.ASR_CPU_FALLBACK, "open_settings:models", "Open model settings")]
+    assert rig.c.status()["level"] == "warning" and rig.c.status()["detail"] == ctl_mod.ASR_CPU_FALLBACK
+    assert "Retry" in ctl_mod.ASR_CPU_FALLBACK and "slower" in ctl_mod.ASR_CPU_FALLBACK
+    events = rig.dictate("and another one")
+    assert rig.injector.pasted[-1] == "And another one.", "dictation keeps working on the CPU"
+    assert len(rig.spy.notices()) == 1, "told once, not after every dictation"
+    del rig.asr.transcribe                              # the GPU works again ...
+    rig.asr.backend = "cuda"
+    rig.c.reload_models(["asr"])                       # ... and the card's Retry loads the model on it
+    rig.wait(lambda: rig.c.model_status("asr")["state"] == "ready")
+    assert rig.c.status()["level"] != "warning" and rig.c.model_status("asr")["backend"] == "cuda"
+
+
+def test_c08_command_mode_reports_the_move_too(rig):
+    _gpu_error_once(rig)
+    rig.injector.selection = "hey bob can u send me the report"
+    rig.dictate("make this more formal", binding="command")
+    rig.wait(lambda: rig.c.model_status("asr")["state"] == "degraded")
+    assert len(rig.spy.notices()) >= 1
+
+
+def test_c08_a_transcriber_that_was_on_the_cpu_from_the_start_is_not_reported(rig):
+    rig.c._models["asr"] = dict(rig.c._models["asr"], backend="cpu")
+    rig.asr.backend = "cpu"
+    rig.dictate("please send the report")
+    assert rig.c.model_status("asr")["state"] == "ready" and rig.spy.notices() == []
+
+
+def test_c08_a_failed_transcription_still_checks(rig):
+    def broken(audio):
+        rig.asr.backend = "cpu"
+        raise RuntimeError("the CPU rebuild failed as well")
+
+    rig.asr.transcribe = broken
+    rig.dictate("please send the report")
+    rig.wait(lambda: rig.c.model_status("asr")["state"] == "degraded")
