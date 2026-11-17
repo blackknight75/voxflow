@@ -50,6 +50,9 @@ class _RealAutostart:
     def enabled(self) -> bool:
         return system.autostart_enabled()
 
+    def state(self) -> tuple[str, str]:
+        return system.autostart_state()
+
     def set(self, enabled: bool) -> None:
         system.set_autostart(enabled)
 
@@ -126,6 +129,7 @@ class Controller(QObject):
         if getattr(cfgmod, "last_load_problem", ""):
             self._startup_notices.append(("warning", cfgmod.last_load_problem))
         self._error_told = False
+        self._autostart_other = ""                      # the program another copy's Run entry starts (QA R19)
         # the previous run crashed (QA R17): say so once, with the way to the details
         self._crash_report = None if demo else system.new_crash_report(self.data_dir)
         cfg = self.config
@@ -157,6 +161,7 @@ class Controller(QObject):
         # ---- desktop back-ends
         self._autostart = autostart if autostart is not None else (
             fakes.FakeAutostart(cfg.launch_at_login) if self._fake else _RealAutostart())
+        self._check_autostart()
         if not self._fake:
             cfg.launch_at_login = self._autostart.enabled()     # the registry is the source of truth
         self._context_fn = context_fn if context_fn is not None else (
@@ -362,6 +367,9 @@ class Controller(QObject):
         for level, message in self._startup_notices:
             self.notice.emit(level, message)
         self._startup_notices = []
+        if self._autostart_other:
+            self._notice_action("warning", "Launch at login starts another copy of VoxFlow "
+                                           f"({self._autostart_other}).", "autostart_here", "Use this copy")
         if self._crash_report is not None:
             log.warning("the previous run ended with a crash: %s", self._crash_report.name)
             self._notice_action("warning", "VoxFlow closed unexpectedly last time. The details are in the log folder.",
@@ -429,6 +437,37 @@ class Controller(QObject):
             self.injector.close()
         except Exception:  # noqa: BLE001
             pass
+
+    def _check_autostart(self) -> None:
+        """The Run entry must start this copy (QA R19). One that names a program that is gone (the install folder
+        moved) is rewritten for this copy; one that starts another copy that exists is the user's call: a notice
+        with "Use this copy"."""
+        state = getattr(self._autostart, "state", None)
+        if not callable(state):
+            return
+        what, where = state()
+        if what == "missing":
+            try:
+                self._autostart.set(True)
+                log.info("launch at login pointed at a missing program; it now starts this copy")
+            except ValueError as exc:
+                log.warning("launch at login could not be repaired: %s", exc)
+        elif what == "other":
+            log.info("launch at login starts another copy: %s", where)
+            self._autostart_other = where
+
+    def autostart_here(self) -> None:
+        """"Use this copy": launch at login starts this copy of VoxFlow instead of the other one."""
+        try:
+            self._autostart.set(True)
+        except ValueError as exc:
+            self.notice.emit("error", str(exc))
+            return
+        self._autostart_other = ""
+        if not self.config.launch_at_login:
+            self.config.launch_at_login = True
+            self.config_changed.emit("launch_at_login", True)
+        self.notice.emit("success", "Launch at login now starts this copy of VoxFlow.")
 
     def recover_after_error(self) -> None:
         """For the crash handler, after an exception that did not end VoxFlow (a Qt slot, a thread): save what is

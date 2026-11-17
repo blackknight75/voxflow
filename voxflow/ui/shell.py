@@ -108,7 +108,7 @@ class Shell(QObject):
         elif action == "update":
             self.window.open_settings("updates")
             self.window.pages["settings"].open_update()
-        elif action in ("open_log_folder", "open_data_folder"):
+        elif action in ("open_log_folder", "open_data_folder", "autostart_here"):
             opener = getattr(self.ctl, action, None)
             if callable(opener):
                 opener()

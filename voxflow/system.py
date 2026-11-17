@@ -7,6 +7,7 @@ import json
 import logging
 import logging.handlers
 import os
+import re
 import sys
 import threading
 import time
@@ -93,6 +94,46 @@ def autostart_enabled() -> bool:
     except OSError as exc:
         log.warning("could not read the launch-at-login setting: %s", exc)
         return False
+
+
+_SOURCE_FOLDER = re.compile(r"sys\.path\[:0\]=\[r?'([^']+)'\]")
+
+
+def autostart_target(command: str) -> tuple[str, str]:
+    """(program, source folder or "") that a Run entry starts: the quoted (or first) word, and for a copy run from
+    source the folder named in its ``-c`` code (see ``launch_command``)."""
+    command = command.strip()
+    if command.startswith('"'):
+        exe = command[1:].split('"', 1)[0]
+    else:
+        exe = command.split(" ", 1)[0]
+    m = _SOURCE_FOLDER.search(command)
+    return exe, (m.group(1) if m else "")
+
+
+def autostart_state() -> tuple[str, str]:
+    """What the Run entry does, compared with this copy: ("off" | "this" | "missing" | "other", the program it starts).
+    "missing": the program (or source folder) it names is gone, e.g. the install folder moved. "other": it starts
+    another copy of VoxFlow that exists."""
+    if registry is None:
+        return "off", ""
+    try:
+        value = registry.get(RUN_VALUE)
+    except OSError as exc:
+        log.warning("could not read the launch-at-login setting: %s", exc)
+        return "off", ""
+    if not value:
+        return "off", ""
+    try:
+        mine = launch_command()
+    except ValueError:
+        mine = ""
+    if value.strip().lower() == mine.lower():
+        return "this", ""
+    exe, folder = autostart_target(value)
+    if not Path(exe).is_file() or (folder and not Path(folder).is_dir()):
+        return "missing", folder or exe
+    return "other", folder or exe
 
 
 def set_autostart(enabled: bool) -> None:

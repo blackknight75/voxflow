@@ -490,12 +490,14 @@ def test_r17_the_open_log_folder_button_opens_it(qapp, monkeypatch):
     from voxflow.ui import shell
     opened = []
     fake = type("Shell", (), {"ctl": type("C", (), {"open_log_folder": lambda self: opened.append("log"),
-                                                     "open_data_folder": lambda self: opened.append("data")})()})()
+                                                     "open_data_folder": lambda self: opened.append("data"),
+                                                     "autostart_here": lambda self: opened.append("here")})()})()
     shell.Shell.run_action(fake, "open_log_folder")
     shell.Shell.run_action(fake, "open_data_folder")
+    shell.Shell.run_action(fake, "autostart_here")
     fake.ctl = object()
     shell.Shell.run_action(fake, "open_log_folder")               # a controller without it: ignored
-    assert opened == ["log", "data"]
+    assert opened == ["log", "data", "here"]
 
 
 def test_r4_the_crash_callbacks_follow_the_controller_and_the_event_loop(qapp, clean_process_state, data_dir,
@@ -1181,3 +1183,96 @@ def test_r12_r13_the_installer_asks_voxflow_to_quit_and_starts_from_an_empty_run
     assert [ln for ln in deletes.splitlines() if ln and not ln.startswith(";")] == [
         r'Type: filesandordirs; Name: "{app}\_internal"']
     assert iss.index("[InstallDelete]") < iss.index("[Files]")
+
+
+# =========================================================================== R19: launch at login names this copy
+@pytest.fixture
+def run_key(monkeypatch):
+    from tests.test_system import FakeRegistry
+    from voxflow import system
+    fake = FakeRegistry()
+    monkeypatch.setattr(system, "registry", fake)
+    return fake
+
+
+def test_r19_the_run_entry_is_compared_with_this_copy(run_key, tmp_path, monkeypatch):
+    from voxflow import system
+    assert system.autostart_state() == ("off", "")
+    system.set_autostart(True)
+    assert system.autostart_state() == ("this", "")
+    other = tmp_path / "Other" / "VoxFlow.exe"
+    other.parent.mkdir()
+    other.write_text("")
+    run_key.values[system.RUN_VALUE] = f'"{other}" --autostart'
+    assert system.autostart_state() == ("other", str(other))
+    run_key.values[system.RUN_VALUE] = f'"{tmp_path / "Moved" / "VoxFlow.exe"}" --autostart'
+    assert system.autostart_state() == ("missing", str(tmp_path / "Moved" / "VoxFlow.exe"))
+    # a copy run from source: the folder in its -c code counts too
+    gone = system.launch_command(sys.executable, tmp_path / "deleted checkout")
+    run_key.values[system.RUN_VALUE] = gone
+    assert system.autostart_state() == ("missing", str(tmp_path / "deleted checkout"))
+    (tmp_path / "other checkout").mkdir()
+    run_key.values[system.RUN_VALUE] = system.launch_command(sys.executable, tmp_path / "other checkout")
+    assert system.autostart_state()[0] == "other"
+    run_key.values[system.RUN_VALUE] = "plain.exe --autostart"
+    assert system.autostart_target("plain.exe --autostart") == ("plain.exe", "")
+    monkeypatch.setattr(system, "launch_command", lambda: (_ for _ in ()).throw(ValueError("quotes")))
+    assert system.autostart_state()[0] == "missing"
+    monkeypatch.setattr(run_key, "get", lambda name: (_ for _ in ()).throw(OSError("denied")))
+    assert system.autostart_state() == ("off", "")
+    monkeypatch.setattr(system, "registry", None)
+    assert system.autostart_state() == ("off", "")
+
+
+def _autostart_controller(tmp_path, qtbot, monkeypatch):
+    from tests import controller_rig
+    patch_os(monkeypatch)
+    monkeypatch.setattr(controller_rig, "TAutostart", ctl_mod._RealAutostart)     # the registry (a fake key here)
+    return controller_rig.make_rig(tmp_path, qtbot, monkeypatch, fake=False, start=False)
+
+
+def test_r19_an_entry_for_a_moved_install_is_rewritten_for_this_copy(run_key, tmp_path, qtbot, monkeypatch):
+    from voxflow import system
+    run_key.values[system.RUN_VALUE] = f'"{tmp_path / "old place" / "VoxFlow.exe"}" --autostart'
+    rig = _autostart_controller(tmp_path, qtbot, monkeypatch)
+    try:
+        assert run_key.values[system.RUN_VALUE] == system.launch_command() and rig.c.get("launch_at_login")
+    finally:
+        rig.close()
+
+
+def test_r19_an_entry_for_another_copy_offers_use_this_copy(run_key, tmp_path, qtbot, monkeypatch):
+    from voxflow import system
+    other = tmp_path / "Scoop" / "VoxFlow.exe"
+    other.parent.mkdir()
+    other.write_text("")
+    run_key.values[system.RUN_VALUE] = f'"{other}" --autostart'
+    rig = _autostart_controller(tmp_path, qtbot, monkeypatch)
+    actions = []
+    rig.c.notice_action.connect(lambda m, a, label: actions.append((m, a, label)))
+    try:
+        rig.start()
+        assert actions == [(f"Launch at login starts another copy of VoxFlow ({other}).", "autostart_here",
+                            "Use this copy")]
+        assert run_key.values[system.RUN_VALUE] == f'"{other}" --autostart', "not changed without asking"
+        rig.c.config.launch_at_login = False
+        rig.c.autostart_here()
+        assert run_key.values[system.RUN_VALUE] == system.launch_command() and rig.c.get("launch_at_login")
+        assert ("success", "Launch at login now starts this copy of VoxFlow.") in rig.spy.notices()
+        rig.c.autostart_here()                                      # already on: still fine
+    finally:
+        rig.close()
+
+
+def test_r19_when_windows_refuses_the_user_is_told(run_key, tmp_path, qtbot, monkeypatch, caplog):
+    from voxflow import system
+    run_key.values[system.RUN_VALUE] = f'"{tmp_path / "gone.exe"}" --autostart'
+    monkeypatch.setattr(run_key, "set", lambda name, value: (_ for _ in ()).throw(PermissionError("denied")))
+    with caplog.at_level(logging.WARNING):
+        rig = _autostart_controller(tmp_path, qtbot, monkeypatch)
+    try:
+        assert "launch at login could not be repaired" in caplog.text
+        rig.c.autostart_here()
+        assert ("error", "Windows did not let VoxFlow change the launch-at-login setting.") in rig.spy.notices()
+    finally:
+        rig.close()

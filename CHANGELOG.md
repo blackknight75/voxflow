@@ -45,6 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The compiled GPU kernels (up to 1 GB) moved from Roaming to Local AppData (`%LOCALAPPDATA%\VoxFlow\cuda-cache`), so
   a roaming profile no longer copies them at every sign-in. The existing cache is moved, not rebuilt, and the
   uninstaller removes it.
+- *Launch at login* no longer shows as on when its entry starts nothing. An entry for a program that is gone
+  (the install folder moved) is rewritten for this copy. One that starts another copy of VoxFlow shows "Launch at
+  login starts another copy of VoxFlow" with *Use this copy*.
 - VoxFlow uses about 480 MB less memory: numpy no longer reserves a buffer for every CPU thread at start.
 
 ## [0.2.1] - 2026-11-15
