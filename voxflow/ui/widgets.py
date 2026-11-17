@@ -30,6 +30,19 @@ def painter(widget: QWidget) -> QPainter:
     return p
 
 
+def wrap_lines(fm: QFontMetricsF, text: str, width: float, max_lines: int) -> list[str]:
+    """``text`` word-wrapped to ``width`` in at most ``max_lines`` lines; the last line takes the rest, elided."""
+    words, lines = text.split(), []
+    while words:
+        line = words.pop(0)
+        while words and fm.horizontalAdvance(f"{line} {words[0]}") <= width:
+            line = f"{line} {words.pop(0)}"
+        lines.append(line)
+    if len(lines) > max_lines:
+        lines[max_lines - 1:] = [" ".join(lines[max_lines - 1:])]
+    return [fm.elidedText(line, Qt.TextElideMode.ElideRight, width) for line in lines]
+
+
 def bring_to_front(window: QWidget) -> None:
     """Show, raise and focus a top-level window (the offscreen test platform cannot raise; skip it there)."""
     window.show()
@@ -974,12 +987,19 @@ class PopupMenu(QWidget):
         self._rects = []
         for it in self._items:
             h = self.ROW_H.get(it.get("kind"), self.ROW_H["info"])
+            if it.get("kind") == "status" and len(self._status_lines(it)) > 1:
+                h += self.STATUS_LINE_H                 # a long status detail gets a second line
             self._rects.append(QRect(m, y, self._w - 2 * m, h))
             y += h
         self._content_h = y + m
         cap = self._max_h or self._content_h
         self.setFixedSize(self._w, min(self._content_h, cap))
         self.update()
+
+    STATUS_LINE_H = 16
+
+    def _status_lines(self, it: dict) -> list[str]:
+        return wrap_lines(QFontMetricsF(T.font(T.F_CAPTION)), it.get("sub", ""), self._w - 2 * self._margin - 36, 2)
 
     def _fit_screen(self, pos: QPoint):
         screen = QGuiApplication.screenAt(pos) or QGuiApplication.primaryScreen()
@@ -1188,9 +1208,9 @@ class PopupMenu(QWidget):
                        fm.elidedText(it["text"], Qt.TextElideMode.ElideRight, w))
             p.setPen(T.TEXT_DIM)
             p.setFont(T.font(T.F_CAPTION))
-            fm = p.fontMetrics()
-            p.drawText(QRectF(r.left() + 32, r.top() + 25, w, 18), Qt.AlignmentFlag.AlignVCenter,
-                       fm.elidedText(it.get("sub", ""), Qt.TextElideMode.ElideRight, w))
+            for i, line in enumerate(self._status_lines(it)):
+                p.drawText(QRectF(r.left() + 32, r.top() + 25 + i * self.STATUS_LINE_H, w, 18),
+                           Qt.AlignmentFlag.AlignVCenter, line)
             return
         if k == "info":
             p.setPen(T.TEXT_DIM)

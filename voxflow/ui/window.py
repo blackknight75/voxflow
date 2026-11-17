@@ -124,6 +124,7 @@ class MainWindow(QWidget):
         sl.addSpacing(4)
         self.status = StatusChip()
         self.status.setObjectName("status_chip")
+        self.status.activated.connect(self._show_status)
         sl.addWidget(self.status)
         body.addWidget(side)
 
@@ -249,6 +250,12 @@ class MainWindow(QWidget):
         self.btn_pause.icon_name = "play" if paused else "pause"
         self.btn_pause.setAccessibleName(self.btn_pause.text())
         self.btn_pause.update()
+
+    def _show_status(self) -> None:
+        """The status chip was pressed: its whole text, for when the sidebar had to cut it short."""
+        chip = self.status
+        level = chip.level if chip.level in ("error", "warning") else "info"
+        self.toast(level, f"{chip.title}. {chip.detail}" if chip.detail else chip.title)
 
     def _update_badges(self) -> None:
         try:

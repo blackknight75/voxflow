@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - In the setup guide, Esc during the microphone, model or hotkey steps first asks ("Press Esc again to skip"), so
   an Esc meant for a recording no longer ends the setup. On the first and last step it still closes at once.
 - The microphone step hides the "No movement?" help once your microphone is heard.
+- The status in the sidebar shows up to three lines and the tray menu two, so a microphone or model problem is no
+  longer cut off mid-sentence. The status can be reached with Tab; Enter, Space or a click shows its full text.
 
 ## [0.2.1] - 2026-11-15
 

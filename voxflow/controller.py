@@ -792,8 +792,7 @@ class Controller(QObject):
             title = "Downloading speech model…" if asr["state"] == "downloading" else "Loading speech model…"
             return {"level": "loading", "title": title, "detail": asr["detail"]}
         if self.is_demo:
-            return {"level": "demo", "title": "Demo mode", "detail": "No models, microphone or shortcuts: "
-                                                                     "everything you see is simulated."}
+            return {"level": "demo", "title": "Demo mode", "detail": "Simulated: no models, mic or hotkeys."}
         if self._warnings:
             return {"level": "warning", "title": "Ready", "detail": next(iter(self._warnings.values()))}
         cleanup = self._models["cleanup"]

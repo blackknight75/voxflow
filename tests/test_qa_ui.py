@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import pytest
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAccessible, QAccessibleEvent
+from PySide6.QtCore import QEvent, Qt
+from PySide6.QtGui import QAccessible, QAccessibleEvent, QKeyEvent
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QWidget
 
 from tests.cov_ui_kit import Signals, demo, make_demo, show  # noqa: F401 - fixtures
@@ -86,8 +86,6 @@ def test_ui03_segmented_reads_as_a_combo_box_with_its_value(show, spoken):
 
 
 def _key(key):
-    from PySide6.QtGui import QKeyEvent
-    from PySide6.QtCore import QEvent
     return QKeyEvent(QEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier)
 
 
@@ -194,7 +192,6 @@ def test_ui11_the_window_sidebar_uses_tabs(demo):
     navs = demo.win.findChildren(NavButton)
     assert navs and all(iface(n).role() == QAccessible.Role.PageTab for n in navs)
     assert sum(bool(iface(n).state().selected) for n in navs) == 1
-    Signals()
 
 
 # =========================================================================== UI-10 Flow bar announcements
@@ -302,3 +299,69 @@ def test_ui09_deleting_a_transcript_can_be_undone(demo):
     assert c.history.count() == total and c.history.get(entry["id"])["text"] == entry["text"]
     assert c.history.restore(entry) is False, "a second undo adds nothing"
     page.list._tick.stop()
+
+
+# =========================================================================== UI-12 status chip
+def test_ui12_status_chip_wraps_to_three_lines_and_can_be_opened(show, qtbot):
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QMouseEvent
+    from voxflow.ui.components import StatusChip
+    chip = show(StatusChip(), 188, 76)
+    pressed = Signals(go=chip.activated)
+    chip.set_status({"level": "error", "title": "Microphone problem",
+                     "detail": "The microphone “Yeti” stopped sending sound. Check the cable, or choose another "
+                               "microphone in Settings."})
+    assert 2 <= len(chip._lines) <= 3 and chip._lines[0].startswith("The microphone")
+    chip.set_status({"level": "error", "title": "Problem", "detail": " ".join(["word"] * 80)})
+    assert len(chip._lines) == 3 and chip._lines[-1].endswith("…"), "the rest is elided on the last line"
+    chip.set_status({"level": "ok", "title": "Ready", "detail": "Hold Ctrl + Win."})
+    assert chip._lines == ["Hold Ctrl + Win."] and chip._dy() > 0
+    chip.set_status({"level": "loading", "title": "Loading", "detail": ""})
+    assert chip._lines == [] and chip._dy() == (chip.height() - 30) // 2
+    assert chip.focusPolicy() & Qt.FocusPolicy.TabFocus
+    i = iface(chip)
+    assert i.role() == QAccessible.Role.StatusBar and i.text(QAccessible.Text.Value) == ""
+    assert not i.state().selected
+    chip.activateWindow()
+    chip.clearFocus()
+    chip.setFocus(Qt.FocusReason.TabFocusReason)
+    QApplication.processEvents()
+    assert chip.hasFocus() and chip._kbd
+    chip.repaint()                                             # paints the focus ring
+    for key in (Qt.Key.Key_Return, Qt.Key.Key_Space, Qt.Key.Key_A):
+        qtbot.keyClick(chip, key)
+    centre = QPointF(chip.width() / 2, chip.height() / 2)
+    for button in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
+        QApplication.sendEvent(chip, QMouseEvent(QEvent.Type.MouseButtonRelease, centre, centre, button,
+                                                 Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier))
+    assert len(pressed.go) == 3, "Enter, Space and a left click"
+    chip.clearFocus()
+    QApplication.processEvents()
+    assert not chip._kbd
+
+
+def test_ui12_pressing_the_chip_shows_the_whole_status(demo):
+    chip = demo.win.status
+    for level, kind in (("error", "error"), ("warning", "warning"), ("ok", "info")):
+        chip.set_status({"level": level, "title": "Microphone problem", "detail": "Check the cable."})
+        chip.activated.emit()
+        assert demo.toasts()[-1] == "Microphone problem. Check the cable."
+        assert demo.win.toasts._toasts[-1].level == kind
+    chip.set_status({"level": "ok", "title": "Ready", "detail": ""})
+    chip.activated.emit()
+    assert demo.toasts()[-1] == "Ready"
+
+
+def test_ui12_tray_menu_status_gets_a_second_line_when_needed(show):
+    from voxflow.ui.widgets import PopupMenu
+    menu = PopupMenu(296)
+    short = [{"kind": "status", "text": "Ready", "sub": "Hold Ctrl + Win to dictate."}]
+    long = [{"kind": "status", "text": "Microphone problem",
+             "sub": "The microphone “Yeti” stopped sending sound. Check the cable, or choose another one."}]
+    menu.set_items(short)
+    h1 = menu.height()
+    menu.set_items(long)
+    assert menu.height() == h1 + menu.STATUS_LINE_H and len(menu._status_lines(long[0])) == 2
+    show(menu)
+    menu.grab()                                                # paints both lines
+    menu.close()
