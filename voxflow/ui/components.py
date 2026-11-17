@@ -9,6 +9,7 @@ from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, QSize, Qt, QTimer, QV
 from PySide6.QtGui import QColor, QFontMetricsF, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 
+from . import a11y
 from . import theme as T
 from .icons import paint_icon
 from .widgets import Button, Caption, IconButton, Label, Spinner, _Hover, _KBD_REASONS, painter
@@ -111,6 +112,10 @@ class Row(QWidget):
         lay.addLayout(col, 1)
         if control is not None:
             lay.addWidget(control, 0, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
+            context = f"{title}. {sub}" if sub else title     # "Open" alone means nothing to a screen-reader user
+            for b in [control, *control.findChildren(Button)]:
+                if isinstance(b, Button) and b._auto_name and not b.accessibleDescription():
+                    b.setAccessibleDescription(context)
             if not control.accessibleName():
                 control.setAccessibleName(title)
             if sub and not control.accessibleDescription():
@@ -892,6 +897,19 @@ class NavButton(_Hover):
         self.setFixedHeight(38)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
+    # a page tab, "selected", rather than a check box that is "checked" (see voxflow.ui.a11y)
+    def a11y_role(self):
+        return a11y.Role.PageTab
+
+    def a11y_value(self) -> str:
+        return ""
+
+    def a11y_state(self, state):
+        state.checkable = state.checked = False
+        state.selectable = True
+        state.selected = self.isChecked()
+        return state
+
     def set_badge(self, n: int) -> None:
         self.badge = int(n)
         self.setAccessibleDescription(f"{n} new" if n else "")
@@ -972,6 +990,7 @@ class TranscriptList(QWidget):
     RULES_ONLY_TIP = ("The language model was too slow for this one, so only the basic clean-up was applied. "
                       "The words are as you said them.")
     ACTIONS = (("copy", "Copy"), ("paste", "Paste again"), ("trash", "Delete"))
+    KEYS_HELP = "Up and Down choose a transcript, Enter or C copies it, P pastes it again, Delete removes it."
 
     def __init__(self, parent=None, group_by_day: bool = True, show_delete: bool = True):
         super().__init__(parent)
@@ -990,6 +1009,8 @@ class TranscriptList(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAccessibleName("Transcripts")
+        self.setAccessibleDescription(self.KEYS_HELP)
+        self.setToolTip(self.KEYS_HELP)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self._tick = QTimer(self)
         self._tick.setInterval(120)
@@ -1015,12 +1036,25 @@ class TranscriptList(QWidget):
     def selected(self) -> dict | None:
         return self.items[self._sel] if 0 <= self._sel < len(self.items) else None
 
-    def _select(self, index: int) -> None:
-        self._sel = index
+    # a list whose value is the chosen transcript (see voxflow.ui.a11y)
+    def a11y_role(self):
+        return a11y.Role.List
+
+    def a11y_value(self) -> str:
         it = self.selected()
-        self.setAccessibleDescription(
-            f"{day_label(it.get('ts', 0))} {clock_label(it.get('ts', 0))}"
-            f"{', basic clean-up only' if it.get('rules_only') else ''}: {self.body_text(it)}" if it else "")
+        return (f"{day_label(it.get('ts', 0))} {clock_label(it.get('ts', 0))}"
+                f"{', basic clean-up only' if it.get('rules_only') else ''}: {self.body_text(it)}") if it else ""
+
+    def a11y_state(self, state):
+        return state
+
+    def _select(self, index: int) -> None:
+        changed = index != self._sel
+        self._sel = index
+        if changed and self.hasFocus():       # focus stays on the list, so say the new entry out loud
+            value = self.a11y_value()
+            a11y.value_changed(self, value)
+            a11y.announce(self, f"{value}. {index + 1} of {len(self.items)}")
         self.update()
 
     # ---- layout
@@ -1097,7 +1131,7 @@ class TranscriptList(QWidget):
         pos = e.position().toPoint()
         hit = self._hit(pos)
         on_tag = hit[0] >= 0 and hit[1] < 0 and self._tags.get(hit[0]) is not None and self._tags[hit[0]].contains(pos)
-        tip = self.actions[hit[1]][1] if hit[1] >= 0 else (self.RULES_ONLY_TIP if on_tag else "")
+        tip = self.actions[hit[1]][1] if hit[1] >= 0 else (self.RULES_ONLY_TIP if on_tag else self.KEYS_HELP)
         if tip != self.toolTip():
             self.setToolTip(tip)
         if hit != self._hover:

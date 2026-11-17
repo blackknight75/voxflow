@@ -417,7 +417,7 @@ def test_transcript_list_pointer_hover_tooltips_and_clicks(show):
     mouse(lst, QEvent.Type.MouseMove, lst._tags[0].center())
     assert lst.toolTip() == lst.RULES_ONLY_TIP and lst.cursor().shape() == Qt.CursorShape.ArrowCursor
     mouse(lst, QEvent.Type.MouseMove, QPoint(card.left() + 30, card.bottom() - 6))
-    assert lst.toolTip() == "" and lst._hover == (0, -1)
+    assert lst.toolTip() == lst.KEYS_HELP and lst._hover == (0, -1)
     mouse(lst, QEvent.Type.MouseMove, QPoint(10, 4))           # on the day heading
     assert lst._hover == (-1, -1) and lst._hit(QPoint(10, 4)) == (-1, -1)
     mouse(lst, QEvent.Type.MouseMove, card.center())
@@ -427,7 +427,7 @@ def test_transcript_list_pointer_hover_tooltips_and_clicks(show):
     mouse(lst, QEvent.Type.MouseButtonPress, QPoint(10, 4), LEFT, LEFT)
     assert lst.selected() is None, "a click on a heading selects nothing"
     mouse(lst, QEvent.Type.MouseButtonPress, lst._card_rect(1).center(), LEFT, LEFT)
-    assert lst.selected()["id"] == "e1" and "basic clean-up only" in lst.accessibleDescription()
+    assert lst.selected()["id"] == "e1" and "basic clean-up only" in lst.a11y_value()
     mouse(lst, QEvent.Type.MouseButtonRelease, lst._card_rect(1).center(), LEFT)
     mouse(lst, QEvent.Type.MouseButtonRelease, QPoint(10, 4), LEFT)
     mouse(lst, QEvent.Type.MouseButtonRelease, paste_rect.center(), RIGHT)
@@ -493,7 +493,7 @@ def test_transcript_list_keyboard(show, qtbot):
     lst.set_items(_entries(12)[2:])
     assert lst.selected()["id"] == "e3", "and survives the list being refreshed"
     lst.set_items([])
-    assert lst.selected() is None and lst.minimumHeight() == 0 and lst.accessibleDescription() != ""
+    assert lst.selected() is None and lst.minimumHeight() == 0 and lst.a11y_value() == ""
     qtbot.keyClick(lst, Qt.Key.Key_Down)                       # an empty list ignores the keys
     assert lst.selected() is None
 

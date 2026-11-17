@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - *Pause for 1 hour* no longer turns dictation back on by itself after you resumed and paused again another way.
   While it runs, the status, the tray tooltip and the tray menu say "Paused until 14:05".
+- Screen readers (Narrator, NVDA): the Theme, activity range, tone and Cleaned/Raw switches read as a choice
+  with their current value ("Theme, combo box, Dark") and say each change; the sidebar pages read as tabs, not
+  check boxes; buttons are announced by their current label ("Measure again", "Stop", "Done"), with the setting
+  they belong to; the hotkey Change buttons say the current shortcut; the transcript list says each transcript
+  as you move through it and explains its keys; and the Flow bar's results ("Pasted", "No speech heard",
+  "Result copied: press Ctrl+V", downloads) are announced. Nothing is announced while the microphone is open.
 
 ## [0.2.1] - 2026-11-15
 

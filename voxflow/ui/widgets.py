@@ -15,6 +15,7 @@ from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QGuiApplication, QLinea
 from PySide6.QtWidgets import (QAbstractButton, QFrame, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QScrollArea,
                                QSizePolicy, QSlider, QToolTip, QVBoxLayout, QWidget)
 
+from . import a11y
 from . import theme as T
 from .icons import icon as make_qicon
 from .icons import paint_icon
@@ -159,8 +160,8 @@ class Button(_Hover):
         super().__init__(parent)
         self.kind = "primary" if accent else kind
         self.icon_name = icon
+        self._auto_name = True             # the accessible name follows the label until one is set explicitly
         self.setText(text)
-        self.setAccessibleName(text)
         self.setFixedHeight(height)
         self.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         self._font = T.font(T.F_SMALL + 0.3, T.W_SEMI, 0.15)
@@ -175,8 +176,17 @@ class Button(_Hover):
 
     def setText(self, text: str) -> None:
         super().setText(text)
+        self._name_from(text)
         self.updateGeometry()
         self.update()
+
+    def setAccessibleName(self, name: str) -> None:
+        self._auto_name = False
+        super().setAccessibleName(name)
+
+    def _name_from(self, text: str) -> None:
+        if self._auto_name:
+            super().setAccessibleName(text)
 
     def _set_flash(self, v) -> None:
         self._flash = float(v)
@@ -203,6 +213,7 @@ class Button(_Hover):
         if self._base_text is None:
             self._base_text = self.text()
         super().setText(text)
+        self._name_from(text)
         self._fa.stop()
         self._flash = 1.0
         self._fa.start()
@@ -442,6 +453,23 @@ class Segmented(QWidget):
         self._anim.valueChanged.connect(self._set_pos)
         self.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         T.bus().changed.connect(self.update)
+        self._describe()
+
+    # screen readers hear "Theme, combo box, Dark" and "option 3 of 3" (see voxflow.ui.a11y)
+    def a11y_role(self):
+        return a11y.Role.ComboBox
+
+    def a11y_value(self) -> str:
+        return next((t for v, t in self.options if v == self.value), "")
+
+    def a11y_state(self, state):
+        return state
+
+    def _describe(self) -> None:
+        if self.options:
+            self.setAccessibleDescription(f"Option {self._index() + 1} of {len(self.options)}: "
+                                          + ", ".join(t for _v, t in self.options)
+                                          + ". Use the arrow keys to change it.")
 
     def _index(self) -> int:
         for i, (v, _t) in enumerate(self.options):
@@ -473,6 +501,8 @@ class Segmented(QWidget):
             self._anim.setStartValue(self._pos)
             self._anim.setEndValue(float(self._index()))
             self._anim.start()
+        self._describe()
+        a11y.value_changed(self, self.a11y_value())
         if emit:
             self.changed.emit(value)
 
@@ -749,8 +779,9 @@ class HotkeyRecorder(QWidget):
         row = QHBoxLayout()
         row.setSpacing(8)
         self.caps = KeyCaps(combo)
+        self._name = name.lower()
         self.btn = Button("Change", height=30)
-        self.btn.setAccessibleName(f"Change {name.lower()}")
+        self._name_btn()
         self.btn.clicked.connect(self.toggle_capture)
         self.btn_clear = IconButton("close", f"Clear {name.lower()}", size=30)
         self.btn_clear.clicked.connect(self._clear)
@@ -781,10 +812,19 @@ class HotkeyRecorder(QWidget):
     def capturing(self) -> bool:
         return self._capturing
 
+    def _name_btn(self) -> None:
+        """The key caps are painted, so the button's name carries the current combo for screen readers."""
+        if self._capturing:
+            self.btn.setAccessibleName(f"Cancel recording the {self._name}")
+        else:
+            now = pretty_hotkey(self.combo) if self.combo else "not set"
+            self.btn.setAccessibleName(f"Change {self._name} (now {now})")
+
     def set_combo(self, combo: str) -> None:
         self.combo = combo or ""
         if not self._capturing:
             self.caps.set_combo(self.combo)
+            self._name_btn()
         self.btn_clear.setVisible(self._allow_clear and bool(self.combo) and not self._capturing)
 
     def show_message(self, text: str, role: str = "RED", ms: int = 5000) -> None:
@@ -802,6 +842,7 @@ class HotkeyRecorder(QWidget):
         self._held, self._seen = [], []
         self.msg.hide()
         self.btn.setText("Cancel")
+        self._name_btn()
         self.btn_clear.hide()
         self.caps.set_combo(self.combo, "Press the new combo…")
         self.btn.setFocus(Qt.FocusReason.OtherFocusReason)
@@ -816,6 +857,7 @@ class HotkeyRecorder(QWidget):
     def _clear(self) -> None:
         self.combo = ""
         self.caps.set_combo("")
+        self._name_btn()
         self.btn_clear.hide()
         self.changed.emit("")
 
@@ -832,6 +874,7 @@ class HotkeyRecorder(QWidget):
                 self.msg.hide()
                 self.changed.emit(combo)
         self.caps.set_combo(self.combo)
+        self._name_btn()
         self.btn_clear.setVisible(self._allow_clear and bool(self.combo))
 
     def eventFilter(self, obj, ev):
