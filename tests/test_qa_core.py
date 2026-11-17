@@ -701,3 +701,75 @@ def test_c09_a_silent_recording_raises_one_notice_with_the_microphone_button(rig
     hint = "Heard only silence. Check that your microphone isn't muted and is the one selected."
     assert rig.spy.notices() == [("warning", hint)]
     assert actions == [(hint, "open_settings:microphone", "Open microphone settings")]
+
+
+# =========================================================================== C-10: long lines go sentence by sentence
+LONG = ("Good morning everyone and thank you for joining the weekly planning call today. "
+        "There are still three open problems that we need to look at this week. "
+        "The new release went out on Tuesday and the feedback from customers has been positive. "
+        "Please share what you find in the project channel before Friday.")
+
+
+def test_c10_sentences_split_where_the_recogniser_ended_them_but_not_after_an_abbreviation_or_before_a_cue():
+    assert cleanup._sentences("One two. Three four! Five six? Seven.") == ["One two.", "Three four!", "Five six?",
+                                                                          "Seven."]
+    assert cleanup._sentences("Call Dr. Smith today. Then e.g. lunch.") == ["Call Dr. Smith today.",
+                                                                           "Then e.g. lunch."]
+    assert cleanup._sentences("Meet on Monday. No wait, Tuesday. Bring the slides.") == [
+        "Meet on Monday. No wait, Tuesday.", "Bring the slides."], "the correction keeps what it corrects"
+
+
+def test_c10_a_long_line_sends_only_the_sentences_that_need_the_model():
+    c, llm = with_llm(lambda user, msgs: user)
+    assert len(LONG.split()) > cleanup.LONG_LINE_WORDS
+    out = c.clean(LONG)
+    assert out == LONG
+    assert [call["messages"][-1]["content"] for call in llm.calls] == [
+        "There are still three open problems that we need to look at this week."], "one sentence, not 52 words"
+    assert c.last_info["llm"] is True and c.last_info["rules_only"] is False
+
+
+def test_c10_a_long_line_still_gets_every_fix_and_keeps_each_sentences_period():
+    spoken = LONG.replace("Tuesday and", "tuesday and um").replace("three open", "three, three open")
+    c, llm = with_llm(lambda user, msgs: user.replace("three, three", "three").rstrip("."))
+    out = c.clean(spoken)
+    assert "There are still three open problems that we need to look at this week. The new release" in out
+    assert "on Tuesday and the feedback" in out and out.endswith("before Friday.")
+
+
+def test_c10_a_short_line_is_one_call_as_before():
+    c, llm = with_llm(lambda user, msgs: user)
+    c.clean("so the three of us. we meet at noon. bring the slides")
+    assert len(llm.calls) == 1
+
+
+def test_c10_the_sentences_share_one_time_budget():
+    c, llm = with_llm(lambda user, msgs: user, timeout_s=0.3)
+    llm.delay = 0.05                                       # every streamed word takes 50 ms: the first call uses it up
+    spoken = " ".join(["There are three open problems that we need to look at."] * 5)
+    t0 = time.perf_counter()
+    c.clean(spoken)
+    assert time.perf_counter() - t0 < 0.3 + 0.3 and c.last_info["rules_only"] is True
+    _settle(c, llm)
+
+
+@pytest.mark.parametrize("backend, ms_per_word, calls", [
+    ("cpu", 1000.0, 0),        # 9 words x 1 s > 1.5 x 4 s: not even started
+    ("cpu", 50.0, 1),          # fits: asked as before
+    ("cpu", None, 1),          # speed not known yet: asked as before
+    ("cuda", 1000.0, 1),       # never skipped on a GPU (one compile stall must not lock long pieces out)
+])
+def test_c10_a_cpu_too_slow_for_the_time_left_does_not_start_the_call(backend, ms_per_word, calls):
+    c, llm = with_llm("Then we move the meeting to Friday at three.")
+    c.backend, c._ms_per_word = backend, ms_per_word
+    out = c.clean("then we move the meeting to friday at three")
+    assert len(llm.calls) == calls
+    assert out == "Then we move the meeting to Friday at three."
+    assert c.last_info["rules_only"] is (calls == 0)
+
+
+def test_c10_the_cpu_learns_its_speed_but_never_turns_the_punctuation_pass_on():
+    c, llm = with_llm("Then we move the meeting to Friday at three.")
+    c.backend, c._learn_speed, c.punctuation_pass = "cpu", False, False
+    c.clean("then we move the meeting to friday at three")
+    assert c._ms_per_word is not None and c.punctuation_pass is False

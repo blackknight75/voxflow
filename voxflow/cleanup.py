@@ -113,6 +113,12 @@ PUNCTUATION_PASS_MAX_MS = 400
 WARMUP_GPU_S = 60.0
 WARMUP_CPU_S = 600.0
 _PASS_MIN_WORDS = 8           # short lines cost a fixed overhead: judge them as if they had this many words
+# A line longer than this goes to the model sentence by sentence (QA C-10). Measured on a 227-word, 16-sentence
+# dictation that the model left unchanged: the whole line took 1.2 s on an RTX 5080 and always the full 4 s timeout
+# on the CPU, for the 6 sentences that needed the model.
+LONG_LINE_WORDS = 40
+# A piece is not sent when the model's recent speed says it needs more than this many times the time left.
+SKIP_MARGIN = 1.5
 
 
 def _cuda_unusable(asked_for: bool) -> str | None:
@@ -601,6 +607,23 @@ _RUNON_MIN_BEFORE = 3
 # "When the build finishes let me know": a sentence that opens with a subordinate clause usually needs a comma
 _SUBORDINATE_RE = re.compile(r"(?:^|(?<=[.!?]\s))(?:if|when|once|after|before|since|although|though|because|while|"
                              r"unless|as soon as)\b[^,;:.!?]{12,}[.!?]?$", re.I | re.M)
+
+
+_SENTENCE_GAP_RE = re.compile(r"(?<=[.!?])\s+")
+# a sentence that opens with a correction cue stays with the one before it ("... on Monday. No wait, Tuesday."),
+# so the model sees what is being corrected
+_LEADING_CUE_RE = re.compile(rf"(?:{_CORR_MARK}|scratch that|make that|correction)\b", re.I)
+
+
+def _sentences(line: str) -> list[str]:
+    """``line`` in sentences, as the recogniser punctuated it; never split after an abbreviation ("Dr.", "e.g.")."""
+    out: list[str] = []
+    for part in _SENTENCE_GAP_RE.split(line):
+        if out and (_ABBREV_RE.search(out[-1]) or _LEADING_CUE_RE.match(part)):
+            out[-1] += " " + part
+        else:
+            out.append(part)
+    return out
 
 
 def looks_unpunctuated(text: str) -> bool:
@@ -1889,7 +1912,8 @@ class Cleaner:
         per = seconds * 1000 / max(_PASS_MIN_WORDS, len(text.split()))
         prev = self._ms_per_word
         self._ms_per_word = per if prev is None else (prev + per) / 2
-        self.punctuation_pass = PUNCTUATION_PASS_MAX_MS > 0 and self._pass_fast()
+        if self._learn_speed:                    # a GPU: the punctuation pass follows the speed (never on a CPU)
+            self.punctuation_pass = PUNCTUATION_PASS_MAX_MS > 0 and self._pass_fast()
 
     @property
     def has_llm(self) -> bool:
@@ -2021,62 +2045,81 @@ class Cleaner:
             return ruled
         # LLM works line-by-line so formatting commands (newlines / bullets) survive.
         # "unchanged" ignores the grammar rules' own fixes, so they never make the model run where it did not before
-        unchanged = ruled in (text.strip(), grammar_rules(text.strip()))
+        raw = text.strip()
+        unchanged = ruled in (raw, grammar_rules(raw))
         lines = ruled.split("\n")
         out_lines: list[str] = []
-        remaining = self.timeout_s
         for idx, line in enumerate(lines):
             bullet = line.startswith("- ")
             body = line[2:] if bullet else line
             if not body.strip():
                 out_lines.append(line)
                 continue
-            if not self._needs_llm(body, unchanged) and not (
-                    self.punctuation_pass and len(body.split()) > 2 and looks_unpunctuated(body)):
-                out_lines.append(line)
-                continue
-            if remaining <= 0.05:                        # an earlier line used up the time
-                self.last_info["rules_only"] = True
-                out_lines.append(line)
-                continue
-            # list headers / bullets / file names never get an added sentence period
-            allow_period = not bullet and idx == len(lines) - 1 and not _is_fragment(body)
-            try:
-                self.last_info["llm"] = True
-                t_call = time.perf_counter()
-                self._waited_s, ran = 0.0, True
-                try:
-                    res = self._llm_clean(body, max_ms=remaining * 1000)
-                except LlmBusy:
-                    ran = False                          # the model never ran: nothing to learn about its speed
-                    raise
-                finally:
-                    if self._learn_speed and ran:        # the time spent waiting for an earlier call is not its own
-                        self._note_speed(body, time.perf_counter() - t_call - self._waited_s)
-                res = res.strip().strip('"').strip()
-                if res[:2] in ("- ", "* ") or res[:1] == "•":
-                    res = ""  # model invented a bullet
-                if res:
-                    res = _restore_case(body, rule_clean(res, formatting=False, terminal=allow_period, fillers=False))
-                no_dot = not allow_period or _is_fragment(res.rstrip("."))
-                if no_dot and res.endswith(".") and not body.rstrip().endswith("."):
-                    res = res[:-1]
-                if _accept(body, res):
-                    out_lines.append(("- " if bullet else "") + res.replace("\n", " "))
-                else:
-                    self.last_info["rejected"] = True
-                    salv = _salvage_case(body, res) if res else body
-                    out_lines.append(("- " if bullet else "") + salv)
-            except LlmBusy:
-                self.last_info["skipped_busy"] = self.last_info["rules_only"] = True
-                out_lines.append(line)
-            except TimeoutError:
-                self.last_info["timeout"] = self.last_info["rules_only"] = True
-                out_lines.append(line)
-            remaining = self.timeout_s - (time.perf_counter() - t0)
+            # a long line goes to the model sentence by sentence: only the sentences that need it, and a call the
+            # time left cannot cover is not started (QA C-10). A shorter line is one piece, as it always was.
+            pieces = _sentences(body) if not bullet and len(body.split()) > LONG_LINE_WORDS else [body]
+            done = []
+            for k, piece in enumerate(pieces):
+                # a sentence the rules left exactly as recognised needs the model no more than such a line does
+                same = unchanged or (len(pieces) > 1 and (piece in raw or piece in grammar_rules(raw)))
+                # list headers / bullets / file names never get an added sentence period
+                ends_text = not bullet and idx == len(lines) - 1 and k == len(pieces) - 1
+                allow_period = (ends_text and not _is_fragment(piece)) or (
+                    len(pieces) > 1 and piece.rstrip()[-1:] in ".!?")
+                done.append(self._clean_piece(piece, same, allow_period, t0))
+            out_lines.append(("- " if bullet else "") + " ".join(done))
         self.last_info["ms"] = (time.perf_counter() - t0) * 1000
         return "\n".join(out_lines)
 
+    def _clean_piece(self, body: str, unchanged: bool, allow_period: bool, t0: float) -> str:
+        """One line, or one sentence of a long line, through the model when it needs it; the rule text otherwise.
+        ``t0``: when the clean-up of the whole dictation started (all pieces share one time budget)."""
+        if not self._needs_llm(body, unchanged) and not (
+                self.punctuation_pass and len(body.split()) > 2 and looks_unpunctuated(body)):
+            return body
+        remaining = self.timeout_s - (time.perf_counter() - t0)
+        if remaining <= 0.05 or self._too_slow_for(body, remaining):
+            self.last_info["rules_only"] = True          # an earlier piece used up the time, or this one would
+            return body
+        try:
+            self.last_info["llm"] = True
+            t_call = time.perf_counter()
+            self._waited_s, ran = 0.0, True
+            try:
+                res = self._llm_clean(body, max_ms=remaining * 1000)
+            except LlmBusy:
+                ran = False                              # the model never ran: nothing to learn about its speed
+                raise
+            finally:
+                if ran:                                  # the time spent waiting for an earlier call is not its own
+                    self._note_speed(body, time.perf_counter() - t_call - self._waited_s)
+            res = res.strip().strip('"').strip()
+            if res[:2] in ("- ", "* ") or res[:1] == "•":
+                res = ""  # model invented a bullet
+            if res:
+                res = _restore_case(body, rule_clean(res, formatting=False, terminal=allow_period, fillers=False))
+            no_dot = not allow_period or _is_fragment(res.rstrip("."))
+            if no_dot and res.endswith(".") and not body.rstrip().endswith("."):
+                res = res[:-1]
+            if _accept(body, res):
+                return res.replace("\n", " ")
+            self.last_info["rejected"] = True
+            return _salvage_case(body, res) if res else body
+        except LlmBusy:
+            self.last_info["skipped_busy"] = self.last_info["rules_only"] = True
+        except TimeoutError:
+            self.last_info["timeout"] = self.last_info["rules_only"] = True
+        return body
+
+    def _too_slow_for(self, body: str, remaining_s: float) -> bool:
+        """True when, on the CPU, the model's recent speed says this piece cannot be done in the time left (with room
+        for error): the call would only use up the time and time out (QA C-10). Not on a GPU: there one call that
+        waited for kernels to compile would make the average say "too slow" for long pieces that are then never
+        timed again; on the CPU the speed is steady and shorter pieces keep the average current."""
+        if self.backend != "cpu" or self._ms_per_word is None:
+            return False
+        needed_ms = self._ms_per_word * max(_PASS_MIN_WORDS, len(body.split()))
+        return needed_ms > SKIP_MARGIN * remaining_s * 1000
 
 __all__ = ["Cleaner", "rule_clean", "smart_format", "apply_tone", "is_english", "resolve_language",
            "clean_foreign", "phonetic_key", "grammar_rules", "looks_unpunctuated", "DEFAULT_MODEL"]
