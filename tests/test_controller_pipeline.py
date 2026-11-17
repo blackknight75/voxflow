@@ -184,7 +184,9 @@ def test_silent_recording_explains_the_likely_cause(rig):
     TRecorder.audio = np.zeros(32000, dtype=np.float32)
     rig.dictate("")
     assert rig.c.state == "error" and rig.c.message == "Heard only silence"
-    assert ("error", "Heard only silence. Is the microphone muted?") in rig.spy.notices()
+    # one notice for one event (QA C-09): the warning with the hint (and its microphone settings button)
+    assert rig.spy.notices() == [("warning", "Heard only silence. Check that your microphone isn't muted and is "
+                                             "the one selected.")]
     assert rig.injector.pasted == []
 
 

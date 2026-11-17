@@ -688,3 +688,16 @@ def test_c08_a_failed_transcription_still_checks(rig):
     rig.asr.transcribe = broken
     rig.dictate("please send the report")
     rig.wait(lambda: rig.c.model_status("asr")["state"] == "degraded")
+
+
+# =========================================================================== C-09: silence raises one notice
+def test_c09_a_silent_recording_raises_one_notice_with_the_microphone_button(rig):
+    from controller_rig import TRecorder
+    actions = []
+    rig.c.notice_action.connect(lambda *a: actions.append(a))
+    TRecorder.audio = np.zeros(32000, dtype=np.float32)
+    rig.dictate("")
+    assert rig.c.message == "Heard only silence" and rig.c.error_info()["kind"] == "silence"
+    hint = "Heard only silence. Check that your microphone isn't muted and is the one selected."
+    assert rig.spy.notices() == [("warning", hint)]
+    assert actions == [(hint, "open_settings:microphone", "Open microphone settings")]

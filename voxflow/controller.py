@@ -1617,7 +1617,9 @@ class Controller(QObject):
         text = res["text"]
         if not text:
             if silent:
-                msg = "Heard only silence. Is the microphone muted?"
+                # short enough for the bar: the one notice is the failure's own, with its hint and the microphone
+                # settings button (a second sentence here also sent a plain notice of its own: QA C-09)
+                msg = "Heard only silence"
             else:
                 msg = "Nothing to paste" if res["dropped"] else "Didn't catch that"
             self._sig_failed.emit(msg, gen)

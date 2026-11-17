@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Speech recognition on an NVIDIA card kept the graphics memory a long dictation needed (over 1 GB after 80 seconds, 5 GB after 4 minutes) for the rest of the session, which could run a smaller card out of memory. When the card is short of free memory, a long dictation now gives it back afterwards.
 - Corrections that restate the start of the sentence ("let's meet on Monday, actually let's make it Tuesday", "red, actually change it to blue") were pasted uncorrected although the language model had fixed them. Its answer is now accepted.
 - When a graphics card error moved speech recognition to the CPU during a session, VoxFlow kept saying it ran on the GPU while every dictation got slower. It now says so once, with a button to the model settings, where Retry loads it on the GPU again.
+- A recording that was only silence showed two notifications with different wording. It now shows one, with the button to the microphone settings.
 - After one dictation timed out in the language model, the next dictations got the basic clean-up at once, and
   command mode said it "took too long", even when the model was free again a moment later. They now wait for it,
   within their own time limit. Command mode says the model is still busy when that is the reason.
