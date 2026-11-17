@@ -1276,3 +1276,53 @@ def test_r19_when_windows_refuses_the_user_is_told(run_key, tmp_path, qtbot, mon
         assert ("error", "Windows did not let VoxFlow change the launch-at-login setting.") in rig.spy.notices()
     finally:
         rig.close()
+
+
+def test_r12_quit_asks_over_the_channel_and_waits_for_the_lock(qapp, data_dir):
+    import threading
+    from PySide6.QtCore import QLockFile
+    from PySide6.QtNetwork import QLocalServer
+    lock = QLockFile(str(data_dir / "voxflow.lock"))
+    assert lock.tryLock(100)
+    server = QLocalServer()
+    QLocalServer.removeServer(app._instance_name())
+    assert server.listen(app._instance_name())
+    threading.Timer(0.3, lock.unlock).start()                      # the running copy finishes quitting
+    try:
+        assert app.request_quit(5) == 0
+    finally:
+        server.close()
+
+
+def test_r12_a_quit_request_already_read_is_not_waited_for(qapp, clean_process_state, data_dir, monkeypatch):
+    from PySide6.QtCore import QByteArray, QTimer
+    from PySide6.QtNetwork import QLocalSocket
+    kept = []
+
+    def knock():
+        # the command is already in the connection's buffer when it is accepted (as with a slower UI thread)
+        monkeypatch.setattr(QLocalSocket, "bytesAvailable", lambda self: 5)
+        monkeypatch.setattr(QLocalSocket, "readAll", lambda self: QByteArray(b"quit\r\n"))
+        monkeypatch.setattr(QLocalSocket, "waitForReadyRead", lambda self, ms=0: pytest.fail("no wait"))
+        sock = QLocalSocket()
+        kept.append(sock)
+        sock.connectToServer(app._instance_name())
+        assert sock.waitForConnected(1000)
+
+    QTimer.singleShot(300, knock)
+    quit_after(10000)                                               # safety net only
+    assert app.run_app(fake=True, no_hook=True) == 0
+    assert "asked to quit by another process" in (data_dir / "logs" / "voxflow.log").read_text(encoding="utf-8")
+
+
+def test_r19_an_entry_for_this_copy_is_left_alone(run_key, tmp_path, qtbot, monkeypatch):
+    from voxflow import system
+    system.set_autostart(True)
+    before = dict(run_key.values)
+    rig = _autostart_controller(tmp_path, qtbot, monkeypatch)
+    try:
+        rig.start()
+        assert run_key.values == before and rig.c.get("launch_at_login")
+        assert not any(a for a in rig.spy.of("notice_action"))
+    finally:
+        rig.close()
