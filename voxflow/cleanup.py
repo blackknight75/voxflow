@@ -838,6 +838,8 @@ def _restore_case(src: str, out: str) -> str:
 
 _CORE_MARKERS = {"no", "wait", "sorry", "oops", "whoops", "meant", "mean", "rather", "actually", "correction"}
 _MARKERS = _CORE_MARKERS | {"i", "make", "that", "or", "um", "uh", "er", "hmm", "well", "not", "let", "me", "rephrase"}
+# words that only frame a corrected value after the marker: "let's make it", "make that", "change it to", "go with"
+_REPHRASE = {"let's", "lets", "let", "us", "make", "it", "that", "change", "to", "say", "go", "with", "the"}
 _DAYS = {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
 _MONTHS = {"january", "february", "march", "april", "may", "june", "july", "august", "september",
            "october", "november", "december"}
@@ -1032,6 +1034,7 @@ def _dropped_ok(sw: list[str], eff: list[int], matched, cue: bool):
     if matched is None:
         return None
     mset = set(matched)
+    kept = {sw[x] for x in mset}
     corrected: set[str] = set()
     k = 0
     while k < len(eff):
@@ -1055,9 +1058,14 @@ def _dropped_ok(sw: list[str], eff: list[int], matched, cue: bool):
         if not content or len(content) > limit_c or len(run) > limit_r:
             return None
         if first_marker is not None:
-            # all content words come BEFORE the marker (X marker Y); content after it means the model
-            # dropped the later value
-            if any(w not in _MARKERS for w in run[first_marker:]):
+            # all content words come BEFORE the marker (X marker Y); content after it means the model dropped the
+            # later value. Except a short rephrasing of the lead-in ("Monday, actually let's make it Tuesday",
+            # "red, actually change it to blue": QA C-07): those words are kept elsewhere or only frame the new
+            # value, and the earlier value must be of the same kind as the kept one that follows.
+            after = [w for w in run[first_marker:] if w not in _MARKERS]
+            before = [w for w in run[:first_marker] if w not in _MARKERS]
+            if after and not (len(after) <= 4 and all(w in _REPHRASE or w in kept for w in after)
+                              and before and _kind(before[-1]) is not None and _kind(before[-1]) == _kind(y)):
                 return None
         elif not (_kind(content[-1]) is not None and _kind(content[-1]) == _kind(y)):
             return None

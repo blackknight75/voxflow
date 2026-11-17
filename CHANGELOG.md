@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A correction with numbers the recogniser writes as digits ("the deadline is the 10th I mean the 12th") was pasted uncorrected: the check on the language model's answer rejected the right one. It is now accepted, and the basic clean-up resolves it too.
 - Stutters on small words ("I I think", "in the the database", "to to") are now removed by the basic clean-up too, so they no longer reach the text when the language model is not used or its answer is refused. Real doubles ("had had", "that that") stay.
 - Speech recognition on an NVIDIA card kept the graphics memory a long dictation needed (over 1 GB after 80 seconds, 5 GB after 4 minutes) for the rest of the session, which could run a smaller card out of memory. When the card is short of free memory, a long dictation now gives it back afterwards.
+- Corrections that restate the start of the sentence ("let's meet on Monday, actually let's make it Tuesday", "red, actually change it to blue") were pasted uncorrected although the language model had fixed them. Its answer is now accepted.
 - After one dictation timed out in the language model, the next dictations got the basic clean-up at once, and
   command mode said it "took too long", even when the model was free again a moment later. They now wait for it,
   within their own time limit. Command mode says the model is still busy when that is the reason.

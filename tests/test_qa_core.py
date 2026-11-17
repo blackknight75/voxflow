@@ -604,3 +604,25 @@ def test_c06_free_gpu_memory_comes_from_nvml_for_the_cuda_device_by_pci_bus(monk
 def test_c06_free_gpu_memory_unknown_when_the_driver_cannot_say(monkeypatch, cu, nvml, info):
     _probe(monkeypatch, cu, nvml, info)
     assert gpuprobe.cuda_free_mb() is None and gpuprobe.cuda_free_mb() is None
+
+
+# =========================================================================== C-07: "actually let's make it ..."
+@pytest.mark.parametrize("src, out, ok", [
+    ("Let's meet on Monday actually let's make it Tuesday.", "Let's meet on Tuesday.", True),
+    ("Set the color to red actually change it to blue.", "Set the color to blue.", True),
+    ("Book it for 5 people actually make that 6 people.", "Book it for 6 people.", True),
+    # still refused: the later value dropped, words that are not a rephrasing, values of another kind
+    ("Let's meet on Monday actually let's make it Tuesday.", "Let's meet on Monday.", False),
+    ("Meet on Monday actually Tuesday works.", "Meet on Monday.", False),
+    ("Meet on Monday actually let us skip it Tuesday.", "Meet on Tuesday.", False),
+    ("Call me Monday actually the meeting is Tuesday.", "Call me Tuesday.", False),
+    ("Send it to Bob actually let us make it the report.", "Send it to the report.", False),
+])
+def test_c07_a_rephrased_lead_in_after_the_marker_is_an_allowed_correction(src, out, ok):
+    assert cleanup._accept(src, out) is ok
+
+
+def test_c07_the_corrected_day_is_pasted():
+    c, llm = with_llm("Let's meet on Tuesday.")
+    assert c.clean("let's meet on monday actually let's make it tuesday") == "Let's meet on Tuesday."
+    assert c.last_info["rejected"] is False
