@@ -158,8 +158,8 @@ class Section(QWidget):
         self._indent = False
 
     def add(self, row: Row) -> Row:
-        for r in self._rows:
-            r.divider = True
+        if self._rows:
+            self._rows[-1].divider = True           # the earlier rows have theirs already
         row.divider = False
         self._rows.append(row)
         if not self.icons:
@@ -171,6 +171,16 @@ class Section(QWidget):
         row.set_indent(self._indent)
         self.card.body.addWidget(row)
         return row
+
+    def add_many(self, rows) -> list[Row]:
+        """Add a list of rows. The card is hidden meanwhile: rows added to a visible card are laid out once per
+        row, which costs O(n²) (400 dictionary rows took over 2 s); hidden, the card is laid out once."""
+        shown = not self.card.isHidden()
+        self.card.hide()
+        try:
+            return [self.add(r) for r in rows]
+        finally:
+            self.card.setVisible(shown)
 
     def clear(self) -> None:
         for r in self._rows:

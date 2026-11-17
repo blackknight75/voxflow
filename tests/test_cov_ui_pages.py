@@ -248,8 +248,12 @@ def test_dictionary_search_and_empty_states(make_demo):
         c.dictionary.add(f"Term {i}")
     assert page.search.isVisibleTo(page) and page.entries.caption.text() == "YOUR WORDS  ·  8"
     page.search.setText("zebra")
+    page._debounce.stop()
+    page._search_changed()
     assert page.empty.title.text() == "No matches" and "zebra" in page.empty.sub.text()
     page.empty.button.click()
+    page._debounce.stop()
+    page._search_changed()
     assert page.search.text() == "" and page.entries.isVisibleTo(page)
 
 

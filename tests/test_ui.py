@@ -594,13 +594,13 @@ def test_dictionary_search_appears_for_long_lists(ui):
     search = ui.find("dict_search")
     assert search.isVisible()
     search.setText("char")
-    assert len(ui.find_all("dict_edit")) == 1
+    ui.wait(lambda: len(ui.find_all("dict_edit")) == 1)        # after the search's short pause
     search.setText("golf alias")
-    assert len(ui.find_all("dict_edit")) == 1
+    ui.wait(lambda: len(ui.find_all("dict_edit")) == 1 and ui.find("dict_edit").accessibleName() == "Edit Golf")
     search.setText("nothing")
-    assert ui.find("dict_empty").accessibleName() == "No matches"
+    ui.wait(lambda: ui.find("dict_empty").accessibleName() == "No matches")
     ui.find("dict_empty_action").click()
-    assert len(ui.find_all("dict_edit")) == 7
+    ui.wait(lambda: len(ui.find_all("dict_edit")) == 7)
 
 
 def test_dictionary_import_and_export(ui, monkeypatch, tmp_path):

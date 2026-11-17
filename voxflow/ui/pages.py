@@ -835,11 +835,20 @@ class DictionaryPage(Page, _ImportExport):
         self.body.addWidget(self.inbox)
         self.search = SearchField("Search dictionary")
         self.search.setObjectName("dict_search")
-        self.search.textChanged.connect(lambda _t: self._fill_entries())
+        self._debounce = QTimer(self)                 # one rebuild per pause in typing, not one per keystroke
+        self._debounce.setSingleShot(True)
+        self._debounce.setInterval(160)
+        self._debounce.timeout.connect(self._search_changed)
+        self.search.textChanged.connect(lambda _t: self._debounce.start())
         self.body.addWidget(self.search)
         self.entries = Section("Your words")
         self.entries.setObjectName("dict_entries")
         self.body.addWidget(self.entries)
+        self._limit = self.PAGE_SIZE
+        self.btn_more = Button("Show more words", "secondary")
+        self.btn_more.setObjectName("dict_more")
+        self.btn_more.clicked.connect(self._more)
+        self.body.addWidget(self.btn_more, 0, Qt.AlignmentFlag.AlignHCenter)
         self.empty = EmptyState("book", "Your dictionary is empty")
         self.empty.setObjectName("dict_empty")
         self.empty.button.setObjectName("dict_empty_action")
@@ -851,8 +860,18 @@ class DictionaryPage(Page, _ImportExport):
         ctl.dictionary_changed.connect(self.invalidate)
         ctl.suggestions_changed.connect(self.invalidate)
 
+    PAGE_SIZE = 100                                   # rows built at a time; "Show more words" adds the next ones
+
     def _store(self):
         return self.ctl.dictionary
+
+    def _search_changed(self) -> None:
+        self._limit = self.PAGE_SIZE
+        self._fill_entries()
+
+    def _more(self) -> None:
+        self._limit += self.PAGE_SIZE
+        self._fill_entries()
 
     def refresh(self) -> None:
         self._failed = ""
@@ -864,6 +883,7 @@ class DictionaryPage(Page, _ImportExport):
             self._items, sugg = [], []
         self.inbox.clear()
         self.inbox.caption.setText(f"SUGGESTIONS  ·  {len(sugg)}")
+        rows = []
         for s in sugg:
             heard = ", ".join(f"“{a}”" for a in s.get("aliases", []))
             box = QWidget()
@@ -880,16 +900,21 @@ class DictionaryPage(Page, _ImportExport):
             no.clicked.connect(lambda _c=False, sid=s["id"]: self.run(self.ctl.dictionary.dismiss_suggestion, sid))
             lay.addWidget(add)
             lay.addWidget(no)
-            self.inbox.add(Row(str(s.get("term", "")), f"VoxFlow heard {heard} and you corrected it." if heard else
-                               "Spotted in a recent correction.", box, icon="sparkle"))
+            term = str(s.get("term", ""))
+            rows.append(Row(term, f"VoxFlow heard {heard} and wrote {term}. Add it so it is always spelled this way."
+                            if heard else f"VoxFlow wrote {term} in a recent dictation. Add it so it is always "
+                                          "spelled this way.", box, icon="sparkle"))
+        self.inbox.add_many(rows)
         self.inbox.setVisible(bool(sugg))
         self._fill_entries()
 
     def _fill_entries(self) -> None:
         q = self.search.text().strip().lower()
-        shown = [e for e in self._items if not q or q in e["term"].lower()
-                 or any(q in a.lower() for a in e.get("aliases", []))]
+        matching = [e for e in self._items if not q or q in e["term"].lower()
+                    or any(q in a.lower() for a in e.get("aliases", []))]
+        shown = matching[:self._limit]
         self.entries.clear()
+        rows = []
         for e in shown:
             box = QWidget()
             lay = QHBoxLayout(box)
@@ -905,7 +930,11 @@ class DictionaryPage(Page, _ImportExport):
             lay.addWidget(rm)
             aliases = e.get("aliases") or []
             sub = "Heard as: " + ", ".join(aliases) if aliases else "Spelling and capitalisation only"
-            self.entries.add(Row(e["term"], sub, box))
+            rows.append(Row(e["term"], sub, box))
+        self.entries.add_many(rows)
+        hidden = len(matching) - len(shown)
+        self.btn_more.setText(f"Show more words ({hidden:,} not shown)")
+        self.btn_more.setVisible(hidden > 0)
         has_any = bool(self._items)
         self.search.setVisible(len(self._items) > 6 or bool(q))
         self.entries.setVisible(bool(shown))
@@ -988,6 +1017,11 @@ class SnippetsPage(Page, _ImportExport):
         self.rows = Section("Your snippets")
         self.rows.setObjectName("snippets_list")
         self.body.addWidget(self.rows)
+        self._limit = self.PAGE_SIZE
+        self.btn_more = Button("Show more snippets", "secondary")
+        self.btn_more.setObjectName("snippets_more")
+        self.btn_more.clicked.connect(self._more)
+        self.body.addWidget(self.btn_more, 0, Qt.AlignmentFlag.AlignHCenter)
         self.empty = EmptyState("snippet", "No snippets yet")
         self.empty.setObjectName("snippets_empty")
         self.empty.button.setObjectName("snippets_empty_action")
@@ -995,8 +1029,14 @@ class SnippetsPage(Page, _ImportExport):
         self.body.addStretch(1)
         ctl.snippets_changed.connect(self.invalidate)
 
+    PAGE_SIZE = 100                                   # rows built at a time; "Show more snippets" adds the next ones
+
     def _store(self):
         return self.ctl.snippets
+
+    def _more(self) -> None:
+        self._limit += self.PAGE_SIZE
+        self.refresh()
 
     def refresh(self) -> None:
         failed = ""
@@ -1007,7 +1047,11 @@ class SnippetsPage(Page, _ImportExport):
             items = []
         self.rows.clear()
         self.rows.caption.setText(f"YOUR SNIPPETS  ·  {len(items)}")
-        for s in items:
+        hidden = max(0, len(items) - self._limit)
+        self.btn_more.setText(f"Show more snippets ({hidden:,} not shown)")
+        self.btn_more.setVisible(hidden > 0)
+        rows = []
+        for s in items[:self._limit]:
             box = QWidget()
             lay = QHBoxLayout(box)
             lay.setContentsMargins(0, 0, 0, 0)
@@ -1021,7 +1065,8 @@ class SnippetsPage(Page, _ImportExport):
             lay.addWidget(ed)
             lay.addWidget(rm)
             flat = " ⏎ ".join(line.strip() for line in str(s.get("text", "")).splitlines() if line.strip())
-            self.rows.add(Row(f"“{s['trigger']}”", flat if len(flat) <= 110 else flat[:107] + "…", box, icon="snippet"))
+            rows.append(Row(f"“{s['trigger']}”", flat if len(flat) <= 110 else flat[:107] + "…", box, icon="snippet"))
+        self.rows.add_many(rows)
         self.rows.setVisible(bool(items))
         self.empty.setVisible(not items)
         self.btn_export.setEnabled(bool(items))
@@ -1489,7 +1534,8 @@ class SettingsPage(Page):
         sec.add(self._toggle("smart_formatting", "Smart formatting",
                              "Writes spoken numbers, dates, emails, links and lists the way you would type them."))
         sec.add(self._toggle("auto_learn", "Learn new words",
-                             "Suggests dictionary entries when you correct a word VoxFlow got wrong. Paused while "
+                             "Suggests dictionary entries for names VoxFlow wrote differently from what it heard "
+                             "(“get hub” written as GitHub), so they are always spelled that way. Paused while "
                              "Keep history is off."))
         self.body.addWidget(sec)
 
