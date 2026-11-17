@@ -267,3 +267,22 @@ def test_a_dictionary_import_that_only_adds_spellings_says_so(tmp_path):
     src.write_text("term,aliases\nGitHub,git hub\n", encoding="utf-8")
     assert d.import_(str(src)) == {"added": 0, "updated": 1}
     assert d.list()[0]["aliases"] == ["get hub", "git hub"]
+
+
+# =========================================================================== Q4
+def test_spoken_numbers_up_to_99_fire_a_snippet(tmp_path):
+    s = store.Snippets(tmp_path)
+    s.add("room 21", "Room 21, second floor")
+    s.add("gate forty two", "Gate 42")
+    s.add("zoom link two", "https://zoom/2")
+    s.add("agent 007", "Bond")
+    for said, typed in [("Room twenty one.", "Room 21, second floor"), ("room twenty-one", "Room 21, second floor"),
+                        ("Room 21", "Room 21, second floor"), ("gate 42", "Gate 42"), ("Gate forty-two.", "Gate 42"),
+                        ("zoom link 2", "https://zoom/2"), ("Agent 007.", "Bond")]:
+        assert s.expand(said) == typed, said
+    assert s.expand("Insert room twenty one, please.") == "Room 21, second floor, please."
+    assert s.expand("room twenty") == "room twenty" and s.expand("room twenty two") == "room twenty two"
+    assert store._trigger_key("Room Twenty-One") == "room 21" and store._trigger_key("ninety") == "90"
+    with pytest.raises(ValueError, match="already have a snippet"):
+        s.add("room twenty one", "dup")
+    assert store._number_words(90) == ["ninety"] and store._number_words(7) == ["seven"]

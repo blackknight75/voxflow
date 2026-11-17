@@ -40,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never fire); the import says which spellings were left out.
 - A backup that includes a large history can be restored: backups may be up to 1 GB (packs stay at 50 MB), and
   exporting refuses a backup that would be too large to import again.
+- Snippets with numbers above twenty fire when the number is said: "room twenty-one" types the "room 21" snippet.
 
 ## [0.2.1] - 2026-11-15
 

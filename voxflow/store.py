@@ -1140,9 +1140,17 @@ class Dictionary(_JsonStore):
 # =========================================================================== snippets
 _TRIGGER_WORD_RE = re.compile(r"[^\s,.;:!?\-–—\"“”()\[\]]+")      # "c++" and "#tag" keep their symbols
 _NUMBER_WORDS = ("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen "
-                 "sixteen seventeen eighteen nineteen twenty").split()
-_WORD_TO_DIGITS = {w: str(i) for i, w in enumerate(_NUMBER_WORDS)}
-_DIGITS_TO_WORD = {v: k for k, v in _WORD_TO_DIGITS.items()}
+                 "sixteen seventeen eighteen nineteen").split()
+_TENS = {w: 10 * i for i, w in enumerate("twenty thirty forty fifty sixty seventy eighty ninety".split(), 2)}
+_WORD_TO_DIGITS = {**{w: str(i) for i, w in enumerate(_NUMBER_WORDS)}, **{w: str(n) for w, n in _TENS.items()}}
+
+
+def _number_words(n: int) -> list[str]:
+    """0..99 as spoken: 21 -> ["twenty", "one"]."""
+    if n < 20:
+        return [_NUMBER_WORDS[n]]
+    tens = next(w for w, v in _TENS.items() if v == n - n % 10)
+    return [tens] + ([_NUMBER_WORDS[n % 10]] if n % 10 else [])
 _SNIPPET_GAP = r"[\s,.;:!?\-–—]"            # what the recogniser may write between the words of a trigger
 # A snippet fires only when it is asked for, never because its phrase happens to be in a sentence ("I will sign
 # off on the budget", "send me an email"): when the whole dictation is the trigger, or when a lead word comes
@@ -1179,29 +1187,52 @@ def _trigger_words(trigger: str) -> list[str]:
     return [w.replace("’", "'") for w in _TRIGGER_WORD_RE.findall(str(trigger).lower())]
 
 
+def _trigger_tokens(trigger: str) -> list[str]:
+    """The trigger's words, with numbers up to 99 as digits: "room twenty-one" -> ["room", "21"]."""
+    words, out, i = _trigger_words(trigger), [], 0
+    while i < len(words):
+        w = words[i]
+        unit = words[i + 1] if i + 1 < len(words) else ""
+        if w in _TENS and unit in _NUMBER_WORDS[1:10]:
+            out.append(str(_TENS[w] + _NUMBER_WORDS.index(unit)))
+            i += 2
+            continue
+        out.append(_WORD_TO_DIGITS.get(w, w))
+        i += 1
+    return out
+
+
 def _trigger_key(trigger: str) -> str:
-    """How a trigger sounds: lower case, words only, numbers as digits ("Zoom link two" == "zoom-link 2")."""
-    return " ".join(_WORD_TO_DIGITS.get(w, w) for w in _trigger_words(trigger))
+    """How a trigger sounds: lower case, words only, numbers as digits ("Zoom link two" == "zoom-link 2",
+    "room twenty one" == "room 21")."""
+    return " ".join(_trigger_tokens(trigger))
 
 
-def _trigger_word_pattern(word: str) -> str:
-    digits = _WORD_TO_DIGITS.get(word, word)
-    spoken = _DIGITS_TO_WORD.get(digits)
-    if spoken is not None:
-        return f"(?:{re.escape(digits)}|{spoken})"
+def _spoken_number(token: str) -> list[str] | None:
+    """The spoken words of a number token 0..99 ("21" -> ["twenty", "one"]), else None ("007" is not one)."""
+    if token.isascii() and token.isdigit() and str(int(token)) == token and int(token) < 100:
+        return _number_words(int(token))
+    return None
+
+
+def _trigger_word_pattern(token: str) -> str:
+    spoken = _spoken_number(token)
+    if spoken is not None:                   # "21", "twenty one", "twenty-one"
+        return f"(?:{re.escape(token)}|{(_SNIPPET_GAP + '*').join(spoken)})"
     # "let's" == "lets" == "let’s", and a hyphen may split a word: "email" == "e-mail"
-    return "['’]?".join("-?".join(re.escape(c) for c in part) for part in word.split("'") if part)
+    return "['’]?".join("-?".join(re.escape(c) for c in part) for part in token.split("'") if part)
 
 
 def _trigger_pattern(trigger: str) -> str:
     """Regex body for one trigger: its words with any recogniser punctuation between them; two words that make
     four letters or more may also be run together ("sign off" == "signoff", "e mail" == "email")."""
-    words = _trigger_words(trigger)
-    if not words:
+    tokens = _trigger_tokens(trigger)
+    if not tokens:
         return ""
-    out = _trigger_word_pattern(words[0])
-    for prev, word in zip(words, words[1:]):
-        out += _SNIPPET_GAP + ("*" if len(prev) + len(word) >= 4 else "+") + _trigger_word_pattern(word)
+    size = lambda t: max(len(t), len(" ".join(_spoken_number(t) or [])))     # noqa: E731 - "2" is said "two"
+    out = _trigger_word_pattern(tokens[0])
+    for prev, token in zip(tokens, tokens[1:]):
+        out += _SNIPPET_GAP + ("*" if size(prev) + size(token) >= 4 else "+") + _trigger_word_pattern(token)
     return out
 
 
