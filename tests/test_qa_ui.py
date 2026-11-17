@@ -287,3 +287,18 @@ def test_ui16_a_hotkey_that_cannot_be_cleared_ends_at_the_edge(show):
     QApplication.processEvents()
     assert fixed.btn.geometry().right() == fixed.width() - 1, "no empty x column"
     assert clearable.btn.geometry().right() < clearable.width() - 30, "a clearable one keeps the slot for its x"
+
+
+# =========================================================================== UI-09 undo a deleted transcript
+def test_ui09_deleting_a_transcript_can_be_undone(demo):
+    page, c = demo.page("history"), demo.c
+    total = c.history.count()
+    entry = page.list.items[1]
+    page.list.delete_requested.emit(entry)
+    assert c.history.count() == total - 1 and demo.toasts() == ["Transcript deleted."]
+    toast = demo.win.toasts._toasts[-1]
+    assert toast.btn.text() == "Undo"
+    toast.btn.click()
+    assert c.history.count() == total and c.history.get(entry["id"])["text"] == entry["text"]
+    assert c.history.restore(entry) is False, "a second undo adds nothing"
+    page.list._tick.stop()

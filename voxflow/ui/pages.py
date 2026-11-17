@@ -453,7 +453,8 @@ class HistoryPage(Page):
 
     def _delete(self, entry: dict) -> None:
         if self.run(self.ctl.history.delete, entry.get("id")):
-            self.win.toast("success", "Transcript deleted.")
+            self.win.toast("success", "Transcript deleted.", "Undo",
+                           lambda: self.run(self.ctl.history.restore, entry))
 
     def _confirm_clear(self) -> None:
         n = self.ctl.history.count()

@@ -295,6 +295,14 @@ class FakeHistory:
             self._changed.emit()
         return len(self._items) != n
 
+    def restore(self, entry: dict) -> bool:
+        if any(e["id"] == entry["id"] for e in self._items):
+            return False
+        self._items.append(copy.deepcopy(entry))
+        self._items.sort(key=lambda e: e["ts"], reverse=True)
+        self._changed.emit()
+        return True
+
     def clear(self) -> None:
         self._items = []
         self._changed.emit()

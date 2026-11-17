@@ -1668,3 +1668,16 @@ def test_style_page_describes_what_the_tone_pass_really_does(ui):
                 for name in ("Sam", "Friday", "Thursday"):
                     assert (name in shown) == (name in sample)
     ui.render()
+
+
+def test_ui09_a_stray_delete_key_in_history_is_undone_from_the_toast(make_ui):
+    ui = make_ui(prepare=lambda rig: seed(rig, 3))
+    lst = ui.page("history").list
+    lst.setFocus()
+    ui.qtbot.keyClick(lst, Qt.Key.Key_Down)
+    selected = lst.selected()
+    ui.qtbot.keyClick(lst, Qt.Key.Key_Delete)
+    ui.wait(lambda: ui.c.history.count() == 2)
+    ui.toast_action("Transcript deleted.")
+    ui.wait(lambda: ui.c.history.count() == 3)
+    assert ui.c.history.get(selected["id"])["text"] == selected["text"]

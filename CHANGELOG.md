@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - In Settings, Tab reaches the search box and *Jump to section* first, not after *Reset…* at the bottom.
 - Settings shows the version once (*Updates > Version 0.2.1*); the About row is now *About VoxFlow*. The Dictation
   hotkey's Change button and the setup guide's Change button line up with the right edge.
+- Deleting a transcript in History (the bin icon or the Delete key) can be undone from the toast, like removing
+  a dictionary word or a snippet.
 
 ## [0.2.1] - 2026-11-15
 
