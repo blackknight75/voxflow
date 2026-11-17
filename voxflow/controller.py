@@ -119,7 +119,7 @@ class Controller(QObject):
 
         self._config_path = self.data_dir / "config.json"
         self.config = cfgmod.load_config(self._config_path)
-        self._startup_notices: list[tuple[str, str]] = []
+        self._startup_notices: list[tuple] = []        # (level, message[, action id, button label])
         if getattr(cfgmod, "last_load_problem", ""):
             self._startup_notices.append(("warning", cfgmod.last_load_problem))
         cfg = self.config
@@ -132,6 +132,9 @@ class Controller(QObject):
                                      retention_days=cfg.history_retention_days)
         self.stats = store.Stats(self.data_dir)
         self.styles = store.Styles(self.data_dir)
+        for st in (self.dictionary, self.snippets, self.history, self.stats, self.styles):
+            if st.load_problem:                        # a damaged file: say so, and where the copy of it is
+                self._startup_notices.append(("warning", st.load_problem, "open_data_folder", "Open data folder"))
         if self.stats.is_new and self.history.count():
             self.stats.seed_from_history(self.history.snapshot())
         if demo:
@@ -349,8 +352,10 @@ class Controller(QObject):
         if self.sync.enabled:
             self._sync_timer.start()
             self._sync_soon.start()
-        for level, message in self._startup_notices:
+        for level, message, *action in self._startup_notices:
             self.notice.emit(level, message)
+            if action:
+                self.notice_action.emit(message, *action)
         self._startup_notices = []
         if self._stub_notes and not self._fake:
             log.warning("running with stand-ins: %s", ", ".join(self._stub_notes))

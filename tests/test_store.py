@@ -60,9 +60,10 @@ def test_corrupt_or_foreign_file_starts_empty_and_never_raises(cls, content, tmp
 def test_unparsable_file_is_backed_up_before_it_can_be_overwritten(cls, tmp_path):
     path = tmp_path / cls.filename
     path.write_text("{ this was my data", encoding="utf-8")
-    cls(tmp_path)
-    backup = tmp_path / f"{path.stem}.corrupt{path.suffix}"
+    st = cls(tmp_path)
+    [backup] = tmp_path.glob(f"{path.stem}.corrupt-*{path.suffix}")      # named with the time: never overwritten
     assert backup.read_text(encoding="utf-8") == "{ this was my data"
+    assert backup.name in st.load_problem and "could not be read, so it starts empty" in st.load_problem
 
 
 @pytest.mark.parametrize("payload", [{"entries": "nope"}, {"entries": [1, None, "x", {"term": 5}, {"trigger": 1}]},
@@ -79,7 +80,7 @@ def test_a_layout_that_breaks_the_loader_is_backed_up_and_reset(tmp_path):
     (tmp_path / "stats.json").write_text(json.dumps({"days": ["not", "a", "dict"]}), encoding="utf-8")
     st = Stats(tmp_path)
     assert st.summary()["total_words"] == 0
-    assert (tmp_path / "stats.corrupt.json").exists()
+    assert len(list(tmp_path.glob("stats.corrupt-*.json"))) == 1 and st.load_problem
 
 
 def test_save_failure_is_survived_in_memory(tmp_path, monkeypatch, caplog):

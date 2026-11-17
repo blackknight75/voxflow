@@ -137,3 +137,12 @@ def test_the_retention_row_says_how_many_transcripts_forever_keeps(make_demo):
                                              "5,000 are kept: the oldest go first.")
     c.set("history_limit", 20000)
     assert "at most 20,000 are kept" in page.retention_row.sub.text()
+
+
+# =========================================================================== D2 / R8
+def test_open_data_folder_is_a_notice_action(make_demo):
+    demo = make_demo(empty=True)
+    opened: list = []
+    demo.c.open_data_folder = lambda: opened.append(True)
+    demo.shell.run_action("open_data_folder")
+    assert opened == [True]

@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dictionary suggestions no longer say you corrected a word: they say what VoxFlow heard and how it wrote it.
 - Choosing a shorter *Keep transcripts for* asks first ("Delete 40 transcripts older than 1 day?") instead of
   deleting them at once. Settings also says that even *Forever* keeps at most 5,000 transcripts (the size limit).
+- A damaged entry in `dictionary.json`, `snippets.json` or `history.json` (a hand edit, another tool) costs only
+  that entry, not the whole file. When something could not be read, VoxFlow says so at start-up, with *Open data
+  folder*. The untouched file is kept as `<name>.corrupt-<date>-<time>.json`, so a second damaged file never
+  overwrites the copy of the first; the copy of a damaged history is only deleted by *Clear all* (or an import that
+  replaces the history), not by retention or single deletions.
+- Sounds-like spellings written as one text (`"aliases": "kube"`) are read as a comma-separated list instead of
+  letter by letter, which made VoxFlow replace every lone "e" or "k" in a sentence. One-letter spellings are no longer
+  accepted.
 
 ## [0.2.1] - 2026-11-15
 

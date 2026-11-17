@@ -95,10 +95,8 @@ def _norm(kind: str, key, value, every_setting: bool = False):
             return key, cfgmod.Config.validate(key, value)
         if kind == "dictionary":
             term = store.Dictionary._clean_term(value.get("term"))
-            aliases = value.get("aliases") or []
-            if not isinstance(aliases, list):
-                return None
-            return term.lower(), {"term": term, "aliases": store.Dictionary._clean_aliases(term, aliases)}
+            aliases = store.Dictionary._clean_aliases(term, value.get("aliases"))   # "kube, cube" is two
+            return term.lower(), {"term": term, "aliases": aliases}
         if kind == "snippets":
             trigger, text = value.get("trigger"), value.get("text")
             if not (isinstance(trigger, str) and isinstance(text, str) and text.strip()):

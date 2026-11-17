@@ -140,9 +140,11 @@ def test_with_history_off_nothing_is_learned_from_dictation(rig):
     assert rig.c.dictionary.suggestions()[0]["term"] == "GitHub"
 
 
-# ``history.v1.json`` (kept when an old file is migrated) and ``history.corrupt.json`` (kept when the file could
-# not be read) hold full transcripts too: once the file without the deleted entries is written, any deletion
-# (one entry, retention, the size cap, Clear all, an import that replaces) removes them.
+# ``history.v1.json`` (kept when an old file is migrated) holds full transcripts too: once the file without the
+# deleted entries is written, any deletion (one entry, retention, the size cap, Clear all, an import that replaces)
+# removes it. ``history.corrupt*.json`` (kept when the file could not be read, and the user was told) holds what
+# could not be loaded, so it is only removed when the user deletes everything: Clear all, or an import that
+# replaces the history (QA-robust R8).
 KEPT = "lunch at noon tomorrow"
 BACKUPS = ("history.v1.json", "history.corrupt.json")
 
@@ -200,8 +202,10 @@ def test_any_deletion_also_deletes_the_backup_copies(tmp_path, deletion):
     assert all((folder / b).exists() for b in BACKUPS) and h.count() == 2
     deletion(h, secret)
     h.flush()                                                     # the app writes within COALESCE_S (0.2 s)
-    assert files_with(folder, SECRET) == [], "deleted text must not survive in a backup copy"
-    assert not any((folder / b).exists() for b in BACKUPS)
+    everything = deletion in (_clear, _import_replacing)
+    assert files_with(folder, SECRET) == ([] if everything else ["history.corrupt.json"]),         "deleted text must not survive in a backup copy; a damaged file's copy goes only with everything"
+    assert not (folder / "history.v1.json").exists()
+    assert (folder / "history.corrupt.json").exists() is not everything
     assert (folder / "dictionary.corrupt.json").exists()
     if deletion is not _clear:
         assert files_with(folder, KEPT) == ["history.json"], "what is kept is still saved"
@@ -246,8 +250,8 @@ def test_backup_copies_stay_until_the_file_without_the_deleted_entry_is_written(
     monkeypatch.setattr(cfgmod, "_atomic_write", real)
     h.add_entry(store.make_entry("a new one", "a new one"))
     h.flush()
-    assert not h.last_save_error and not any((folder / b).exists() for b in BACKUPS)
-    assert files_with(folder, SECRET) == []
+    assert not h.last_save_error and not (folder / "history.v1.json").exists()
+    assert files_with(folder, SECRET) == ["history.corrupt.json"], "a damaged file's copy goes only with Clear all"
 
 
 def test_a_backup_copy_that_cannot_be_deleted_is_logged_and_does_not_stop_the_clear(tmp_path, monkeypatch, caplog):

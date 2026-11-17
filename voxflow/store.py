@@ -56,6 +56,33 @@ def count_words(text: str) -> int:
     return len(text.split())
 
 
+def _layout(data) -> dict | None:
+    """A store file's top level: None when there is no file yet, else it must be a JSON object."""
+    if data is not None and not isinstance(data, dict):
+        raise ValueError("the file does not hold a JSON object")
+    return data
+
+
+def _rows(data: dict, key: str) -> list:
+    """The list stored under ``key`` (missing: empty). Anything else is a layout this store does not know."""
+    value = data.get(key)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"“{key}” is not a list")
+    return value
+
+
+def _alias_list(value) -> list[str]:
+    """Sounds-like spellings as a file holds them: a list, or one string of comma-separated spellings ("kube,
+    cube net"), which is never taken letter by letter. Anything else holds none."""
+    if isinstance(value, str):
+        return [a for a in value.split(",") if a.strip()]
+    if isinstance(value, (list, tuple)):
+        return [a for a in value if isinstance(a, str)]
+    return []
+
+
 _STORES: "weakref.WeakSet" = weakref.WeakSet()
 
 
@@ -93,22 +120,69 @@ class _JsonStore:
                 except Exception:  # noqa: BLE001
                     pass
         data = None
+        self._skipped = 0                          # rows ``_load`` had to leave out
+        broken = False
         try:
             data = json.loads(self.path.read_text(encoding="utf-8-sig"))    # tolerate an editor's BOM
         except FileNotFoundError:
             pass
         except (OSError, ValueError) as exc:
             log.warning("%s is unreadable (%s); starting empty and keeping a copy", self.path.name, exc)
-            self._backup("corrupt")
-        try:
-            self._load(data)
-        except Exception as exc:  # noqa: BLE001 - a malformed file must never stop the app
-            log.warning("%s has an unexpected layout (%s); starting empty and keeping a copy", self.path.name, exc)
-            self._backup("corrupt")
+            broken = True
+        if not broken:
+            try:
+                self._load(data)
+            except Exception as exc:  # noqa: BLE001 - a malformed file must never stop the app
+                log.warning("%s has an unexpected layout (%s); starting empty and keeping a copy", self.path.name,
+                            exc)
+                broken = True
+        if broken:
+            self._skipped = 0
             self._load(None)
+        elif self._skipped:
+            log.warning("%s: %d damaged entries were left out; keeping a copy", self.path.name, self._skipped)
+        if broken or self._skipped:
+            self._report_load_problem(self._keep_corrupt_copy(), self._skipped)
 
-    BACKUP_TAGS: tuple[str, ...] = ("corrupt",)    # every ``_backup`` tag this store can write
+    # What the user is told when the file could not be read (completely, or some entries of it). The controller
+    # shows it once at start-up with "Open data folder", where the untouched copy of the file is kept.
+    load_problem = ""
+    label = "this file"                        # "your dictionary": what the file holds, for that message
+
+    def _report_load_problem(self, copy_name: str, skipped: int) -> None:
+        kept = f" The original file was kept as {copy_name} in VoxFlow's data folder." if copy_name else ""
+        if skipped:
+            self.load_problem = (f"{skipped} entr{'y' if skipped == 1 else 'ies'} in {self.label} could not be read "
+                                 f"and {'was' if skipped == 1 else 'were'} left out.{kept}")
+        else:
+            self.load_problem = f"{self.label[0].upper()}{self.label[1:]} could not be read, so it starts empty.{kept}"
+
+    def _corrupt_copies(self) -> list[Path]:
+        """The copies of unreadable files kept so far (``history.corrupt-20261117-072301.json``, and the
+        older single ``history.corrupt.json``)."""
+        return sorted(self.path.parent.glob(f"{self.path.stem}.corrupt*{self.path.suffix}"))
+
+    def _keep_corrupt_copy(self) -> str:
+        """Copy the unreadable file aside, under a name with the time, so a second bad file never overwrites the
+        copy of the first. Returns the copy's file name ('' when there was nothing to copy or it failed)."""
+        base = f"{self.path.stem}.corrupt-{_dt.datetime.now():%Y%m%d-%H%M%S}"
+        target, n = self.path.with_name(base + self.path.suffix), 1
+        while target.exists():                     # two bad files within one second
+            n += 1
+            target = self.path.with_name(f"{base}-{n}{self.path.suffix}")
+        try:
+            target.write_bytes(self.path.read_bytes())
+        except OSError as exc:
+            log.warning("could not keep a copy of %s: %s", self.path.name, exc)
+            return ""
+        return target.name
+
+    BACKUP_TAGS: tuple[str, ...] = ()           # every ``_backup`` tag this store can write
     _purge_backups = False      # data was deleted: drop the backup copies after the next successful write
+    # ... and the copies of unreadable files too (only when the user deleted everything: Clear all, a replacing
+    # import). Retention, the size limit and single deletions keep them: such a copy holds data the user has not
+    # seen in the app since, and may still want back.
+    _purge_corrupt = False
 
     def _backup_path(self, tag: str) -> Path:
         return self.path.with_name(f"{self.path.stem}.{tag}{self.path.suffix}")
@@ -120,15 +194,16 @@ class _JsonStore:
         except OSError:
             pass
 
-    def _drop_backups(self) -> None:
-        """Delete the copies ``_backup`` kept (``history.v1.json``, ``history.corrupt.json``): they hold the
-        same data as the file, so deleted data must not survive in them. A copy that cannot be deleted is logged
-        and is tried again after the next deletion."""
-        for tag in self.BACKUP_TAGS:
+    def _drop_backups(self, corrupt: bool = False) -> None:
+        """Delete the copies ``_backup`` kept (``history.v1.json``): they hold the same data as the file, so
+        deleted data must not survive in them. With ``corrupt`` also the copies of unreadable files. A copy that
+        cannot be deleted is logged and is tried again after the next deletion."""
+        paths = [self._backup_path(tag) for tag in self.BACKUP_TAGS] + (self._corrupt_copies() if corrupt else [])
+        for path in paths:
             try:
-                self._backup_path(tag).unlink(missing_ok=True)
+                path.unlink(missing_ok=True)
             except OSError as exc:
-                log.warning("could not delete %s: %s", self._backup_path(tag).name, exc.strerror or exc)
+                log.warning("could not delete %s: %s", path.name, exc.strerror or exc)
 
     def _load(self, data) -> None:
         raise NotImplementedError
@@ -223,8 +298,8 @@ class _JsonStore:
                 self._notify("save_failed:" + self.path.stem)
             return                               # a pending backup purge waits for a write that works
         if self._purge_backups:                  # the file without the deleted data is on disk now
-            self._purge_backups = False
-            self._drop_backups()
+            corrupt, self._purge_backups, self._purge_corrupt = self._purge_corrupt, False, False
+            self._drop_backups(corrupt)
         if self.last_save_error:
             self.last_save_error = ""
             self._notify("save_ok:" + self.path.stem)
@@ -474,6 +549,7 @@ class Dictionary(_JsonStore):
     """Personal vocabulary: ``{id, term, aliases}`` entries plus an auto-learn suggestion queue."""
 
     filename = "dictionary.json"
+    label = "your dictionary"
 
     def _load(self, data) -> None:
         self._entries: list[dict] = []
@@ -483,23 +559,35 @@ class Dictionary(_JsonStore):
         self._replacements: dict[str, str] = {}
         self._fuzzy: dict = {}
         self._exact: dict[str, str] = {}
-        self._exact_regex = None
-        if not isinstance(data, dict):
+        data = _layout(data)
+        if data is None:
             return
-        for raw in data.get("entries") or []:
-            if isinstance(raw, dict) and isinstance(raw.get("term"), str) and raw["term"].strip():
-                term = _norm_spaces(raw["term"])
-                if self._find_term(term) is None:
-                    aliases = [a for a in raw.get("aliases") or [] if isinstance(a, str)]
-                    self._entries.append({"id": str(raw.get("id") or _new_id()), "term": term,
-                                          "aliases": self._clean_aliases(term, aliases)})
-        for raw in data.get("suggestions") or []:
-            if isinstance(raw, dict) and isinstance(raw.get("term"), str) and raw["term"].strip():
-                self._suggestions.append({
-                    "id": str(raw.get("id") or _new_id()), "term": _norm_spaces(raw["term"]),
-                    "aliases": [a for a in raw.get("aliases") or [] if isinstance(a, str)],
-                    "ts": float(raw.get("ts") or 0.0), "source": str(raw.get("source") or "cleanup")})
-        self._dismissed = {d.lower() for d in data.get("dismissed") or [] if isinstance(d, str)}
+        # one damaged entry costs that entry only, never the whole dictionary (it is counted and reported)
+        seen: set[str] = set()
+        for raw in _rows(data, "entries"):
+            term = self._stored_term(raw)
+            if term is None:
+                self._skipped += 1
+            elif term.lower() not in seen:
+                seen.add(term.lower())
+                self._entries.append({"id": str(raw.get("id") or _new_id()), "term": term,
+                                      "aliases": self._clean_aliases(term, _alias_list(raw.get("aliases")))})
+        for raw in _rows(data, "suggestions"):
+            term = self._stored_term(raw)
+            if term is None:
+                self._skipped += 1
+                continue
+            self._suggestions.append({
+                "id": str(raw.get("id") or _new_id()), "term": term, "aliases": _alias_list(raw.get("aliases")),
+                "ts": _num(raw.get("ts")), "source": str(raw.get("source") or "cleanup")})
+        self._dismissed = {d.lower() for d in _rows(data, "dismissed") if isinstance(d, str)}
+
+    @staticmethod
+    def _stored_term(raw) -> str | None:
+        """The term of a stored row, or None when the row is damaged."""
+        if isinstance(raw, dict) and isinstance(raw.get("term"), str) and raw["term"].strip():
+            return _norm_spaces(raw["term"])
+        return None
 
     def _dump(self):
         return {"version": 1, "entries": self._entries, "suggestions": self._suggestions,
@@ -529,12 +617,12 @@ class Dictionary(_JsonStore):
 
     @staticmethod
     def _clean_aliases(term: str, aliases) -> list[str]:
+        """Usable, distinct sounds-like spellings. One letter is never one: "e" or "k" would turn every lone
+        letter of a sentence ("e-mail", "plan B") into the term."""
         out, seen = [], {term.lower()}
-        for a in aliases or []:
-            if not isinstance(a, str):
-                continue
+        for a in _alias_list(aliases):
             a = _norm_spaces(clean_text(a)).strip(",;")
-            if a and a.lower() not in seen and len(a) <= _MAX_TERM_LEN:
+            if len(a) >= 2 and a.lower() not in seen and len(a) <= _MAX_TERM_LEN:
                 seen.add(a.lower())
                 out.append(a)
         return out
@@ -724,7 +812,7 @@ class Dictionary(_JsonStore):
                 if isinstance(item, str):
                     rows.append((item, []))
                 elif isinstance(item, dict) and isinstance(item.get("term"), str):
-                    rows.append((item["term"], [a for a in item.get("aliases") or [] if isinstance(a, str)]))
+                    rows.append((item["term"], _alias_list(item.get("aliases"))))
         elif ext == ".csv":
             for i, row in enumerate(csv.reader(io.StringIO(text))):
                 cells = [c.strip() for c in row if c.strip()]
@@ -1009,17 +1097,23 @@ class Snippets(_JsonStore):
     """Voice shortcuts: saying the trigger phrase types the saved text."""
 
     filename = "snippets.json"
+    label = "your snippets"
 
     def _load(self, data) -> None:
         self._entries: list[dict] = []
         self._regex = None
-        if not isinstance(data, dict):
+        data = _layout(data)
+        if data is None:
             return
-        for raw in data.get("entries") or []:
-            if not (isinstance(raw, dict) and isinstance(raw.get("trigger"), str) and isinstance(raw.get("text"), str)):
+        seen: set[str] = set()
+        for raw in _rows(data, "entries"):
+            if not (isinstance(raw, dict) and isinstance(raw.get("trigger"), str) and isinstance(raw.get("text"), str)
+                    and self._norm_trigger(raw["trigger"]) and raw["text"]):
+                self._skipped += 1                   # damaged: left out and reported, the others still load
                 continue
             trigger = self._norm_trigger(raw["trigger"])
-            if trigger and raw["text"] and self._find_trigger(trigger) is None:
+            if _trigger_key(trigger) not in seen:
+                seen.add(_trigger_key(trigger))
                 self._entries.append({"id": str(raw.get("id") or _new_id()), "trigger": trigger, "text": raw["text"]})
 
     def _dump(self):
@@ -1276,7 +1370,8 @@ class History(_JsonStore):
     """Transcript history, newest first, with a size cap and optional retention in days."""
 
     filename = "history.json"
-    BACKUP_TAGS = ("corrupt", "v1")
+    label = "your history"
+    BACKUP_TAGS = ("v1",)
     indent = None                   # compact: the file holds thousands of entries and is rewritten per dictation
 
     def __init__(self, path: str | Path | None = None, limit: int = 5000, retention_days: int = 0,
@@ -1291,12 +1386,12 @@ class History(_JsonStore):
         migrated = False
         if isinstance(data, list):               # v1: a flat list of {ts, text, raw, ms}
             source, migrated = data, True
-        elif isinstance(data, dict):
-            source = data.get("items") or []
         else:
-            source = []
+            data = _layout(data)
+            source = [] if data is None else _rows(data, "items")
         for raw in source:
             if not (isinstance(raw, dict) and isinstance(raw.get("text"), str)):
+                self._skipped += 1                   # damaged: left out and reported, the others still load
                 continue
             entry = make_entry(
                 raw["text"], raw.get("raw") if isinstance(raw.get("raw"), str) else "",
@@ -1382,9 +1477,9 @@ class History(_JsonStore):
         ``replace`` the current history is dropped first. Malformed entries are skipped. Returns #added."""
         added = 0
         with self._lock:
-            if replace and self._items:
+            if replace:                          # the user chose to replace everything: no copy survives it
                 self._items = []
-                self._purge_backups = True
+                self._purge_backups = self._purge_corrupt = True
             known ={e["id"] for e in self._items}
             now = self._clock()
             for raw in items or []:
@@ -1422,10 +1517,11 @@ class History(_JsonStore):
         return removed
 
     def clear(self) -> None:
-        """Delete every transcript: the file is rewritten at once, then the backup copies are deleted too."""
+        """Delete every transcript: the file is rewritten at once, then the backup copies are deleted too, the
+        copies of an unreadable history file included."""
         with self._lock:
             self._items = []
-            self._purge_backups = True
+            self._purge_backups = self._purge_corrupt = True
             self._save()
             self.flush()
         self._notify("history")
@@ -1525,6 +1621,7 @@ class Stats(_JsonStore):
     """Per-day usage totals. Independent of the history, so clearing or disabling history keeps them."""
 
     filename = "stats.json"
+    label = "your usage statistics"
 
     def __init__(self, path: str | Path | None = None, clock=time.time):
         self._clock = clock
@@ -1532,7 +1629,8 @@ class Stats(_JsonStore):
 
     def _load(self, data) -> None:
         self._days: dict[str, dict] = {}
-        self.is_new = not isinstance(data, dict)
+        data = _layout(data)
+        self.is_new = data is None
         if not self.is_new:
             days = data.get("days") or {}
             if not isinstance(days, dict):
@@ -1735,18 +1833,21 @@ class Styles(_JsonStore):
     """Writing tone per context: each app belongs to a category, each category has a tone."""
 
     filename = "styles.json"
+    label = "your style settings"
     CATEGORIES = CATEGORIES
     TONES = TONES
 
     def _load(self, data) -> None:
         self._tones: dict[str, str] = dict(DEFAULT_TONES)
         self._apps: dict[str, str] = {}
-        if not isinstance(data, dict):
+        data = _layout(data)
+        if data is None:
             return
-        for cat, tone in (data.get("tones") or {}).items():
+        tones, apps = data.get("tones"), data.get("apps")
+        for cat, tone in tones.items() if isinstance(tones, dict) else ():
             if cat in CATEGORIES and tone in TONES:
                 self._tones[cat] = tone
-        for exe, cat in (data.get("apps") or {}).items():
+        for exe, cat in apps.items() if isinstance(apps, dict) else ():
             if isinstance(exe, str) and normalize_exe(exe) and cat in CATEGORIES:
                 self._apps[normalize_exe(exe)] = cat
 

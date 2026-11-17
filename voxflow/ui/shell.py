@@ -108,6 +108,8 @@ class Shell(QObject):
         elif action == "update":
             self.window.open_settings("updates")
             self.window.pages["settings"].open_update()
+        elif action == "open_data_folder":
+            self.ctl.open_data_folder()
         elif action == "retry_save":
             retry = getattr(self.ctl, "retry_saves", None)
             if callable(retry):
