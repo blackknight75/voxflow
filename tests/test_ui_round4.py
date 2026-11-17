@@ -550,6 +550,7 @@ def test_only_a_real_true_in_the_history_file_counts(tmp_path, value):
     from voxflow import store
     first = store.History(tmp_path)
     entry = first.add("Tampered entry.", "tampered", 100, rules_only=True)
+    first.flush()                                               # the history is written behind (QA D17)
     path = tmp_path / "history.json"
     text = path.read_text(encoding="utf-8")
     assert '"rules_only": true' in text

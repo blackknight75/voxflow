@@ -56,6 +56,33 @@ def count_words(text: str) -> int:
     return len(text.split())
 
 
+def _layout(data) -> dict | None:
+    """A store file's top level: None when there is no file yet, else it must be a JSON object."""
+    if data is not None and not isinstance(data, dict):
+        raise ValueError("the file does not hold a JSON object")
+    return data
+
+
+def _rows(data: dict, key: str) -> list:
+    """The list stored under ``key`` (missing: empty). Anything else is a layout this store does not know."""
+    value = data.get(key)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"“{key}” is not a list")
+    return value
+
+
+def _alias_list(value) -> list[str]:
+    """Sounds-like spellings as a file holds them: a list, or one string of comma-separated spellings ("kube,
+    cube net"), which is never taken letter by letter. Anything else holds none."""
+    if isinstance(value, str):
+        return [a for a in value.split(",") if a.strip()]
+    if isinstance(value, (list, tuple)):
+        return [a for a in value if isinstance(a, str)]
+    return []
+
+
 _STORES: "weakref.WeakSet" = weakref.WeakSet()
 
 
@@ -93,43 +120,94 @@ class _JsonStore:
                 except Exception:  # noqa: BLE001
                     pass
         data = None
+        self._skipped = 0                          # rows ``_load`` had to leave out
+        broken = False
         try:
             data = json.loads(self.path.read_text(encoding="utf-8-sig"))    # tolerate an editor's BOM
         except FileNotFoundError:
             pass
         except (OSError, ValueError) as exc:
             log.warning("%s is unreadable (%s); starting empty and keeping a copy", self.path.name, exc)
-            self._backup("corrupt")
-        try:
-            self._load(data)
-        except Exception as exc:  # noqa: BLE001 - a malformed file must never stop the app
-            log.warning("%s has an unexpected layout (%s); starting empty and keeping a copy", self.path.name,
-                        system.redacted_exc(exc))           # never the message: it can quote an entry
-            self._backup("corrupt")
+            broken = True
+        if not broken:
+            try:
+                self._load(data)
+            except Exception as exc:  # noqa: BLE001 - a malformed file must never stop the app
+                log.warning("%s has an unexpected layout (%s); starting empty and keeping a copy", self.path.name,
+                            system.redacted_exc(exc))       # never the message: it can quote an entry
+                broken = True
+        if broken:
+            self._skipped = 0
+            self._dirty = False
             self._load(None)
+        elif self._skipped:
+            log.warning("%s: %d damaged entries were left out; keeping a copy", self.path.name, self._skipped)
+        if broken or self._skipped:
+            self._report_load_problem(self._keep_corrupt_copy(), self._skipped)
+        if self._dirty:                            # the load changed the data (a migration): write it now,
+            with self._lock:                       # after the copy above, before anything waits on the store
+                self._write()
 
-    BACKUP_TAGS: tuple[str, ...] = ("corrupt",)    # every ``_backup`` tag this store can write
+    # What the user is told when the file could not be read (completely, or some entries of it). The controller
+    # shows it once at start-up with "Open data folder", where the untouched copy of the file is kept.
+    load_problem = ""
+    label = "this file"                        # "your dictionary": what the file holds, for that message
+
+    def _report_load_problem(self, copy_name: str, skipped: int) -> None:
+        kept = f" The original file was kept as {copy_name} in VoxFlow's data folder." if copy_name else ""
+        if skipped:
+            self.load_problem = (f"{skipped} entr{'y' if skipped == 1 else 'ies'} in {self.label} could not be read "
+                                 f"and {'was' if skipped == 1 else 'were'} left out.{kept}")
+        else:
+            self.load_problem = f"{self.label[0].upper()}{self.label[1:]} could not be read, so it starts empty.{kept}"
+
+    def _corrupt_copies(self) -> list[Path]:
+        """The copies of unreadable files kept so far (``history.corrupt-20261117-072301.json``, and the
+        older single ``history.corrupt.json``)."""
+        return sorted(self.path.parent.glob(f"{self.path.stem}.corrupt*{self.path.suffix}"))
+
+    def _keep_corrupt_copy(self) -> str:
+        """Copy the unreadable file aside, under a name with the time, so a second bad file never overwrites the
+        copy of the first. Returns the copy's file name ('' when there was nothing to copy or it failed)."""
+        base = f"{self.path.stem}.corrupt-{_dt.datetime.now():%Y%m%d-%H%M%S}"
+        target, n = self.path.with_name(base + self.path.suffix), 1
+        while target.exists():                     # two bad files within one second
+            n += 1
+            target = self.path.with_name(f"{base}-{n}{self.path.suffix}")
+        try:
+            target.write_bytes(self.path.read_bytes())
+        except OSError as exc:
+            log.warning("could not keep a copy of %s: %s", self.path.name, exc)
+            return ""
+        return target.name
+
+    BACKUP_TAGS: tuple[str, ...] = ()           # every ``_backup`` tag this store can write
     _purge_backups = False      # data was deleted: drop the backup copies after the next successful write
+    # ... and the copies of unreadable files too (only when the user deleted everything: Clear all, a replacing
+    # import). Retention, the size limit and single deletions keep them: such a copy holds data the user has not
+    # seen in the app since, and may still want back.
+    _purge_corrupt = False
 
     def _backup_path(self, tag: str) -> Path:
         return self.path.with_name(f"{self.path.stem}.{tag}{self.path.suffix}")
 
     def _backup(self, tag: str) -> None:
+        """Keep a copy of the file as it is (``history.v1.json`` before a migration rewrites it)."""
         try:
-            if self.path.exists():
-                self._backup_path(tag).write_bytes(self.path.read_bytes())
-        except OSError:
-            pass
+            self._backup_path(tag).write_bytes(self.path.read_bytes())
+        except OSError as exc:
+            log.warning("could not keep a copy of %s: %s", self.path.name, exc)
 
-    def _drop_backups(self) -> None:
-        """Delete the copies ``_backup`` kept (``history.v1.json``, ``history.corrupt.json``): they hold the
-        same data as the file, so deleted data must not survive in them. A copy that cannot be deleted is logged
-        and is tried again after the next deletion."""
-        for tag in self.BACKUP_TAGS:
+    def _drop_backups(self, corrupt: bool = False) -> None:
+        """Delete the copies ``_backup`` kept (``history.v1.json``): they hold the same data as the file, so
+        deleted data must not survive in them. With ``corrupt`` also the copies of unreadable files. A copy that
+        cannot be deleted is logged and is tried again after the next deletion."""
+        paths = [self._backup_path(tag) for tag in self.BACKUP_TAGS] + (self._corrupt_copies() if corrupt else [])
+        for path in paths:
             try:
-                self._backup_path(tag).unlink(missing_ok=True)
+                path.unlink(missing_ok=True)
             except OSError as exc:
-                log.warning("could not delete %s: %s", self._backup_path(tag).name, exc.strerror or exc)
+                log.warning("could not delete %s: %s", path.name, exc.strerror or exc)
 
     def _load(self, data) -> None:
         raise NotImplementedError
@@ -140,22 +218,29 @@ class _JsonStore:
     indent: int | None = 1          # small hand-editable files stay readable; the big history file is compact
 
     COALESCE_S = 0.2                 # saves closer together than this share one write (burst of adds / imports)
+    # The history is written behind the caller, on the write timer's thread: a dictation never waits for it (at
+    # 100,000 transcripts the file is about 40 MB and took about 165 ms per dictation to write).
+    WRITE_BEHIND = False
     _dirty = False
     _last_write = 0.0
     _timer = None
     _batch = 0
+    _changes = 0                     # bumped by every _save: did more come in while a write was being prepared?
+    _seq = 0                         # bumped by every write: an older write never lands after a newer one
 
     def _save(self) -> None:
         """Ask for the file to be written. The first change after a quiet moment is written at once (so a single
-        edit is on disk when the call returns); changes that follow within ``COALESCE_S`` are folded into one
-        trailing write, so a bulk add costs a few writes, not one (with an fsync) per entry. ``flush()`` writes
-        whatever is pending; ``with store.batch():`` holds every save back until the block ends."""
+        edit is on disk when the call returns; a ``WRITE_BEHIND`` store writes it on the timer thread right
+        away); changes that follow within ``COALESCE_S`` are folded into one trailing write, so a bulk add costs a
+        few writes, not one (with an fsync) per entry. ``flush()`` writes whatever is pending; ``with
+        store.batch():`` holds every save back until the block ends."""
         with self._lock:
+            self._changes += 1
             if self._batch:
                 self._dirty = True
                 return
             wait = self._last_write + self.COALESCE_S - time.monotonic()
-            if wait <= 0 and self._timer is None:
+            if wait <= 0 and self._timer is None and not self.WRITE_BEHIND:
                 self._write()
                 return
             self._dirty = True
@@ -166,10 +251,30 @@ class _JsonStore:
                 self._timer.start()
 
     def _timer_fired(self) -> None:
+        if self.WRITE_BEHIND:
+            self._write_behind()
+            return
         with self._lock:
             self._timer = None
             if self._dirty and not self._batch:
                 self._write()
+
+    def _write_behind(self) -> None:
+        """The write of a ``WRITE_BEHIND`` store (timer thread). The data is turned into JSON outside the lock,
+        so a page reading the history or the next dictation filing its transcript does not wait for that; only
+        the file replace itself runs under the lock, where a newer write (``flush``) wins over this one."""
+        with self._lock:
+            self._timer = None
+            if not self._dirty or self._batch:
+                return
+            self._seq += 1
+            seq, changes = self._seq, self._changes
+            purge = (self._purge_backups, self._purge_corrupt)
+            payload = self._dump()                       # a snapshot: the store keeps changing meanwhile
+        text = self._serialise(payload)
+        with self._lock:
+            if seq == self._seq:                         # else a flush() already wrote newer data
+                self._commit(text, purge, current=changes == self._changes)
 
     def flush(self) -> None:
         """Write any pending change now (shutdown, export of the raw file, tests)."""
@@ -210,12 +315,29 @@ class _JsonStore:
         return self._Batch(self)
 
     def _write(self) -> None:
-        """Write the file atomically. Never raises; a failure is remembered in ``last_save_error`` and announced
-        once to the subscribers as the topic ``"save_failed:<file stem>"`` (and ``"save_ok:<stem>"`` when a later save works again)."""
-        self._dirty = False
+        """Write the file atomically, now (call with the lock held). Never raises; a failure is remembered in
+        ``last_save_error`` and announced once to the subscribers as the topic ``"save_failed:<file stem>"`` (and
+        ``"save_ok:<stem>"`` when a later save works again)."""
+        self._seq += 1
+        self._commit(self._serialise(self._dump()), (self._purge_backups, self._purge_corrupt), current=True)
+
+    def _serialise(self, payload):
+        """The file's text, or the exception that stopped it (``_commit`` reports it)."""
+        try:
+            return json.dumps(payload, ensure_ascii=False, indent=self.indent)
+        except (ValueError, TypeError) as exc:
+            return exc
+
+    def _commit(self, text, purge: tuple[bool, bool], current: bool) -> None:
+        """Put ``text`` on disk (lock held). ``current``: it holds every change made so far. ``purge``: the backup
+        purge that was pending when ``text`` was made (it may only run once a file without that data is on disk)."""
+        if current:
+            self._dirty = False
         self._last_write = time.monotonic()
         try:
-            cfgmod._atomic_write(self.path, json.dumps(self._dump(), ensure_ascii=False, indent=self.indent))
+            if isinstance(text, Exception):
+                raise text
+            cfgmod._atomic_write(self.path, text)
         except (OSError, UnicodeError, ValueError, TypeError) as exc:   # lone surrogates raise UnicodeEncodeError
             log.warning("could not save %s: %s", self.path.name, exc)
             first = not self.last_save_error
@@ -223,9 +345,10 @@ class _JsonStore:
             if first:
                 self._notify("save_failed:" + self.path.stem)
             return                               # a pending backup purge waits for a write that works
-        if self._purge_backups:                  # the file without the deleted data is on disk now
-            self._purge_backups = False
-            self._drop_backups()
+        if purge[0]:                             # the file without the deleted data is on disk now
+            if current:
+                self._purge_backups = self._purge_corrupt = False
+            self._drop_backups(purge[1])
         if self.last_save_error:
             self.last_save_error = ""
             self._notify("save_ok:" + self.path.stem)
@@ -471,45 +594,144 @@ def _fuzzy_fix(text: str, index: dict) -> str:
     return "".join(out)
 
 
+def _read_import_text(path: Path) -> str:
+    """A file the user picked to import: UTF-8 (with or without a BOM), else the Windows "ANSI" code page that
+    Excel and Notepad use in Western Europe (cp1252), so "Müller" never stops an import with a codec error."""
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"Couldn't read {path.name}: {exc.strerror or exc}") from None
+    try:
+        if raw.startswith((b"\xff\xfe", b"\xfe\xff")):        # Notepad's "Unicode" (UTF-16)
+            return raw.decode("utf-16")
+        if b"\x00" not in raw:
+            try:
+                return raw.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                return raw.decode("cp1252", errors="replace")
+    except UnicodeDecodeError:
+        pass
+    raise ValueError(f"Couldn't read {path.name}: it is not a text file.")
+
+
+# .txt dictionaries: "term: alias, alias". A ":" in the term, a "," in an alias, a backslash, and a "#" that starts
+# the line are written with a backslash in front, so exporting and importing again gives the same entries.
+_TXT_ESCAPABLE = "\\:,#"
+
+
+def _txt_escape(text: str, chars: str) -> str:
+    return "".join("\\" + c if c in chars else c for c in text)
+
+
+def _txt_line(term: str, aliases: list[str]) -> str:
+    head = _txt_escape(term, "\\:")
+    if head.startswith("#"):
+        head = "\\" + head                              # not a comment line
+    return head + (": " + ", ".join(_txt_escape(a, "\\,") for a in aliases) if aliases else "")
+
+
+def _txt_fields(line: str) -> tuple[str, list[str]]:
+    """One line of a .txt dictionary: 'Ratio\\: 3: ratio three, a\\, b' -> ('Ratio: 3', ['ratio three', 'a, b']).
+    A backslash before any other character is kept as it is."""
+    term: str | None = None
+    parts: list[str] = []
+    cur: list[str] = []
+    i = 0
+    while i < len(line):
+        c = line[i]
+        if c == "\\" and i + 1 < len(line) and line[i + 1] in _TXT_ESCAPABLE:
+            cur.append(line[i + 1])
+            i += 2
+            continue
+        if c == ":" and term is None:
+            term, cur = "".join(cur), []
+        elif c == "," and term is not None:
+            parts.append("".join(cur))
+            cur = []
+        else:
+            cur.append(c)
+        i += 1
+    if term is None:
+        return "".join(cur), []
+    parts.append("".join(cur))
+    return term, [a for a in parts if a.strip()]
+
+
+def _index_entry(entry: dict, taken: dict, alias_of: dict, remove: bool = False) -> None:
+    """Add (or remove) an entry's term and aliases in the "who uses this spelling" maps of a bulk import."""
+    keys = [(entry["term"].lower(), (taken,))] + [(a.lower(), (taken, alias_of)) for a in entry["aliases"]]
+    for key, maps in keys:
+        for m in maps:
+            ids = m.setdefault(key, set())
+            if remove:
+                ids.discard(entry["id"])
+            else:
+                ids.add(entry["id"])
+
+
 class Dictionary(_JsonStore):
     """Personal vocabulary: ``{id, term, aliases}`` entries plus an auto-learn suggestion queue."""
 
     filename = "dictionary.json"
+    label = "your dictionary"
 
     def _load(self, data) -> None:
         self._entries: list[dict] = []
+        self._by_key = None
         self._suggestions: list[dict] = []
         self._dismissed: set[str] = set()
         self._regex = None
         self._replacements: dict[str, str] = {}
         self._fuzzy: dict = {}
         self._exact: dict[str, str] = {}
-        self._exact_regex = None
-        if not isinstance(data, dict):
+        data = _layout(data)
+        if data is None:
             return
-        for raw in data.get("entries") or []:
-            if isinstance(raw, dict) and isinstance(raw.get("term"), str) and raw["term"].strip():
-                term = _norm_spaces(raw["term"])
-                if self._find_term(term) is None:
-                    aliases = [a for a in raw.get("aliases") or [] if isinstance(a, str)]
-                    self._entries.append({"id": str(raw.get("id") or _new_id()), "term": term,
-                                          "aliases": self._clean_aliases(term, aliases)})
-        for raw in data.get("suggestions") or []:
-            if isinstance(raw, dict) and isinstance(raw.get("term"), str) and raw["term"].strip():
-                self._suggestions.append({
-                    "id": str(raw.get("id") or _new_id()), "term": _norm_spaces(raw["term"]),
-                    "aliases": [a for a in raw.get("aliases") or [] if isinstance(a, str)],
-                    "ts": float(raw.get("ts") or 0.0), "source": str(raw.get("source") or "cleanup")})
-        self._dismissed = {d.lower() for d in data.get("dismissed") or [] if isinstance(d, str)}
+        # one damaged entry costs that entry only, never the whole dictionary (it is counted and reported)
+        seen: set[str] = set()
+        for raw in _rows(data, "entries"):
+            term = self._stored_term(raw)
+            if term is None:
+                self._skipped += 1
+            elif _match_key(term) not in seen:
+                seen.add(_match_key(term))
+                self._entries.append({"id": str(raw.get("id") or _new_id()), "term": term,
+                                      "aliases": self._clean_aliases(term, _alias_list(raw.get("aliases")))})
+        for raw in _rows(data, "suggestions"):
+            term = self._stored_term(raw)
+            if term is None:
+                self._skipped += 1
+                continue
+            self._suggestions.append({
+                "id": str(raw.get("id") or _new_id()), "term": term, "aliases": _alias_list(raw.get("aliases")),
+                "ts": _num(raw.get("ts")), "source": str(raw.get("source") or "cleanup")})
+        self._dismissed = {d.lower() for d in _rows(data, "dismissed") if isinstance(d, str)}
+
+    @staticmethod
+    def _stored_term(raw) -> str | None:
+        """The term of a stored row, or None when the row is damaged."""
+        if isinstance(raw, dict) and isinstance(raw.get("term"), str) and raw["term"].strip():
+            return _norm_spaces(raw["term"])
+        return None
 
     def _dump(self):
         return {"version": 1, "entries": self._entries, "suggestions": self._suggestions,
                 "dismissed": sorted(self._dismissed)}
 
     # ---- helpers (call with the lock held)
+    _by_key: dict | None = None      # match key -> entry, built on first use, kept up to date (None: rebuild)
+
+    def _keys(self) -> dict:
+        if self._by_key is None:
+            self._by_key = {}
+            for e in self._entries:
+                self._by_key.setdefault(_match_key(e["term"]), e)
+        return self._by_key
+
     def _find_term(self, term: str) -> dict | None:
-        low = term.lower()
-        return next((e for e in self._entries if e["term"].lower() == low), None)
+        """The entry for ``term`` as it is matched in dictation: any letter case, a hyphen = a space. A lookup
+        in an index, so bulk changes (sync, imports) stay linear."""
+        return self._keys().get(_match_key(term))
 
     def _find_id(self, entry_id: str) -> dict:
         entry = next((e for e in self._entries if e["id"] == entry_id), None)
@@ -526,16 +748,18 @@ class Dictionary(_JsonStore):
             raise ValueError("Type the word or name you want VoxFlow to learn.")
         if len(term) > _MAX_TERM_LEN:
             raise ValueError(f"Dictionary terms can be at most {_MAX_TERM_LEN} characters long.")
+        if ";" in term:                  # a spoken word never has one; a misread spreadsheet row does
+            raise ValueError("A dictionary term can't contain “;”. Put each word in its own entry.")
         return term
 
     @staticmethod
     def _clean_aliases(term: str, aliases) -> list[str]:
+        """Usable, distinct sounds-like spellings. One letter is never one: "e" or "k" would turn every lone
+        letter of a sentence ("e-mail", "plan B") into the term."""
         out, seen = [], {term.lower()}
-        for a in aliases or []:
-            if not isinstance(a, str):
-                continue
+        for a in _alias_list(aliases):
             a = _norm_spaces(clean_text(a)).strip(",;")
-            if a and a.lower() not in seen and len(a) <= _MAX_TERM_LEN:
+            if len(a) >= 2 and a.lower() not in seen and len(a) <= _MAX_TERM_LEN:
                 seen.add(a.lower())
                 out.append(a)
         return out
@@ -560,8 +784,12 @@ class Dictionary(_JsonStore):
         with self._lock:
             return sorted(copy.deepcopy(self._entries), key=lambda e: e["term"].lower())
 
-    def terms(self) -> list[str]:
+    def terms(self, newest_first: bool = False) -> list[str]:
+        """Every term, A to Z; or the most recently added first (what the clean-up's prompt should keep when
+        there are more terms than it has room for)."""
         with self._lock:
+            if newest_first:
+                return [e["term"] for e in reversed(self._entries)]
             return sorted((e["term"] for e in self._entries), key=str.lower)
 
     def add(self, term: str, aliases: list[str] | None = None) -> dict:
@@ -573,6 +801,7 @@ class Dictionary(_JsonStore):
             self._check_alias_conflicts(term, aliases, None)
             entry = {"id": _new_id(), "term": term, "aliases": aliases}
             self._entries.append(entry)
+            self._keys()[_match_key(term)] = entry
             dropped = self._drop_suggestions_for(term)
             self._changed()
             out = copy.deepcopy(entry)
@@ -590,7 +819,9 @@ class Dictionary(_JsonStore):
                 raise ValueError(f"“{new_term}” is already in your dictionary.")
             new_aliases = self._clean_aliases(new_term, entry["aliases"] if aliases is None else aliases)
             self._check_alias_conflicts(new_term, new_aliases, entry_id)
+            self._keys().pop(_match_key(entry["term"]), None)
             entry["term"], entry["aliases"] = new_term, new_aliases
+            self._keys()[_match_key(new_term)] = entry
             self._changed()
             out = copy.deepcopy(entry)
         self._notify("dictionary")
@@ -602,22 +833,33 @@ class Dictionary(_JsonStore):
             self._entries = [e for e in self._entries if e["id"] != entry_id]
             removed = len(self._entries) != before
             if removed:
+                self._by_key = None
                 self._changed()
         if removed:
             self._notify("dictionary")
         return removed
 
-    def apply_changes(self, upserts=(), removals=()) -> int:
+    def apply_changes(self, upserts=(), removals=(), conflicts: list | None = None) -> int:
         """Bulk change used by sync and profile import: ``upserts`` are ``{term, aliases}`` rows that replace
         the entry with the same term (any letter case) or are added; ``removals`` are terms to delete.
-        Lenient on purpose (invalid rows are skipped, nothing raises) and saved once. Returns #changes."""
+        Lenient on purpose (invalid rows are skipped, nothing raises) and saved once. Returns #changes.
+
+        With a ``conflicts`` list (imports), a sounds-like spelling that another entry already uses is left out,
+        as when it is typed by hand, and ``{"alias", "term", "owner"}`` is appended to the list for the user.
+        Sync passes none: there the other device's entry wins as it is."""
         changed = 0
         with self._lock:
             for term in removals:
                 entry = self._find_term(_norm_spaces(term)) if isinstance(term, str) else None
                 if entry is not None:
                     self._entries.remove(entry)
+                    self._keys().pop(_match_key(entry["term"]), None)
                     changed += 1
+            taken: dict[str, set[str]] = {}
+            alias_of: dict[str, set[str]] = {}
+            if conflicts is not None:
+                for e in self._entries:
+                    _index_entry(e, taken, alias_of)
             for row in upserts:
                 try:
                     term = self._clean_term(row.get("term"))
@@ -625,13 +867,31 @@ class Dictionary(_JsonStore):
                     continue
                 aliases = self._clean_aliases(term, row.get("aliases") or [])
                 entry = self._find_term(term)
+                if conflicts is not None:
+                    own = entry["id"] if entry else None
+                    usable = []
+                    for a in aliases:
+                        others = taken.get(a.lower(), set()) - {own}
+                        if others:
+                            owner = next(e["term"] for e in self._entries if e["id"] in others)
+                            conflicts.append({"alias": a, "term": term, "owner": owner})
+                        else:
+                            usable.append(a)
+                    aliases = usable
+                    if entry is not None:
+                        _index_entry(entry, taken, alias_of, remove=True)
                 if entry is None:
-                    self._entries.append({"id": _new_id(), "term": term, "aliases": aliases})
+                    entry = {"id": _new_id(), "term": term, "aliases": aliases}
+                    self._entries.append(entry)
+                    self._keys()[_match_key(term)] = entry
                     self._drop_suggestions_for(term)
                 elif entry["term"] != term or entry["aliases"] != aliases:
-                    entry["term"], entry["aliases"] = term, aliases
+                    entry["term"], entry["aliases"] = term, aliases      # the same match key: the index holds
                 else:
+                    _index_entry(entry, taken, alias_of)
                     continue
+                if conflicts is not None:
+                    _index_entry(entry, taken, alias_of)
                 changed += 1
             if changed:
                 self._changed()
@@ -706,10 +966,7 @@ class Dictionary(_JsonStore):
     # ---- import / export
     @staticmethod
     def _parse_import(path: Path) -> list[tuple[str, list[str]]]:
-        try:
-            text = path.read_text(encoding="utf-8-sig")
-        except (OSError, UnicodeDecodeError) as exc:
-            raise ValueError(f"Couldn't read {path.name}: {exc}") from None
+        text = _read_import_text(path)
         rows: list[tuple[str, list[str]]] = []
         ext = path.suffix.lower()
         if ext == ".json":
@@ -725,9 +982,14 @@ class Dictionary(_JsonStore):
                 if isinstance(item, str):
                     rows.append((item, []))
                 elif isinstance(item, dict) and isinstance(item.get("term"), str):
-                    rows.append((item["term"], [a for a in item.get("aliases") or [] if isinstance(a, str)]))
+                    rows.append((item["term"], _alias_list(item.get("aliases"))))
         elif ext == ".csv":
-            for i, row in enumerate(csv.reader(io.StringIO(text))):
+            # Excel writes "CSV" with ";" (or a tab) in many locales (German, French, Dutch...)
+            try:
+                delimiter = csv.Sniffer().sniff(text[:4096], ",;\t").delimiter
+            except csv.Error:
+                delimiter = ","
+            for i, row in enumerate(csv.reader(io.StringIO(text), delimiter=delimiter)):
                 cells = [c.strip() for c in row if c.strip()]
                 if not cells or (i == 0 and cells[0].lower() == "term"):
                     continue
@@ -737,44 +999,52 @@ class Dictionary(_JsonStore):
                 line = line.strip()
                 if not line or line.startswith("#"):
                     continue
-                term, _, rest = line.partition(":")
-                rows.append((term, [a for a in rest.split(",") if a.strip()]))
+                rows.append(_txt_fields(line))
         return rows
 
-    def import_(self, path: str) -> int:
-        """Add entries from a .json / .csv / .txt file; existing terms gain any new aliases. Returns #added."""
+    def import_(self, path: str) -> dict:
+        """Add entries from a .json / .csv / .txt file; existing terms gain any new aliases.
+        Returns ``{"added": new entries, "updated": existing entries that gained sounds-like spellings}``."""
         rows = self._parse_import(Path(path))
         added = 0
+        changed: set[str] = set()
         with self._lock:
+            # who uses which spelling, built once: checking every alias against every entry was O(n²) under the
+            # lock (5,000 entries took 10 s, with the window frozen and dictations waiting for the lock)
+            by_term = {_match_key(e["term"]): e for e in self._entries}
+            taken: dict[str, set[str]] = {}            # term or alias (lower case) -> ids of the entries using it
+            alias_of: dict[str, set[str]] = {}         # alias (lower case) -> ids
+            for e in self._entries:
+                _index_entry(e, taken, alias_of)
             for term, aliases in rows:
                 try:
                     term = self._clean_term(term)
                 except ValueError:
                     continue
-                existing = self._find_term(term)
+                existing = by_term.get(_match_key(term))
                 target_id = existing["id"] if existing else None
+                if alias_of.get(term.lower(), set()) - {target_id}:
+                    continue                           # the term is another entry's sounds-like spelling
                 merged = self._clean_aliases(term, (existing["aliases"] if existing else []) + list(aliases))
-                usable = []
-                for a in merged:
-                    try:
-                        self._check_alias_conflicts(term, [a], target_id)
-                        usable.append(a)
-                    except ValueError:
-                        continue
+                usable = [a for a in merged if not taken.get(a.lower(), set()) - {target_id}]
                 if existing:
-                    existing["aliases"] = usable
+                    if usable != existing["aliases"]:
+                        _index_entry(existing, taken, alias_of, remove=True)
+                        existing["aliases"] = usable
+                        _index_entry(existing, taken, alias_of)
+                        changed.add(existing["id"])
                     continue
-                try:
-                    self._check_alias_conflicts(term, [], None)
-                except ValueError:
-                    continue
-                self._entries.append({"id": _new_id(), "term": term, "aliases": usable})
+                entry = {"id": _new_id(), "term": term, "aliases": usable}
+                self._entries.append(entry)
+                by_term[_match_key(term)] = entry
+                _index_entry(entry, taken, alias_of)
                 self._drop_suggestions_for(term)
                 added += 1
+            self._by_key = None
             self._changed()
         self._notify("dictionary")
         self._notify("suggestions")
-        return added
+        return {"added": added, "updated": len(changed)}
 
     def export(self, path: str) -> int:
         """Write all entries to ``path`` (.json, .csv or .txt by extension). Returns the number written."""
@@ -787,10 +1057,9 @@ class Dictionary(_JsonStore):
             writer.writerow(["term", "aliases"])
             for e in entries:
                 writer.writerow([e["term"]] + e["aliases"])
-            text = buf.getvalue()
+            text = "\ufeff" + buf.getvalue()           # the BOM tells Excel it is UTF-8 ("Köln", not "KÃ¶ln")
         elif ext == ".txt":
-            text = "".join(e["term"] + (": " + ", ".join(e["aliases"]) if e["aliases"] else "") + "\n"
-                           for e in entries)
+            text = "".join(_txt_line(e["term"], e["aliases"]) + "\n" for e in entries)
         else:
             text = json.dumps({"entries": [{"term": e["term"], "aliases": e["aliases"]} for e in entries]},
                               ensure_ascii=False, indent=2)
@@ -849,8 +1118,13 @@ class Dictionary(_JsonStore):
         the clean-up had to repair ("get hub" -> "GitHub"). Returns the newly queued suggestions."""
         if not raw or not text:
             return []
+        from .cleanup import smart_format
+
         raw_words = [w.lower() for w in re.findall(r"[A-Za-z0-9+#']+", raw)]
         raw_tokens = set(_TOKEN_RE.findall(raw))
+        # what smart formatting writes from the raw words on its own ("three pm" -> "3 PM") is not a name the
+        # clean-up had to repair: never suggest it
+        raw_tokens |= set(_TOKEN_RE.findall(smart_format(raw)))
         out: list[dict] = []
         seen: set[str] = set()
         for tok in _TOKEN_RE.findall(text):
@@ -913,6 +1187,7 @@ class Dictionary(_JsonStore):
                            if self._alias_free(sug["term"], a, None)]
                 entry = {"id": _new_id(), "term": sug["term"], "aliases": aliases}
                 self._entries.append(entry)
+                self._keys()[_match_key(entry["term"])] = entry
             self._changed()
             out = copy.deepcopy(entry)
         self._notify("dictionary")
@@ -941,9 +1216,17 @@ class Dictionary(_JsonStore):
 # =========================================================================== snippets
 _TRIGGER_WORD_RE = re.compile(r"[^\s,.;:!?\-–—\"“”()\[\]]+")      # "c++" and "#tag" keep their symbols
 _NUMBER_WORDS = ("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen "
-                 "sixteen seventeen eighteen nineteen twenty").split()
-_WORD_TO_DIGITS = {w: str(i) for i, w in enumerate(_NUMBER_WORDS)}
-_DIGITS_TO_WORD = {v: k for k, v in _WORD_TO_DIGITS.items()}
+                 "sixteen seventeen eighteen nineteen").split()
+_TENS = {w: 10 * i for i, w in enumerate("twenty thirty forty fifty sixty seventy eighty ninety".split(), 2)}
+_WORD_TO_DIGITS = {**{w: str(i) for i, w in enumerate(_NUMBER_WORDS)}, **{w: str(n) for w, n in _TENS.items()}}
+
+
+def _number_words(n: int) -> list[str]:
+    """0..99 as spoken: 21 -> ["twenty", "one"]."""
+    if n < 20:
+        return [_NUMBER_WORDS[n]]
+    tens = next(w for w, v in _TENS.items() if v == n - n % 10)
+    return [tens] + ([_NUMBER_WORDS[n % 10]] if n % 10 else [])
 _SNIPPET_GAP = r"[\s,.;:!?\-–—]"            # what the recogniser may write between the words of a trigger
 # A snippet fires only when it is asked for, never because its phrase happens to be in a sentence ("I will sign
 # off on the budget", "send me an email"): when the whole dictation is the trigger, or when a lead word comes
@@ -980,29 +1263,52 @@ def _trigger_words(trigger: str) -> list[str]:
     return [w.replace("’", "'") for w in _TRIGGER_WORD_RE.findall(str(trigger).lower())]
 
 
+def _trigger_tokens(trigger: str) -> list[str]:
+    """The trigger's words, with numbers up to 99 as digits: "room twenty-one" -> ["room", "21"]."""
+    words, out, i = _trigger_words(trigger), [], 0
+    while i < len(words):
+        w = words[i]
+        unit = words[i + 1] if i + 1 < len(words) else ""
+        if w in _TENS and unit in _NUMBER_WORDS[1:10]:
+            out.append(str(_TENS[w] + _NUMBER_WORDS.index(unit)))
+            i += 2
+            continue
+        out.append(_WORD_TO_DIGITS.get(w, w))
+        i += 1
+    return out
+
+
 def _trigger_key(trigger: str) -> str:
-    """How a trigger sounds: lower case, words only, numbers as digits ("Zoom link two" == "zoom-link 2")."""
-    return " ".join(_WORD_TO_DIGITS.get(w, w) for w in _trigger_words(trigger))
+    """How a trigger sounds: lower case, words only, numbers as digits ("Zoom link two" == "zoom-link 2",
+    "room twenty one" == "room 21")."""
+    return " ".join(_trigger_tokens(trigger))
 
 
-def _trigger_word_pattern(word: str) -> str:
-    digits = _WORD_TO_DIGITS.get(word, word)
-    spoken = _DIGITS_TO_WORD.get(digits)
-    if spoken is not None:
-        return f"(?:{re.escape(digits)}|{spoken})"
+def _spoken_number(token: str) -> list[str] | None:
+    """The spoken words of a number token 0..99 ("21" -> ["twenty", "one"]), else None ("007" is not one)."""
+    if token.isascii() and token.isdigit() and str(int(token)) == token and int(token) < 100:
+        return _number_words(int(token))
+    return None
+
+
+def _trigger_word_pattern(token: str) -> str:
+    spoken = _spoken_number(token)
+    if spoken is not None:                   # "21", "twenty one", "twenty-one"
+        return f"(?:{re.escape(token)}|{(_SNIPPET_GAP + '*').join(spoken)})"
     # "let's" == "lets" == "let’s", and a hyphen may split a word: "email" == "e-mail"
-    return "['’]?".join("-?".join(re.escape(c) for c in part) for part in word.split("'") if part)
+    return "['’]?".join("-?".join(re.escape(c) for c in part) for part in token.split("'") if part)
 
 
 def _trigger_pattern(trigger: str) -> str:
     """Regex body for one trigger: its words with any recogniser punctuation between them; two words that make
     four letters or more may also be run together ("sign off" == "signoff", "e mail" == "email")."""
-    words = _trigger_words(trigger)
-    if not words:
+    tokens = _trigger_tokens(trigger)
+    if not tokens:
         return ""
-    out = _trigger_word_pattern(words[0])
-    for prev, word in zip(words, words[1:]):
-        out += _SNIPPET_GAP + ("*" if len(prev) + len(word) >= 4 else "+") + _trigger_word_pattern(word)
+    size = lambda t: max(len(t), len(" ".join(_spoken_number(t) or [])))     # noqa: E731 - "2" is said "two"
+    out = _trigger_word_pattern(tokens[0])
+    for prev, token in zip(tokens, tokens[1:]):
+        out += _SNIPPET_GAP + ("*" if size(prev) + size(token) >= 4 else "+") + _trigger_word_pattern(token)
     return out
 
 
@@ -1010,17 +1316,23 @@ class Snippets(_JsonStore):
     """Voice shortcuts: saying the trigger phrase types the saved text."""
 
     filename = "snippets.json"
+    label = "your snippets"
 
     def _load(self, data) -> None:
         self._entries: list[dict] = []
         self._regex = None
-        if not isinstance(data, dict):
+        data = _layout(data)
+        if data is None:
             return
-        for raw in data.get("entries") or []:
-            if not (isinstance(raw, dict) and isinstance(raw.get("trigger"), str) and isinstance(raw.get("text"), str)):
+        seen: set[str] = set()
+        for raw in _rows(data, "entries"):
+            if not (isinstance(raw, dict) and isinstance(raw.get("trigger"), str) and isinstance(raw.get("text"), str)
+                    and self._norm_trigger(raw["trigger"]) and raw["text"]):
+                self._skipped += 1                   # damaged: left out and reported, the others still load
                 continue
             trigger = self._norm_trigger(raw["trigger"])
-            if trigger and raw["text"] and self._find_trigger(trigger) is None:
+            if _trigger_key(trigger) not in seen:
+                seen.add(_trigger_key(trigger))
                 self._entries.append({"id": str(raw.get("id") or _new_id()), "trigger": trigger, "text": raw["text"]})
 
     def _dump(self):
@@ -1035,6 +1347,14 @@ class Snippets(_JsonStore):
         return next((e for e in self._entries if _trigger_key(e["trigger"]) == key), None)
 
     def _clean(self, trigger, text, skip: dict | None = None) -> tuple[str, str]:
+        trigger, text = self._valid(trigger, text)
+        other = self._find_trigger(trigger)
+        if other is not None and other is not skip:
+            raise ValueError(f"You already have a snippet for “{other['trigger']}”.")
+        return trigger, text
+
+    def _valid(self, trigger, text) -> tuple[str, str]:
+        """The normalised (trigger, text), or ValueError with a message for the user. Duplicates are not checked."""
         if not isinstance(trigger, str) or not _trigger_words(trigger):
             raise ValueError("Type the phrase you will say to insert this snippet.")
         if not isinstance(text, str) or not text.strip():
@@ -1045,9 +1365,6 @@ class Snippets(_JsonStore):
                              else "Type the text this snippet should insert.")
         if len(trigger) > _MAX_TERM_LEN:
             raise ValueError(f"Trigger phrases can be at most {_MAX_TERM_LEN} characters long.")
-        other = self._find_trigger(trigger)
-        if other is not None and other is not skip:
-            raise ValueError(f"You already have a snippet for “{other['trigger']}”.")
         return trigger, text
 
     def list(self) -> list[dict]:
@@ -1208,34 +1525,43 @@ class Snippets(_JsonStore):
     def _around(part: str, transform) -> str:
         return transform(part) if transform and part.strip() else part
 
-    def import_(self, path: str) -> int:
-        """Add snippets from a JSON file (``[{trigger, text}]`` or an export). Returns the number added."""
+    def import_(self, path: str) -> dict:
+        """Add snippets from a JSON file (``[{trigger, text}]`` or an export). A snippet you already have (said
+        the same way) takes the file's text, as a pack import does. Returns ``{"added", "updated"}``."""
         src = Path(path)
         try:
-            data = json.loads(src.read_text(encoding="utf-8-sig"))
-        except (OSError, UnicodeDecodeError) as exc:
-            raise ValueError(f"Couldn't read {src.name}: {exc}") from None
-        except ValueError:
+            data = json.loads(_read_import_text(src))
+        except ValueError as exc:
+            if str(exc).startswith("Couldn't read"):
+                raise
             raise ValueError(f"{src.name} is not a valid JSON file.") from None
         if isinstance(data, dict):
             data = data.get("entries", [])
         if not isinstance(data, list):
             raise ValueError(f"{src.name} does not contain a list of snippets.")
-        added = 0
+        added: set[str] = set()
+        updated: set[str] = set()
         with self._lock:
+            by_key = {_trigger_key(e["trigger"]): e for e in self._entries}
             for item in data:
                 if not isinstance(item, dict):
                     continue
                 try:
-                    trigger, text = self._clean(item.get("trigger"), item.get("text"))
+                    trigger, text = self._valid(item.get("trigger"), item.get("text"))
                 except ValueError:
                     continue
-                self._entries.append({"id": _new_id(), "trigger": trigger, "text": text})
-                added += 1
+                existing = by_key.get(_trigger_key(trigger))
+                if existing is None:
+                    by_key[_trigger_key(trigger)] = entry = {"id": _new_id(), "trigger": trigger, "text": text}
+                    self._entries.append(entry)
+                    added.add(entry["id"])
+                elif existing["text"] != text and existing["id"] not in added:   # in a file twice: the first wins
+                    existing["text"] = text
+                    updated.add(existing["id"])
             self._regex = None
             self._save()
         self._notify("snippets")
-        return added
+        return {"added": len(added), "updated": len(updated)}
 
     def export(self, path: str) -> int:
         entries = self.list()
@@ -1255,13 +1581,18 @@ _HISTORY_FIELDS = ("id", "ts", "raw", "text", "app_exe", "app_title", "duration_
 
 def make_entry(text: str, raw: str = "", *, app_exe: str = "", app_title: str = "", duration_s: float = 0.0,
                mode: str = "dictate", latency_ms: float = 0.0, ts: float | None = None,
-               rules_only: bool = False) -> dict:
+               rules_only: bool = False, words: int | None = None) -> dict:
     """Build a history-shaped entry (also used for transcripts that are not stored).
 
     ``rules_only``: the language model timed out or was skipped for this dictation, so the text got the rule
-    clean-up only. The key is present (and True) only on such entries; read it with ``entry.get("rules_only")``."""
+    clean-up only. The key is present (and True) only on such entries; read it with ``entry.get("rules_only")``.
+    ``words``: how many words were spoken, when that is not the text's own count (a snippet types many words for
+    the two that were said; speed and time saved are measured on what was said)."""
     text, raw, app_title = clean_text(text), clean_text(raw or ""), clean_text(app_title or "")
-    words = count_words(text)
+    if words is None:
+        words = count_words(text)
+    else:                            # never more than was heard or written (a hand-edited file can say anything)
+        words = min(max(0, int(words)), max(count_words(text), count_words(raw)))
     duration_s = max(0.0, float(duration_s or 0.0))
     wpm = round(words / (duration_s / 60.0), 1) if duration_s >= 1.0 and mode == "dictate" else 0.0
     entry = {"id": _new_id(), "ts": float(ts if ts is not None else time.time()), "raw": raw, "text": text,
@@ -1277,8 +1608,10 @@ class History(_JsonStore):
     """Transcript history, newest first, with a size cap and optional retention in days."""
 
     filename = "history.json"
-    BACKUP_TAGS = ("corrupt", "v1")
+    label = "your history"
+    BACKUP_TAGS = ("v1",)
     indent = None                   # compact: the file holds thousands of entries and is rewritten per dictation
+    WRITE_BEHIND = True             # see _JsonStore: filing a transcript never waits for the file
 
     def __init__(self, path: str | Path | None = None, limit: int = 5000, retention_days: int = 0,
                  clock=time.time):
@@ -1292,19 +1625,20 @@ class History(_JsonStore):
         migrated = False
         if isinstance(data, list):               # v1: a flat list of {ts, text, raw, ms}
             source, migrated = data, True
-        elif isinstance(data, dict):
-            source = data.get("items") or []
         else:
-            source = []
+            data = _layout(data)
+            source = [] if data is None else _rows(data, "items")
         for raw in source:
             if not (isinstance(raw, dict) and isinstance(raw.get("text"), str)):
+                self._skipped += 1                   # damaged: left out and reported, the others still load
                 continue
             entry = make_entry(
                 raw["text"], raw.get("raw") if isinstance(raw.get("raw"), str) else "",
                 app_exe=str(raw.get("app_exe") or ""), app_title=str(raw.get("app_title") or ""),
                 duration_s=_num(raw.get("duration_s")), mode=str(raw.get("mode") or "dictate"),
                 latency_ms=_num(raw.get("latency_ms", raw.get("ms"))),
-                ts=_sane_ts(raw.get("ts"), self._clock()) or self._clock(), rules_only=raw.get("rules_only") is True)
+                ts=_sane_ts(raw.get("ts"), self._clock()) or self._clock(), rules_only=raw.get("rules_only") is True,
+                words=_stored_words(raw))
             if isinstance(raw.get("id"), str) and raw["id"]:
                 entry["id"] = raw["id"]
             self._items.append(entry)
@@ -1313,10 +1647,10 @@ class History(_JsonStore):
         if migrated and self._items:
             self._backup("v1")
         if migrated or pruned:                   # pruned: the v1 copy goes once the migrated file is written
-            self._save()
+            self._dirty = True                   # written by _read, after a damaged file's copy is kept
 
     def _dump(self):
-        return {"version": 2, "items": self._items}
+        return {"version": 2, "items": list(self._items)}     # a copy: it may be written outside the lock
 
     def _prune(self) -> bool:
         before = len(self._items)
@@ -1383,9 +1717,9 @@ class History(_JsonStore):
         ``replace`` the current history is dropped first. Malformed entries are skipped. Returns #added."""
         added = 0
         with self._lock:
-            if replace and self._items:
+            if replace:                          # the user chose to replace everything: no copy survives it
                 self._items = []
-                self._purge_backups = True
+                self._purge_backups = self._purge_corrupt = True
             known ={e["id"] for e in self._items}
             now = self._clock()
             for raw in items or []:
@@ -1396,7 +1730,7 @@ class History(_JsonStore):
                     app_exe=str(raw.get("app_exe") or ""), app_title=str(raw.get("app_title") or ""),
                     duration_s=_num(raw.get("duration_s")), mode=str(raw.get("mode") or "dictate"),
                     latency_ms=_num(raw.get("latency_ms")), ts=_sane_ts(raw.get("ts"), now) or now,
-                    rules_only=raw.get("rules_only") is True)
+                    rules_only=raw.get("rules_only") is True, words=_stored_words(raw))
                 if isinstance(raw.get("id"), str) and raw["id"]:
                     entry["id"] = raw["id"]
                 if entry["id"] in known:
@@ -1428,10 +1762,11 @@ class History(_JsonStore):
         return self.import_entries([entry]) == 1
 
     def clear(self) -> None:
-        """Delete every transcript: the file is rewritten at once, then the backup copies are deleted too."""
+        """Delete every transcript: the file is rewritten at once, then the backup copies are deleted too, the
+        copies of an unreadable history file included."""
         with self._lock:
             self._items = []
-            self._purge_backups = True
+            self._purge_backups = self._purge_corrupt = True
             self._save()
             self.flush()
         self._notify("history")
@@ -1451,6 +1786,14 @@ class History(_JsonStore):
         with self._lock:
             return len(self._items)
 
+    def count_older_than(self, days: int) -> int:
+        """How many transcripts a retention of ``days`` days would delete now (0 for "forever")."""
+        if not days or days <= 0:
+            return 0
+        with self._lock:
+            cutoff = self._clock() - days * 86400.0
+            return sum(1 for e in self._items if e["ts"] < cutoff)
+
     def get(self, entry_id: str) -> dict | None:
         with self._lock:
             return next((dict(e) for e in self._items if e["id"] == entry_id), None)
@@ -1458,16 +1801,18 @@ class History(_JsonStore):
     def search(self, q: str, limit: int | None = None) -> list[dict]:
         """Entries containing every word of ``q`` (case-insensitive) in the text, raw text or app."""
         needles = [n for n in (q or "").lower().split() if n]
+        limit = None if limit is None else max(0, int(limit))
+        found: list[dict] = []
         with self._lock:
-            if not needles:
-                found = [dict(e) for e in self._items]
-            else:
-                found = []
-                for e in self._items:
+            for e in self._items:
+                if limit is not None and len(found) >= limit:
+                    break                         # enough: a page asks for 201, not for all 100,000
+                if needles:
                     hay = " ".join((e["text"], e["raw"], e["app_exe"], e["app_title"])).lower()
-                    if all(n in hay for n in needles):
-                        found.append(dict(e))
-        return found if limit is None else found[:max(0, int(limit))]
+                    if not all(n in hay for n in needles):
+                        continue
+                found.append(dict(e))
+        return found
 
     def export(self, path: str, fmt: str | None = None) -> int:
         """Write the history to ``path`` as txt, json or csv (default: by extension). Returns #entries."""
@@ -1485,7 +1830,7 @@ class History(_JsonStore):
             for e in items:
                 writer.writerow([_stamp(e["ts"]), _csv_safe(e["app_exe"]), _csv_safe(e["app_title"]), e["mode"],
                                  e["words"], e["wpm"], e["duration_s"], _csv_safe(e["text"]), _csv_safe(e["raw"])])
-            text = buf.getvalue()
+            text = "\ufeff" + buf.getvalue()           # the BOM tells Excel it is UTF-8 ("Köln", not "KÃ¶ln")
         else:
             text = "".join(f"[{_stamp(e['ts'])}]" + (f" {e['app_exe']}" if e["app_exe"] else "")
                            + f"\n{e['text']}\n\n" for e in items)
@@ -1494,6 +1839,12 @@ class History(_JsonStore):
         except OSError as exc:
             raise ValueError(f"Couldn't write {target.name}: {exc}") from None
         return len(items)
+
+
+def _stored_words(raw: dict) -> int | None:
+    """The word count a stored entry carries (the spoken words, see ``make_entry``); None to count the text."""
+    words = raw.get("words")
+    return words if isinstance(words, int) and not isinstance(words, bool) and words >= 0 else None
 
 
 def _num(value) -> float:
@@ -1523,6 +1874,7 @@ class Stats(_JsonStore):
     """Per-day usage totals. Independent of the history, so clearing or disabling history keeps them."""
 
     filename = "stats.json"
+    label = "your usage statistics"
 
     def __init__(self, path: str | Path | None = None, clock=time.time):
         self._clock = clock
@@ -1530,7 +1882,8 @@ class Stats(_JsonStore):
 
     def _load(self, data) -> None:
         self._days: dict[str, dict] = {}
-        self.is_new = not isinstance(data, dict)
+        data = _layout(data)
+        self.is_new = data is None
         if not self.is_new:
             days = data.get("days") or {}
             if not isinstance(days, dict):
@@ -1733,18 +2086,21 @@ class Styles(_JsonStore):
     """Writing tone per context: each app belongs to a category, each category has a tone."""
 
     filename = "styles.json"
+    label = "your style settings"
     CATEGORIES = CATEGORIES
     TONES = TONES
 
     def _load(self, data) -> None:
         self._tones: dict[str, str] = dict(DEFAULT_TONES)
         self._apps: dict[str, str] = {}
-        if not isinstance(data, dict):
+        data = _layout(data)
+        if data is None:
             return
-        for cat, tone in (data.get("tones") or {}).items():
+        tones, apps = data.get("tones"), data.get("apps")
+        for cat, tone in tones.items() if isinstance(tones, dict) else ():
             if cat in CATEGORIES and tone in TONES:
                 self._tones[cat] = tone
-        for exe, cat in (data.get("apps") or {}).items():
+        for exe, cat in apps.items() if isinstance(apps, dict) else ():
             if isinstance(exe, str) and normalize_exe(exe) and cat in CATEGORIES:
                 self._apps[normalize_exe(exe)] = cat
 

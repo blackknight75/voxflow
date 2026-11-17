@@ -188,7 +188,8 @@ def test_pack_round_trip_and_messages(rig, rigs, tmp_path):
         "dictionary", "Team", "Our words", 1, 0, 1)
     other.spy.clear()
     out = other.c.import_pack(str(tmp_path / "team.voxpack"))
-    assert out == {"kind": "dictionary", "name": "Team", "added": 0, "updated": 1, "removed": 0, "skipped": 0}
+    assert out == {"kind": "dictionary", "name": "Team", "added": 0, "updated": 1, "removed": 0, "skipped": 0,
+                   "aliases_skipped": []}
     assert terms(other) == {"Kubernetes": ["cooper netties", "kube"]}
     assert other.spy.of("dictionary_changed")
 

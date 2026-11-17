@@ -654,6 +654,7 @@ def test_fake_controller_with_default_backends_is_fully_hermetic(tmp_path, qtbot
         assert c.injector.pasted == ["So this is a demo transcript you know with no real model."]
         qtbot.waitUntil(lambda: c.history.count() == 1 and c.stats.summary()["sessions"] == 1, timeout=5000)
         qtbot.waitUntil(lambda: (tmp_path / "stats.json").exists(), timeout=5000)   # P8: filed after "done"
+        qtbot.waitUntil(lambda: (tmp_path / "history.json").exists(), timeout=5000)  # written behind (QA D17)
         assert c.history.list()[0]["app_exe"] == "notepad.exe"
         assert c.paste_last() and c.copy_text("x")
         assert sorted(p.name for p in tmp_path.iterdir() if p.suffix == ".json") == [

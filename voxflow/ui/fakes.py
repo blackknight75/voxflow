@@ -288,6 +288,10 @@ class FakeHistory:
     def count(self) -> int:
         return len(self._items)
 
+    def count_older_than(self, days: int) -> int:
+        cutoff = time.time() - days * 86400.0
+        return sum(1 for e in self._items if e["ts"] < cutoff) if days > 0 else 0
+
     def delete(self, entry_id: str) -> bool:
         n = len(self._items)
         self._items = [e for e in self._items if e["id"] != entry_id]

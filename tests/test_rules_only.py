@@ -270,6 +270,7 @@ def test_a_slow_model_marks_the_entry_and_the_bar_but_raises_no_notice(rig):
     assert rig.last_entry()["rules_only"] is True and rig.c.last_transcript["rules_only"] is True
     assert rig.c.rules_only_count == 1 and rig.spy.notices() == [], "one slow answer never raises a notice"
     assert rig.injector.pasted[-1] == "Please send the report.", "the text itself is pasted as usual"
+    rig.c.history.flush()                                        # the history is written behind (QA D17)
     saved = json.loads(next(p for p in rig.data_dir.iterdir() if p.name.startswith("history")).read_text("utf-8"))
     assert "rules_only" in json.dumps(saved)
 

@@ -41,7 +41,10 @@ LOCAL_SETTINGS = frozenset({
     "overlay_position", "ui_state", "onboarding_done", "update_mode", "update_install_when", "update_time"})
 # Interface state: never written to a backup either.
 _NEVER_EXPORTED = frozenset({"config_version", "ui_state", "overlay_position", "onboarding_done"})
-_MAX_FILE_BYTES = 50 * 1024 * 1024
+_MAX_FILE_BYTES = 50 * 1024 * 1024               # packs and sync files
+# A backup can hold the whole history: 100,000 transcripts (the largest history_limit) make 60-80 MB, more with
+# long dictations. Exporting must never write a file that importing then refuses.
+_MAX_BACKUP_BYTES = 1024 * 1024 * 1024
 _DELETED = object()
 
 BASELINE = 1.0                       # timestamp of entries a device had before it joined a sync folder
@@ -76,12 +79,22 @@ def snapshot(ds: DataSet, every_setting: bool = False) -> dict:
     styles.update({f"app:{exe}": cat for exe, cat in ds.styles.user_apps().items()})
     return {
         "settings": {k: settings[k] for k in keys if k in settings},
-        "dictionary": {e["term"].lower(): {"term": e["term"], "aliases": list(e["aliases"])}
+        # keyed the way an entry is said, as the stores match them: "Wi-Fi" == "wi fi", "zoom link two" ==
+        # "Zoom link 2", so a backup or pack never adds a second copy of something that is already there
+        "dictionary": {_dict_key(e["term"]): {"term": e["term"], "aliases": list(e["aliases"])}
                        for e in ds.dictionary.list()},
-        "snippets": {e["trigger"].lower(): {"trigger": e["trigger"], "text": e["text"]}
+        "snippets": {_snippet_key(e["trigger"]): {"trigger": e["trigger"], "text": e["text"]}
                      for e in ds.snippets.list()},
         "styles": styles,
     }
+
+
+def _dict_key(term: str) -> str:
+    return store._match_key(term)
+
+
+def _snippet_key(trigger: str) -> str:
+    return store._trigger_key(trigger)
 
 
 def _norm(kind: str, key, value, every_setting: bool = False):
@@ -95,18 +108,16 @@ def _norm(kind: str, key, value, every_setting: bool = False):
             return key, cfgmod.Config.validate(key, value)
         if kind == "dictionary":
             term = store.Dictionary._clean_term(value.get("term"))
-            aliases = value.get("aliases") or []
-            if not isinstance(aliases, list):
-                return None
-            return term.lower(), {"term": term, "aliases": store.Dictionary._clean_aliases(term, aliases)}
+            aliases = store.Dictionary._clean_aliases(term, value.get("aliases"))   # "kube, cube" is two
+            return _dict_key(term), {"term": term, "aliases": aliases}
         if kind == "snippets":
             trigger, text = value.get("trigger"), value.get("text")
             if not (isinstance(trigger, str) and isinstance(text, str) and text.strip()):
                 return None
             trigger = store.Snippets._norm_trigger(trigger)
-            if not trigger or len(trigger) > store._MAX_TERM_LEN:
+            if not _snippet_key(trigger) or len(trigger) > store._MAX_TERM_LEN:
                 return None
-            return trigger.lower(), {"trigger": trigger, "text": text}
+            return _snippet_key(trigger), {"trigger": trigger, "text": text}
         if kind == "styles" and isinstance(key, str):
             if key.startswith("tone:") and key[5:] in store.CATEGORIES and value in store.TONES:
                 return key, value
@@ -122,13 +133,18 @@ def _deletable(kind: str, key: str) -> bool:
     return kind in ("dictionary", "snippets") or (kind == "styles" and key.startswith("app:"))
 
 
-def _apply(ds: DataSet, changes: dict) -> list[str]:
-    """Apply ``{kind: {key: value | _DELETED}}``. Returns the setting keys that could not be applied."""
+def _apply(ds: DataSet, changes: dict, conflicts: list | None = None) -> list[str]:
+    """Apply ``{kind: {key: value | _DELETED}}``. Returns the setting keys that could not be applied.
+    ``conflicts``: see ``Dictionary.apply_changes`` (imports pass a list, sync does not)."""
     for kind, st in (("dictionary", ds.dictionary), ("snippets", ds.snippets)):
         part = changes.get(kind) or {}
         if part:
-            st.apply_changes([v for v in part.values() if v is not _DELETED],
-                             [k for k, v in part.items() if v is _DELETED])
+            upserts = [v for v in part.values() if v is not _DELETED]
+            removals = [k for k, v in part.items() if v is _DELETED]
+            if kind == "dictionary" and conflicts is not None:
+                st.apply_changes(upserts, removals, conflicts=conflicts)
+            else:
+                st.apply_changes(upserts, removals)
     part = changes.get("styles") or {}
     if part:
         ds.styles.apply_changes(
@@ -157,9 +173,9 @@ def _diff(current: dict, target: dict) -> tuple[dict, dict]:
 
 
 # =========================================================================== files
-def _read_json(path: Path, what: str):
+def _read_json(path: Path, what: str, limit: int | None = None):
     try:
-        if path.stat().st_size > _MAX_FILE_BYTES:
+        if path.stat().st_size > (_MAX_FILE_BYTES if limit is None else limit):
             raise ValueError(f"{path.name} is too large to be a VoxFlow {what}.")
         text = path.read_text(encoding="utf-8-sig")
     except FileNotFoundError:
@@ -242,6 +258,10 @@ def export_profile(ds: DataSet, path: str, include_history: bool = True, device_
         target = target.with_suffix(PROFILE_EXT)
     profile = build_profile(ds, include_history, device_id)
     _write(target, profile)
+    if target.stat().st_size > _MAX_BACKUP_BYTES:       # never hand the user a backup that cannot be restored
+        target.unlink(missing_ok=True)
+        raise ValueError(f"The backup would be larger than {_MAX_BACKUP_BYTES // 1024 ** 3} GB, too large to "
+                         "import again. Leave out the history, or lower the history size limit.")
     counts = {"settings": len(profile["settings"]), "dictionary": len(profile["dictionary"]),
               "snippets": len(profile["snippets"]), "styles": len(profile["styles"]["apps"]),
               "stats": len(profile.get("stats", {})), "history": len(profile.get("history", []))}
@@ -254,7 +274,7 @@ def read_profile(path: str) -> dict:
     Returns ``{"meta", "data": {kind: {key: value}}, "history": list | None, "stats": dict | None,
     "skipped": int}`` with only the sections the file contains; unusable entries are dropped and counted."""
     src = Path(path)
-    data = _read_json(src, "backup")
+    data = _read_json(src, "backup", _MAX_BACKUP_BYTES)
     if not isinstance(data, dict) or data.get("format") != PROFILE_FORMAT:
         if isinstance(data, dict) and data.get("format") == PACK_FORMAT:
             raise ValueError(f"{src.name} is a shared pack, not a backup. Import it on the Dictionary or Snippets page.")
@@ -352,6 +372,7 @@ def _import(ds: DataSet, incoming: dict, history, stats, mode: str, overwrite: b
     details: dict = {}
     counts = dict.fromkeys(PARTS, 0)
     skipped_settings: list[str] = []
+    conflicts: list[dict] = []
     try:
         changes = {}
         for kind in KINDS:
@@ -359,7 +380,10 @@ def _import(ds: DataSet, incoming: dict, history, stats, mode: str, overwrite: b
                 target = _merge_target(kind, before[kind], incoming[kind], mode, overwrite)
                 changes[kind], details[kind] = _diff(before[kind], target)
                 counts[kind] = len(changes[kind])
-        skipped_settings = sorted(_apply(ds, changes))
+        skipped_settings = sorted(_apply(ds, changes, conflicts))
+        if conflicts:                            # spellings were left out: count what really changed
+            details["dictionary"] = _diff(before["dictionary"], snapshot(ds)["dictionary"])[1]
+            counts["dictionary"] = sum(details["dictionary"].values())
         counts["settings"] = max(0, counts["settings"] - len(skipped_settings))
         if history is not None:
             counts["history"] = ds.history.import_entries(history, replace=(mode == "replace"))
@@ -377,7 +401,8 @@ def _import(ds: DataSet, incoming: dict, history, stats, mode: str, overwrite: b
         except Exception as exc2:  # noqa: BLE001
             log.error("restoring after a failed import also failed\n%s", system.redacted_traceback(exc2))
         raise ValueError("The import could not be completed, so nothing was changed.") from None
-    return {"mode": mode, "counts": counts, "details": details, "settings_skipped": skipped_settings}
+    return {"mode": mode, "counts": counts, "details": details, "settings_skipped": skipped_settings,
+            "aliases_skipped": conflicts}
 
 
 def import_profile(ds: DataSet, path: str, mode: str = "merge", parts=None, device_id: str = "") -> dict:
@@ -484,7 +509,7 @@ def import_pack(ds: DataSet, path: str, mode: str = "merge") -> dict:
     pack = read_pack(path)
     summary = _import(ds, {pack["kind"]: pack["entries"]}, None, None, mode, overwrite=True)
     return {"kind": pack["kind"], "name": pack["name"], **summary["details"][pack["kind"]],
-            "skipped": pack["skipped"]}
+            "skipped": pack["skipped"], "aliases_skipped": summary["aliases_skipped"]}
 
 
 # =========================================================================== sync folder
@@ -628,8 +653,10 @@ class SyncEngine:
         if rec.get("x"):
             if kind == "styles":
                 key = f"app:{store.normalize_exe(key[4:])}" if key.startswith("app:") else key
+            elif kind == "snippets":
+                key = _snippet_key(key)
             else:
-                key = " ".join(key.split()).lower()
+                key = _dict_key(key)
             return (key, {"x": 1, "t": float(t), "d": d}) if key and _deletable(kind, key) else None
         got = _norm(kind, key, rec.get("v"))
         return None if got is None else (got[0], {"v": got[1], "t": float(t), "d": d})

@@ -294,7 +294,7 @@ def test_missing_unreadable_and_oversized_files(dev, tmp_path, monkeypatch):
         S.import_profile(dev.ds, str(binary))
     with pytest.raises(ValueError):
         S.import_profile(dev.ds, str(tmp_path))                 # a folder
-    monkeypatch.setattr(S, "_MAX_FILE_BYTES", 10)
+    monkeypatch.setattr(S, "_MAX_BACKUP_BYTES", 10)           # backups have their own, higher limit (QA D7)
     big = S.export_profile.__wrapped__ if hasattr(S.export_profile, "__wrapped__") else None
     assert big is None
     path = _write(tmp_path / "big.voxbackup", {"format": "voxflow-profile", "version": 1, "dictionary": ["a" * 50]})
@@ -326,11 +326,13 @@ def test_unusable_entries_are_dropped_and_counted_the_rest_is_imported(tmp_path,
         "stats": {"2026-11-01": {"words": 5, "seconds": 2.0}, "garbage": 4},
     })
     info = S.describe_profile(path)
-    assert info["counts"]["dictionary"] == 2 and info["counts"]["snippets"] == 1 and info["counts"]["history"] == 1
-    assert info["skipped"] >= 12
+    # "aliases": "x" is a comma-separated string (QA D3): the entry is kept, the one-letter alias is not
+    assert info["counts"]["dictionary"] == 3 and info["counts"]["snippets"] == 1 and info["counts"]["history"] == 1
+    assert info["skipped"] >= 11
     d = Device(tmp_path, "gamma", clock)
     out = S.import_profile(d.ds, path, "replace")
-    assert set(d.terms()) == {"Good", "PlainString"}
+    assert set(d.terms()) == {"Good", "PlainString", "Alias"}
+    assert d.ds.dictionary.list()[0] == {**d.ds.dictionary.list()[0], "term": "Alias", "aliases": []}
     assert d.snips() == {"ok": "fine"}
     assert d.styles.tones()["email"] == "casual" and d.styles.user_apps() == {"slack.exe": "work"}
     assert d.settings["sounds_enabled"] is False

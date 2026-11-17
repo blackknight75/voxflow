@@ -78,7 +78,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The README explains why Windows shows VoxFlow using the microphone (Privacy): the open microphone keeps the
   moment before you press the shortcut, in memory only.
 - VoxFlow uses about 480 MB less memory: numpy no longer reserves a buffer for every CPU thread at start.
+- The Dictionary and Snippets pages open at once with long lists (1,500 words took about 30 s). They show the first
+  100 entries with *Show more*, and the dictionary search waits for a pause in typing.
+- Dictionary suggestions no longer say you corrected a word: they say what VoxFlow heard and how it wrote it.
+- Choosing a shorter *Keep transcripts for* asks first ("Delete 40 transcripts older than 1 day?") instead of
+  deleting them at once. Settings also says that even *Forever* keeps at most 5,000 transcripts (the size limit).
+- A damaged entry in `dictionary.json`, `snippets.json` or `history.json` (a hand edit, another tool) costs only
+  that entry, not the whole file. When something could not be read, VoxFlow says so at start-up, with *Open data
+  folder*. The untouched file is kept as `<name>.corrupt-<date>-<time>.json`, so a second damaged file never
+  overwrites the copy of the first; the copy of a damaged history is only deleted by *Clear all* (or an import that
+  replaces the history), not by retention or single deletions.
+- Sounds-like spellings written as one text (`"aliases": "kube"`) are read as a comma-separated list instead of
+  letter by letter, which made VoxFlow replace every lone "e" or "k" in a sentence. One-letter spellings are no longer
+  accepted.
+- Importing a dictionary CSV saved by Excel with `;` separators or in the Windows "ANSI" encoding (German, French,
+  Dutch and other locales) imports the words, instead of junk terms such as `Kubernetes;cube net ease` or a codec
+  error. A dictionary term can no longer contain `;`.
+- CSV exports of the history and the dictionary show accents correctly in Excel ("Köln", not "KÃ¶ln").
+- A dictionary exported as `.txt` imports back to the same entries when a term holds `:` or a sounds-like spelling
+  holds `,` (they are written as `\:` and `\,`).
+- Importing a large dictionary file is fast (5,000 entries took about 18 s, with the window frozen; now well under
+  a second).
+- Imports say what they changed: "Imported 3 new dictionary entries and updated 2 you already had." Importing a
+  snippets file updates the text of snippets you already have (as a pack import does) instead of silently keeping
+  the old text.
+- Backups and packs recognise a snippet or a word said another way: a *merge* backup no longer replaces your "zoom
+  link 2" with the backup's "zoom link two", a pack preview counts "sign-off" as already in your list when you have
+  "Sign off", and "wi fi" is the same dictionary word as "Wi-Fi".
+- Importing a pack or a backup no longer gives a word a sounds-like spelling that another word already uses (it would
+  never fire); the import says which spellings were left out.
+- A backup that includes a large history can be restored: backups may be up to 1 GB (packs stay at 50 MB), and
+  exporting refuses a backup that would be too large to import again.
+- Snippets with numbers above twenty fire when the number is said: "room twenty-one" types the "room 21" snippet.
+- *Learn new words* no longer suggests "AM" and "PM" (written by smart formatting, not names VoxFlow had to fix).
+- A snippet no longer inflates the speed and *time saved* statistics: a dictation counts the words you said ("my
+  address": 2 words), not the words of the text the snippet typed.
+- With more than 60 dictionary words, the clean-up's language model gets the ones that sound like what you said
+  (then the newest), instead of always the alphabetically first 60, so "Zendesk" or "TypeScript" are corrected too.
+- Settings written as text in `config.json` (by hand or by a deployment script) are read as meant:
+  `"save_history": "false"` turns history off instead of being ignored, and `"history_limit": "100"` is 100. A
+  value that is still not valid is reset to its default and VoxFlow says so at start-up.
+- Running an older VoxFlow after a newer one no longer drops the newer version's settings from `config.json` or
+  lowers its `config_version`.
 
+### Improved
+
+- A dictation no longer waits for the history file to be written: it is saved right after, in the background
+  (with 100,000 transcripts that took about 165 ms per dictation; now about 3 ms). History search stops once it has
+  a page of results.
 
 ## [0.2.1] - 2026-11-15
 

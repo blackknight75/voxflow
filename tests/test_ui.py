@@ -117,6 +117,7 @@ def seed(rig, n=3):
         entry = rig.c.history.add(texts[i % len(texts)], f"raw version {i} um", 500, app_exe="slack.exe",
                                   app_title="#general", duration_s=3.0)
         rig.c.stats.record(entry["words"], 3.0, "slack.exe")
+    rig.c.history.flush()                                       # written behind (QA D17): on disk for the tests
 
 
 # =========================================================================== shell + window chrome
@@ -594,13 +595,13 @@ def test_dictionary_search_appears_for_long_lists(ui):
     search = ui.find("dict_search")
     assert search.isVisible()
     search.setText("char")
-    assert len(ui.find_all("dict_edit")) == 1
+    ui.wait(lambda: len(ui.find_all("dict_edit")) == 1)        # after the search's short pause
     search.setText("golf alias")
-    assert len(ui.find_all("dict_edit")) == 1
+    ui.wait(lambda: len(ui.find_all("dict_edit")) == 1 and ui.find("dict_edit").accessibleName() == "Edit Golf")
     search.setText("nothing")
-    assert ui.find("dict_empty").accessibleName() == "No matches"
+    ui.wait(lambda: ui.find("dict_empty").accessibleName() == "No matches")
     ui.find("dict_empty_action").click()
-    assert len(ui.find_all("dict_edit")) == 7
+    ui.wait(lambda: len(ui.find_all("dict_edit")) == 7)
 
 
 def test_dictionary_import_and_export(ui, monkeypatch, tmp_path):
@@ -616,7 +617,7 @@ def test_dictionary_import_and_export(ui, monkeypatch, tmp_path):
     out = tmp_path / "out.csv"
     monkeypatch.setattr(dialogs, "ask_save_path", lambda *a, **k: str(out))
     ui.find("dict_export").click()
-    assert out.read_text(encoding="utf-8").splitlines()[0] == "term,aliases"
+    assert out.read_text(encoding="utf-8-sig").splitlines()[0] == "term,aliases"
     assert "Exported 2 dictionary entries to out.csv." in ui.toasts()
     monkeypatch.setattr(dialogs, "ask_open_path", lambda *a, **k: str(tmp_path / "missing.json"))
     ui.find("dict_import").click()

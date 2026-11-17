@@ -125,7 +125,7 @@ class Controller(QObject):
 
         self._config_path = self.data_dir / "config.json"
         self.config = cfgmod.load_config(self._config_path)
-        self._startup_notices: list[tuple[str, str]] = []
+        self._startup_notices: list[tuple] = []        # (level, message[, action id, button label])
         if getattr(cfgmod, "last_load_problem", ""):
             self._startup_notices.append(("warning", cfgmod.last_load_problem))
         self._error_told = False
@@ -142,6 +142,9 @@ class Controller(QObject):
                                      retention_days=cfg.history_retention_days)
         self.stats = store.Stats(self.data_dir)
         self.styles = store.Styles(self.data_dir)
+        for st in (self.dictionary, self.snippets, self.history, self.stats, self.styles):
+            if st.load_problem:                        # a damaged file: say so, and where the copy of it is
+                self._startup_notices.append(("warning", st.load_problem, "open_data_folder", "Open data folder"))
         if self.stats.is_new and self.history.count():
             self.stats.seed_from_history(self.history.snapshot())
         if demo:
@@ -368,8 +371,10 @@ class Controller(QObject):
         if self.sync.enabled:
             self._sync_timer.start()
             self._sync_soon.start()
-        for level, message in self._startup_notices:
+        for level, message, *action in self._startup_notices:
             self.notice.emit(level, message)
+            if action:
+                self.notice_action.emit(message, *action)
         self._startup_notices = []
         if self._autostart_other:
             self._notice_action("warning", "Launch at login starts another copy of VoxFlow "
@@ -1681,7 +1686,8 @@ class Controller(QObject):
 
     def _clean_kwargs(self, context: AppContext) -> dict:
         cfg = self.config
-        return {"tone": self.styles.tone_for(context.exe, context.title), "terms": self.dictionary.terms(),
+        return {"tone": self.styles.tone_for(context.exe, context.title),
+                "terms": self.dictionary.terms(newest_first=True),      # the clean-up ranks them by the speech
                 "language": cfg.language, "smart": cfg.smart_formatting}
 
     def _personalise(self, text: str, raw: str, context: AppContext) -> str:
@@ -1740,6 +1746,7 @@ class Controller(QObject):
                 msg = "Nothing to paste" if res["dropped"] else "Didn't catch that"
             self._sig_failed.emit(msg, gen)
             return
+        spoken_words = store.count_words(text)       # what was said: a snippet types more words than that
         if text.strip():
             cleaned = text
             text = self._personalise(text, res["raw"], ctx)
@@ -1751,7 +1758,7 @@ class Controller(QObject):
         rules_only = bool(res.get("rules_only"))
         entry = store.make_entry(text, res["raw"], app_exe=ctx.exe, app_title=ctx.title,
                                  duration_s=job["speech_s"], mode="dictate", latency_ms=latency * 1000,
-                                 rules_only=rules_only)
+                                 rules_only=rules_only, words=spoken_words)
         if ok and rules_only:
             message += RULES_ONLY_SUFFIX                 # "Pasted · basic clean-up": the quiet hint on the bar
         self._finish(entry, ctx, gen, message, res, pasted=ok)

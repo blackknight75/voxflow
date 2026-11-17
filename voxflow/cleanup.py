@@ -1031,6 +1031,38 @@ phonetic_key = _phon
 _MAX_HINT_TERMS, _MAX_HINT_CHARS = 60, 700
 
 
+def rank_terms(terms, text: str) -> list[str]:
+    """The user's terms in the order the prompt should keep them. When they all fit in the hint (at most
+    ``_MAX_HINT_TERMS`` / ``_MAX_HINT_CHARS``) nothing is chosen and nothing is computed. Otherwise the terms that
+    sound like something in ``text`` come first (the spelling, or the sound of one to three words in a row), so
+    "Zendesk" is in the prompt when "zen desk" was said, however many terms come before it alphabetically; the
+    rest keep their order (the caller passes the newest first)."""
+    terms = [t for t in terms or [] if isinstance(t, str) and t.strip()]
+    if len(terms) <= _MAX_HINT_TERMS and sum(len(t) + 2 for t in terms) <= _MAX_HINT_CHARS:
+        return terms
+    words = re.findall(r"[^\W_]+", text.lower())
+    heard, prefixes = set(), set()
+    for n in (1, 2, 3):
+        for i in range(len(words) - n + 1):
+            span = "".join(words[i:i + n])
+            if len(span) >= 3:
+                heard.add(span)
+                key = phonetic_key(span)
+                heard.add(key)
+                prefixes.add(key[:4])
+
+    def tier(term: str) -> int:
+        squashed = re.sub(r"[\W_]+", "", term.lower())
+        if len(squashed) < 3:
+            return 0
+        key = phonetic_key(squashed)
+        if squashed in heard or key in heard:
+            return 2
+        return 1 if key[:4] in prefixes else 0
+
+    return sorted(terms, key=lambda t: -tier(t))      # stable: the newest first within a tier
+
+
 def _terms_hint(terms) -> str:
     """System-prompt suffix listing the user's preferred spellings ('' when there are none)."""
     picked: list[str] = []
@@ -1835,7 +1867,7 @@ class Cleaner:
             return text
         try:
             lang = resolve_language(text, language)
-            self._terms = list(terms) if terms else None
+            self._terms = rank_terms(terms, text) if terms else None
             try:
                 if lang == "en":
                     out = self._clean(text)
