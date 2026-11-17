@@ -190,7 +190,7 @@ def test_d12_tray_can_pause_for_an_hour_and_the_manual_toggle_cancels_it(make_ui
     assert ui.c.paused
     ui.c.set_paused(False)
     assert not ui.c.paused
-    assert not getattr(tray, "_resume_timer", None) or not tray._resume_timer.isActive()
+    assert ui.c.paused_until is None, "resuming another way cancels the timed resume"
 
 
 def test_d15_toasts_have_one_width_and_a_dismiss_affordance(make_ui):

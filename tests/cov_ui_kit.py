@@ -141,7 +141,6 @@ def make_demo(qtbot, qt_messages):
         shell = demo.shell
         shell.close()
         demo.c.shutdown()
-        shell.tray._resume.stop()
         shell.overlay._timer.stop()
         shell.overlay._follow.stop()
         for widget in (shell.onboarding, shell.window, shell.overlay, shell.tray.menu):

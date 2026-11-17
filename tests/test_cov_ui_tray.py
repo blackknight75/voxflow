@@ -2,6 +2,8 @@
 notification call is replaced by a recorder (the offscreen platform has no system tray)."""
 from __future__ import annotations
 
+import time
+
 import pytest
 from PySide6.QtCore import QPoint
 from PySide6.QtWidgets import QSystemTrayIcon
@@ -111,24 +113,20 @@ def test_main_menu_rows_act_on_the_controller(demo):
     assert not menu.isVisible()
 
 
-def test_pause_for_an_hour_resumes_by_itself_and_a_manual_choice_wins(demo):
+def test_pause_for_an_hour_hands_the_deadline_to_the_controller(demo):
     tray, c = demo.shell.tray, demo.c
     menu = tray.show_menu(QPoint(500, 500))
     by_text(menu.items(), "Pause for 1 hour")["on_click"]()
-    assert c.paused and tray._resume.isActive() and tray._resume.interval() == 3_600_000
+    assert c.paused and c.paused_until is not None and 3590 < c.paused_until - time.time() <= 3600
     assert by_text(menu.items(), "Pause for 1 hour")["enabled"] is False
     assert by_text(menu.items(), "Pause dictation")["checked"] is True
-    tray._resume.stop()
-    tray._resume.timeout.emit()                                # the hour is over
-    assert not c.paused
-    tray._resume_now()
-    assert not c.paused, "nothing to resume"
-    tray.pause_for_hour()
+    assert by_text(menu.items(), c.status()["title"])["text"].startswith("Paused until "), "the menu says when"
+    assert tray.icon.toolTip().startswith("VoxFlow: Paused until ")
     by_text(menu.items(), "Pause dictation")["on_click"](False)
-    assert not c.paused and not tray._resume.isActive(), "resuming by hand cancels the pending auto-resume"
+    assert not c.paused and c.paused_until is None
     tray.pause_for_hour()
     by_text(menu.items(), "Pause dictation")["on_click"](True)
-    assert c.paused and not tray._resume.isActive()
+    assert c.paused and c.paused_until is None, "pausing by hand replaces the timed pause"
     menu.close()
 
 

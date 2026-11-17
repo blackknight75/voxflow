@@ -501,6 +501,7 @@ class FakeController(QObject):
         self.config = SimpleNamespace(**copy.deepcopy(_DEFAULTS))
         self.state, self.mode, self.message = "idle", "dictate", ""
         self.paused = False
+        self.paused_until = None
         self.data_dir = Path(tempfile.gettempdir()) / "voxflow-preview"
         self.log_path = self.data_dir / "voxflow.log"
         self.dictionary = FakeDictionary(self.dictionary_changed, self.suggestions_changed)
@@ -690,6 +691,9 @@ class FakeController(QObject):
     # ---- status
     def status(self) -> dict:
         if self.paused:
+            if self.paused_until is not None:
+                at = time.strftime("%H:%M", time.localtime(self.paused_until))
+                return {"level": "paused", "title": f"Paused until {at}", "detail": f"Dictation resumes at {at}."}
             return {"level": "paused", "title": "Paused", "detail": "Dictation hotkeys are off until you resume."}
         for name, label in (("asr", "speech"), ("cleanup", "cleanup")):
             st = self._models[name]["state"]
@@ -801,9 +805,10 @@ class FakeController(QObject):
             self.notice_action.emit(hint, "open_settings:" + action,
                                     "Open microphone settings" if action == "microphone" else "Open model settings")
 
-    def set_paused(self, paused: bool) -> None:
-        if self.paused != bool(paused):
-            self.paused = bool(paused)
+    def set_paused(self, paused: bool, for_s: float | None = None) -> None:
+        until = time.time() + for_s if paused and for_s else None
+        if self.paused != bool(paused) or until != self.paused_until:
+            self.paused, self.paused_until = bool(paused), until
             self.status_changed.emit(self.status())
 
     def cancel(self) -> None:

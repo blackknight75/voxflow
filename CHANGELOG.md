@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- *Pause for 1 hour* no longer turns dictation back on by itself after you resumed and paused again another way.
+  While it runs, the status, the tray tooltip and the tray menu say "Paused until 14:05".
+
 ## [0.2.1] - 2026-11-15
 
 ### Added
