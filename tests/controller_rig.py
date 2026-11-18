@@ -208,6 +208,7 @@ class TInjector:
         self.restore, self.restore_delay = True, 0.5
         self.outcome = "pasted"               # what the next paste does: pasted | typed | copied | failed
         self.outcomes: list[str] = []         # consumed one per begin(); ``outcome`` applies once it is empty
+        self.modifiers = False                # True: Win / Alt / Shift is "down" (modifiers_held)
         self.events: list[tuple] = []         # ("begin", text) / ("finish_later",) / ("copy_text", text), in order
         self.last_outcome = "failed"
         self.selection: str | None = ""
@@ -229,6 +230,9 @@ class TInjector:
         if outcome == "copied":
             self.copied.append(text)
         return False
+
+    def modifiers_held(self):
+        return self.modifiers
 
     def finish_later(self):
         self.events.append(("finish_later",))

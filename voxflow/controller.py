@@ -262,6 +262,7 @@ class Controller(QObject):
         self._t_start = 0.0
         self._context = AppContext()
         self._last_paste: dict | None = None
+        self._last_paste_t: float | None = None         # when the last Ctrl+V of any job went out (monotonic)
         self.rules_only_count = 0                      # dictations of this session cleaned by rules only
         self._rules_only_times: list[float] = []
         self._rules_only_told: float | None = None
@@ -1674,6 +1675,8 @@ class Controller(QObject):
         self._phrase_stream.end()
         self._note_preview()
         session, self._stream = self._stream, None
+        if session is not None:
+            session.heard = self._phrase_stream.heard()
         self.muter.unmute()
         try:
             audio = self._recorder.stop()
@@ -1767,6 +1770,10 @@ class Controller(QObject):
 
     def undo_last_paste(self) -> bool:
         """Undo the last paste with Ctrl+Z, but only in the window that received it."""
+        if self._stream is not None:
+            # phrases are still being typed: the undo would queue behind them and remove one that is not on screen yet
+            self.notice.emit("info", "Stop dictating first, then undo.")
+            return False
         last = self._last_paste
         if not last:
             self.notice.emit("info", "There is no paste to undo.")
@@ -1832,7 +1839,7 @@ class Controller(QObject):
                     # the recording goes on (or is over): the flow bar is not failed, nothing more is typed, and the
                     # release types what is missing from the audio
                     job["session"].stopped = True
-                    self._sig_notice.emit("error", message)
+                    self._sig_notice.emit("error", _PHRASE_JOB_FAILURE)
                 elif "gen" in job:
                     self._sig_failed.emit(message, job["gen"])
                 else:                                   # paste / undo: no flow-bar turn of their own to fail
@@ -1872,6 +1879,7 @@ class Controller(QObject):
     def _paste(self, text: str) -> tuple[bool, str]:
         """Paste on the worker thread. Returns (text reached the app or the clipboard, flow-bar message)."""
         self.injector.begin(text)
+        self._last_paste_t = self._mono()
         self.injector.finish_later()
         outcome = getattr(self.injector, "last_outcome", "pasted")
         if outcome == "pasted":
@@ -1906,17 +1914,26 @@ class Controller(QObject):
     def _send_chunk(self, chunk: str) -> bool:
         """Paste one chunk (worker thread): True when it reached the app. The caller handles the failure."""
         self.injector.begin(chunk)
+        self._last_paste_t = self._mono()
         self.injector.finish_later()
         return getattr(self.injector, "last_outcome", "pasted") in ("pasted", "typed")
 
-    def _pace(self, session: "_StreamSession") -> None:
-        """Never start a paste before the previous one's clipboard restore has run (Injector.begin would otherwise
-        put the old clipboard back while a slow app still has to read ours)."""
-        if self.injector.restore and session.last_paste_t is not None:
-            wait = min(PHRASE_PACE_CAP_S,
-                       max(0.0, float(self.injector.restore_delay) - (self._mono() - session.last_paste_t)))
+    def _pace(self) -> None:
+        """Never start a streamed paste before the previous paste's clipboard restore has run (``Injector.begin``
+        would otherwise put the old clipboard back while a slow app still has to read ours). The whole
+        ``restore_delay`` is waited for, whatever its value, and the previous paste may belong to any job."""
+        if self.injector.restore and self._last_paste_t is not None:
+            wait = max(0.0, float(self.injector.restore_delay) - (self._mono() - self._last_paste_t))
             if wait > 0:
                 self._sleep(wait)
+
+    def _cannot_type_now(self) -> bool:
+        """True when a phrase must not be pasted this very moment: VoxFlow's own window has the focus, or Win / Alt /
+        Shift is down (the paste would wait for it and then be left on the clipboard)."""
+        if self._own_focus_fn():
+            return True
+        held = getattr(self.injector, "modifiers_held", None)
+        return bool(held()) if callable(held) else False
 
     def _foreground(self) -> int:
         try:
@@ -1940,15 +1957,16 @@ class Controller(QObject):
         piece = phrases.finish_chunk(prev, cleaned, raw, phrase.kind, phrase.ends_sentence)
         if not piece:
             return                                      # filler only: nothing to type, and no cut to move
-        if self._own_focus_fn():
-            session.held.append((piece, raw))           # VoxFlow's own window has the focus: wait for the next phrase
+        self._pace()
+        if session.cancelled or session.stopped:
+            return                                      # Esc / a failure during the clean-up or the wait: send nothing
+        if self._cannot_type_now():
+            session.held.append((piece, raw))           # wait for the next phrase (merged into its paste)
             return
         chunk = "".join(p for p, _raw in session.held) + piece
         raws = [r for _p, r in session.held] + [raw]
-        self._pace(session)
         hwnd = self._foreground()
         ok = self._send_chunk(chunk)
-        session.last_paste_t = self._mono()
         session.held.clear()
         if not ok:
             session.stopped = True
@@ -1958,7 +1976,6 @@ class Controller(QObject):
         session.sent.append(chunk)
         session.raws.extend(raws)
         session.sent_cut_s = phrase.cut_s
-        session.last_kind = phrase.kind
         self._last_paste = {"hwnd": hwnd, "text": chunk, "t": time.time()}
 
     def _stream_entry(self, text: str, raw: str, ctx: AppContext, duration_s: float, latency_ms: float,
@@ -1977,6 +1994,16 @@ class Controller(QObject):
         self._finish(entry, dataclasses.replace(ctx, hwnd=self._foreground()), job["gen"], "Pasted", None,
                      pasted=True, track_paste=False, quiet=True)
 
+    @staticmethod
+    def _tail_has_speech(full, session: "_StreamSession", hint, covered_s: float) -> bool:
+        """Is there anything to say after the last typed phrase? Yes when the preview heard a word at or after the cut,
+        or when the audio the preview never looked at (after ``covered_s``) is above the preview's silence level. The
+        recorder offers no speech detector (only a duration), so the preview's own level gate is used."""
+        if hint is not None:
+            return True
+        rest = full[min(len(full), round(max(session.sent_cut_s, covered_s) * audiomod.SAMPLE_RATE)):]
+        return rest.size > 0 and float(np.max(np.abs(rest))) >= stream.SILENCE_PEAK
+
     def _job_tail(self, job: dict, session: "_StreamSession") -> None:
         """The release of a streamed dictation: only the audio after the last typed phrase goes through the final
         pass, and its text is the end of what is in the field. One history entry for the whole dictation."""
@@ -1987,10 +2014,12 @@ class Controller(QObject):
         silent = audio.size == 0 or float(np.max(np.abs(audio))) < 1e-4
         if cfg.whisper_mode and not silent:
             audio = audiomod.normalize_gain(audio)
+        words, covered_s = session.heard
+        hint = phrases.tail_hint(words, session.sent_cut_s)
         sent_text = "".join(session.sent)
         res = {"raw": "", "text": "", "t_asr": 0.0, "t_clean": 0.0, "cleaned": False, "dropped": False,
                "rules_only": False, "model_skipped": False}
-        if not silent:
+        if not silent and self._tail_has_speech(full, session, hint, covered_s):
             try:
                 res = appmod.run_pipeline(audio, self._asr, self._cleaner, cfg.cleanup_enabled,
                                           **self._clean_kwargs(ctx))
@@ -2010,18 +2039,17 @@ class Controller(QObject):
             if cfg.auto_learn and cfg.save_history and res["cleaned"]:
                 for suggestion in self.dictionary.learn(res["raw"], cleaned):
                     self._sig_suggestion.emit(suggestion)
-        piece = phrases.finish_chunk(sent_text, text, res["raw"], "tail", True) if text else ""
+        piece = phrases.finish_chunk(sent_text, text, res["raw"], "tail", True, hint=hint) if text else ""
         track = bool(piece)
-        if not piece:
-            piece = phrases.closing_period(sent_text, session.last_kind)
         ok, message, hwnd = True, "Pasted", self._foreground()
-        if piece and self._own_focus_fn():
-            ok = bool(self.injector.copy_text(piece))   # never type into VoxFlow's own window: copy it instead
-            message, track = "Copied. Press Ctrl+V", False
-        elif piece:
-            self._pace(session)
-            hwnd = self._foreground()
-            ok, message = self._paste(piece)
+        if piece:
+            self._pace()
+            if self._own_focus_fn():
+                ok = bool(self.injector.copy_text(piece))   # never type into VoxFlow's own window: copy it instead
+                message, track = "Copied. Press Ctrl+V", False
+            else:
+                hwnd = self._foreground()
+                ok, message = self._paste(piece)
         latency = time.perf_counter() - job["t_release"]
         rules_only = bool(res.get("rules_only"))
         raws = session.raws + ([res["raw"]] if res["raw"] else [])
@@ -2234,7 +2262,6 @@ RULES_ONLY_BURST = 3                             # this many within RULES_ONLY_W
 RULES_ONLY_WINDOW_S = 300.0
 RULES_ONLY_QUIET_S = 1800.0                      # ... and then none for this long
 PHRASE_LLM_SLOW_S = 1.0                          # a phrase's model answer slower than this ends model use for the session
-PHRASE_PACE_CAP_S = 0.6                          # longest wait for the previous paste's clipboard restore
 RULES_ONLY_NOTICE = ("The language model has been too slow several times, so those dictations got the basic "
                      "clean-up only. They are marked in your History. This usually passes when the computer "
                      "is less busy.")
@@ -2275,15 +2302,15 @@ class _StreamSession:
         self.sent: list[str] = []                      # the chunks that reached the field, in order
         self.raws: list[str] = []
         self.sent_cut_s = 0.0                          # audio before this is in the field; the release re-reads the rest
-        self.last_kind = ""
+        self.heard: tuple = ((), 0.0)                  # (every word the preview heard, audio time it had looked at)
         self.held: list[tuple[str, str]] = []          # (text, raw) kept back while VoxFlow's own window had the focus
         self.llm = True                                # the language model may still be used per phrase
-        self.last_paste_t: float | None = None
 
 
 _SPEECH_FAILURE = "The speech model hit an error. Try again; if it keeps happening, restart VoxFlow."
 ASR_CPU_FALLBACK = ("Speech recognition moved to the CPU after a GPU error, so dictation is slower. Choose Retry "
                     "under Settings > On-device models, or restart VoxFlow, to use the GPU again.")
+_PHRASE_JOB_FAILURE = "Typing while you speak stopped. The rest will be pasted when you stop."
 _JOB_FAILURES = {
     "dictate": "Something went wrong with that dictation. Try again; if it keeps happening, restart VoxFlow.",
     "command": "Something went wrong in command mode, so nothing was changed. Try again; if it keeps happening, "

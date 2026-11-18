@@ -55,7 +55,11 @@ class FakePhraseStream:
     def __init__(self, recorder, on_phrase, **kw):
         self.recorder, self.on_phrase = recorder, on_phrase
         self.log: list = []
+        self.heard_value: tuple = ((), 0.0)             # what ``heard()`` says: (words with start times, covered_s)
         FakePhraseStream.instances.append(self)
+
+    def heard(self):
+        return self.heard_value
 
     def begin(self, gen):
         self.log.append(("begin", gen))
@@ -84,12 +88,11 @@ def plain_text(monkeypatch):
     """The text rules replaced by a stand-in: the wiring is under test, not ``finish_chunk``."""
     calls = []
 
-    def finish(prev, cleaned, raw, kind, ends):
-        calls.append((prev, cleaned, raw, kind, ends))
+    def finish(prev, cleaned, raw, kind, ends, hint=None):
+        calls.append((prev, cleaned, raw, kind, ends, hint))
         return join_chunk(prev, cleaned, raw, kind, ends)
 
     monkeypatch.setattr(ctl_mod.phrases, "finish_chunk", finish)
-    monkeypatch.setattr(ctl_mod.phrases, "closing_period", lambda prev, last_kind: "")
     return calls
 
 
@@ -106,14 +109,13 @@ def rig(tmp_path, qtbot, monkeypatch, plain_text):
     r.close()
 
 
-_REAL_TEXT_RULES = (phrases.finish_chunk, phrases.closing_period)
+_REAL_TEXT_RULES = (phrases.finish_chunk,)
 
 
 @pytest.fixture
 def real_text(monkeypatch, rig):
-    """The real text rules (``phrases.finish_chunk`` / ``closing_period``) for the tests that name them."""
+    """The real ``phrases.finish_chunk`` for the tests that name it."""
     monkeypatch.setattr(ctl_mod.phrases, "finish_chunk", _REAL_TEXT_RULES[0])
-    monkeypatch.setattr(ctl_mod.phrases, "closing_period", _REAL_TEXT_RULES[1])
 
 
 def pstream(rig) -> FakePhraseStream:
@@ -159,7 +161,7 @@ def test_phrases_are_pasted_in_order_one_at_a_time(rig):
                                    ("begin", " Then we ship it."), ("finish_later",)]
     assert rig.c.state == "locked"
     stream = rig.c._stream
-    assert stream.sent == rig.injector.pasted and stream.sent_cut_s == 2.0 and stream.last_kind == "sentence"
+    assert stream.sent == rig.injector.pasted and stream.sent_cut_s == 2.0
 
 
 def test_words_before_the_lock_are_sent_after_it(rig):
@@ -315,7 +317,8 @@ def test_a_crash_inside_a_phrase_job_stops_streaming_without_failing_the_bar(rig
     monkeypatch.setattr(rig.c, "_clean_phrase", lambda *a: (_ for _ in ()).throw(RuntimeError("boom")))
     pstream(rig).emit(gen, ph("the first phrase", cut=1.0))
     rig.wait(lambda: rig.c._stream.stopped and rig.spy.notices())
-    assert rig.c.state == "locked" and rig.spy.notices()[-1][0] == "error"
+    assert rig.c.state == "locked"
+    assert rig.spy.notices()[-1] == ("error", "Typing while you speak stopped. The rest will be pasted when you stop.")
     rig.stop_locked()
     rig.wait(lambda: rig.c.state == "done")
     assert rig.injector.pasted == ["The tail words."], "nothing was sent: today's pipeline"
@@ -411,22 +414,6 @@ def test_a_filler_only_phrase_sends_nothing_and_moves_no_cut(rig):
     rig.stop_locked()
     rig.wait(lambda: rig.c.state == "done")
     assert len(rig.asr.heard[-1]) == len(TRecorder.audio)
-
-
-def test_closing_period_only_after_pause_or_cap_phrases(real_text, rig):
-    outcomes = {}
-    for kind in ("sentence", "pause", "cap"):
-        rig.injector.pasted.clear()
-        gen = locked(rig, text="")
-        send(rig, gen, ph("so the plan is simple today", kind=kind, cut=1.0, ends=kind == "sentence"))
-        rig.stop_locked()
-        rig.wait(lambda: rig.c.state == "done")
-        rig.wait(lambda: rig.c.state == "idle")
-        outcomes[kind] = list(rig.injector.pasted)
-        rig.pause()
-    assert outcomes["sentence"] == ["So the plan is simple today."]
-    assert outcomes["pause"][-1] == "." and outcomes["cap"][-1] == "."
-    assert rig.c._last_paste["text"] != ".", "the lone period is not the undo target"
 
 
 def test_tail_asr_failure_files_what_was_sent(rig):
@@ -631,6 +618,7 @@ def test_pause_cancels_the_session_like_escape(rig):
 
 def test_shutdown_mid_session_skips_queued_phrases(rig, monkeypatch):
     gen = locked(rig)
+    send(rig, gen, ph("the one already sent", cut=1.0))
     gate = threading.Event()
     real_clean = rig.c._clean_phrase
 
@@ -644,7 +632,7 @@ def test_shutdown_mid_session_skips_queued_phrases(rig, monkeypatch):
     pstream(rig).emit(gen, ph("queued behind it", cut=2.0))
     threading.Timer(0.2, gate.set).start()
     rig.c.shutdown()
-    assert rig.injector.pasted == ["The one already started."], "a started chunk completes, a queued one is skipped"
+    assert rig.injector.pasted == ["The one already sent."], "the one being cleaned is dropped at the re-check, the queued one skipped"
     assert rig.c.history.count() == 1
     rig.c.shutdown()
 
@@ -808,18 +796,43 @@ def test_spacing_and_case_follow_the_previous_chunk(real_text, rig):
 
 
 # =========================================================================== pacing, undo, privacy
-def test_pasting_is_paced_by_restore_delay(rig):
+@pytest.mark.parametrize("delay", [0.5, 1.5])
+def test_pasting_is_paced_by_the_whole_restore_delay(rig, delay):
+    rig.injector.restore_delay = delay
+    rig.c._mono = lambda: 100.0                                    # no time passes between the two pastes
     gen = locked(rig)
     send(rig, gen, ph("the first phrase", cut=1.0), ph("the second phrase", cut=2.0))
-    assert len(rig.sleeps) == 1 and 0 < rig.sleeps[0] <= ctl_mod.PHRASE_PACE_CAP_S, "none for the first, then the rest of the delay"
+    assert rig.sleeps == [delay], "nothing before the first paste, then exactly the delay (no cap)"
     rig.injector.restore = False
     send(rig, gen, ph("the third phrase", cut=3.0))
-    assert len(rig.sleeps) == 1, "without a clipboard restore there is nothing to wait for"
+    assert rig.sleeps == [delay], "without a clipboard restore there is nothing to wait for"
+
+
+def test_a_slow_tail_then_the_next_sessions_first_phrase_is_paced(rig):
+    rig.c._mono = lambda: 100.0
+    gen = locked(rig)
+    send(rig, gen, ph("the first phrase", cut=1.0))
+    rig.asr.delay_s = 0.2                                          # a slow final pass
+    rig.stop_locked()
+    gen2 = locked(rig)                                             # the next session starts while it runs
+    pstream(rig).emit(gen2, ph("next session phrase", cut=1.0))
+    rig.wait(lambda: len(rig.injector.pasted) == 3)
+    assert rig.injector.pasted == ["The first phrase.", " The tail words.", "Next session phrase."]
+    assert rig.sleeps == [0.5, 0.5], "the tail waited for phrase one, the next session's phrase for the tail"
+
+
+def test_todays_paths_are_not_delayed_but_record_their_paste_time(rig):
+    rig.dictate("one")
+    rig.wait(lambda: rig.c.state == "idle")
+    assert rig.c._last_paste_t is not None and rig.sleeps == []
+    rig.dictate("two")
+    rig.wait(lambda: rig.c.state == "idle")
+    assert rig.sleeps == [], "a normal dictation is never paced"
 
 
 def test_pacing_waits_nothing_when_enough_time_has_passed(rig):
     gen = locked(rig)
-    clock = iter([100.0, 105.0])
+    clock = iter([100.0, 105.0, 105.0])
     rig.c._mono = lambda: next(clock, 105.0)
     send(rig, gen, ph("the first phrase", cut=1.0), ph("the second phrase", cut=2.0))
     assert rig.sleeps == []
@@ -842,14 +855,6 @@ def test_undo_after_a_streamed_session_is_one_ctrl_z_in_the_last_chunks_window(r
     assert rig.c.undo_last_paste() is True
     rig.wait(lambda: rig.injector.undone == 1)
     assert rig.c.undo_last_paste() is False, "one paste, one undo"
-
-
-def test_undo_targets_the_last_phrase_not_the_closing_period(real_text, rig):
-    gen = locked(rig, text="")
-    send(rig, gen, ph("so the plan is simple today", kind="pause", cut=1.0, ends=False))
-    rig.stop_locked()
-    rig.wait(lambda: rig.c.state == "done")
-    assert rig.injector.pasted[-1] == "." and rig.c._last_paste["text"] == "So the plan is simple today"
 
 
 def test_hwnd_lookup_failure_is_treated_as_unknown(rig):
@@ -922,3 +927,143 @@ def test_the_real_signal_path_from_the_stream_to_the_controller(tmp_path, qtbot,
         r.c.cancel()
     finally:
         r.close()
+
+
+# =========================================================================== round 2 (plan/RULINGS_REVIEW.md, section C)
+def test_m1_the_tail_gets_the_first_heard_word_after_the_cut_as_a_hint(rig, plain_text):
+    gen = locked(rig)
+    pstream(rig).heard_value = ((("so", 0.2), ("and", 1.0), ("send", 1.4)), 6.0)
+    send(rig, gen, ph("so the plan is simple", cut=1.0))
+    rig.stop_locked()
+    rig.wait(lambda: rig.c.state == "done")
+    assert plain_text[-1][3] == "tail" and plain_text[-1][5] == "and"
+
+
+def test_m1_a_tail_that_starts_mid_sentence_is_not_capitalised(real_text, rig):
+    gen = locked(rig, text="and send the report")
+    pstream(rig).heard_value = ((("so", 0.2), ("and", 1.0)), 6.0)
+    send(rig, gen, ph("so the plan is simple", kind="pause", cut=1.0, ends=False))
+    rig.stop_locked()
+    rig.wait(lambda: rig.c.state == "done")
+    assert rig.injector.pasted == ["So the plan is simple", " and send the report."]
+    assert rig.last_entry()["text"] == "So the plan is simple and send the report."
+
+
+def test_m1_the_session_keeps_what_the_stream_had_heard_at_the_release(rig):
+    gen = locked(rig)
+    pstream(rig).heard_value = ((("a", 0.1),), 3.0)
+    send(rig, gen, ph("so the plan is simple", cut=1.0))
+    session = rig.c._stream
+    rig.stop_locked()
+    rig.wait(lambda: rig.c.state == "done")
+    assert session.heard == ((("a", 0.1),), 3.0)
+
+
+def test_m3_a_tail_of_noise_is_not_sent_to_the_model(rig):
+    gen = locked(rig)
+    noise = (np.random.default_rng(1).uniform(-0.002, 0.002, 16000 * 3)).astype(np.float32)
+    TRecorder.audio = np.concatenate([speech(2.0), noise])
+    pstream(rig).heard_value = ((("so", 0.2),), 2.0)
+    rig.asr.text = "what is it"                                    # what a model invents from noise
+    send(rig, gen, ph("so the plan is simple", cut=2.0))
+    rig.stop_locked()
+    rig.wait(lambda: rig.c.state == "done")
+    assert rig.asr.heard == [] and rig.injector.pasted == ["So the plan is simple."]
+    assert rig.c.history.count() == 1 and rig.last_entry()["text"] == "So the plan is simple."
+
+
+def test_m3_a_word_in_the_last_uncovered_half_second_is_transcribed(rig):
+    gen = locked(rig)
+    TRecorder.audio = np.concatenate([speech(2.0), np.zeros(int(16000 * 2.5), dtype=np.float32), speech(0.5)])
+    pstream(rig).heard_value = ((("so", 0.2),), 4.0)               # the preview looked up to 4.0 s only
+    send(rig, gen, ph("so the plan is simple", cut=2.0))
+    rig.stop_locked()
+    rig.wait(lambda: rig.c.state == "done")
+    assert len(rig.asr.heard) == 1 and rig.injector.pasted[-1] == " The tail words."
+
+
+def test_m3_a_heard_word_after_the_cut_is_enough_to_transcribe(rig):
+    gen = locked(rig)
+    TRecorder.audio = np.concatenate([speech(2.0), np.full(16000 * 2, 0.001, dtype=np.float32)])
+    pstream(rig).heard_value = ((("so", 0.2), ("then", 2.3)), 4.0)
+    send(rig, gen, ph("so the plan is simple", cut=2.0))
+    rig.stop_locked()
+    rig.wait(lambda: rig.c.state == "done")
+    assert len(rig.asr.heard) == 1
+
+
+def test_m4_a_held_modifier_holds_the_phrase_like_the_own_window_rule(rig):
+    gen = locked(rig)
+    rig.injector.modifiers = True
+    pstream(rig).emit(gen, ph("first held phrase", cut=1.0))
+    rig.wait(lambda: len(rig.c._stream.held) == 1)
+    assert rig.injector.pasted == [] and rig.injector.copied == [], "nothing left on the clipboard"
+    rig.injector.modifiers = False
+    send(rig, gen, ph("second phrase here", cut=2.0))
+    assert rig.injector.pasted == ["First held phrase. Second phrase here."]
+
+
+def test_m4_an_injector_without_the_modifier_check_still_pastes(rig, monkeypatch):
+    from tests.controller_rig import TInjector
+    monkeypatch.delattr(TInjector, "modifiers_held")
+    gen = locked(rig)
+    send(rig, gen, ph("the first phrase", cut=1.0))
+    assert rig.injector.pasted == ["The first phrase."]
+
+
+def test_m5_an_empty_tail_after_a_pause_phrase_pastes_nothing_more(rig):
+    gen = locked(rig, text="")
+    send(rig, gen, ph("so the plan is simple today", kind="pause", cut=1.0, ends=False))
+    rig.stop_locked()
+    rig.wait(lambda: rig.c.state == "done")
+    assert len(rig.injector.pasted) == 1, "no closing full stop"
+    assert "closing_period" not in open(ctl_mod.__file__, encoding="utf-8").read()
+
+
+def test_m1_escape_during_a_phrase_clean_does_not_type_it(rig, monkeypatch):
+    gen = locked(rig)
+    gate = threading.Event()
+    real_clean = rig.c._clean_phrase
+
+    def slow(session, raw, ctx):
+        gate.wait(5)
+        return real_clean(session, raw, ctx)
+
+    monkeypatch.setattr(rig.c, "_clean_phrase", slow)
+    pstream(rig).emit(gen, ph("the cancelled phrase", cut=1.0))
+    rig.wait(lambda: rig.c._work.qsize() == 0)
+    rig.keys((ESC, True), (ESC, False))
+    gate.set()
+    rig.settle(80)
+    assert rig.c.state == "idle" and rig.injector.pasted == [] and rig.c.history.count() == 0
+
+
+def test_m2_the_own_window_check_comes_after_the_pacing_wait(rig):
+    gen = locked(rig)
+    send(rig, gen, ph("the first phrase", cut=1.0))
+    rig.c._sleep = lambda s: setattr(rig, "own_focus", True)       # VoxFlow gets the focus while the wait runs
+    pstream(rig).emit(gen, ph("the second phrase", cut=2.0))
+    rig.wait(lambda: len(rig.c._stream.held) == 1)
+    assert rig.injector.pasted == ["The first phrase."], "not typed into VoxFlow's own window"
+
+
+def test_m2_the_tail_checks_the_window_after_the_pacing_wait(rig):
+    gen = locked(rig)
+    send(rig, gen, ph("the first phrase", cut=1.0))
+    rig.c._sleep = lambda s: setattr(rig, "own_focus", True)
+    rig.stop_locked()
+    rig.wait(lambda: rig.c.state == "done")
+    assert rig.injector.pasted == ["The first phrase."] and rig.injector.copied == [" The tail words."]
+
+
+def test_m3_undo_during_a_streamed_session_does_nothing_but_say_so(rig):
+    gen = locked(rig)
+    send(rig, gen, ph("the first phrase", cut=1.0))
+    assert rig.c.undo_last_paste() is False
+    assert rig.spy.notices()[-1] == ("info", "Stop dictating first, then undo.")
+    rig.settle(50)
+    assert rig.injector.undone == 0
+    rig.stop_locked()
+    rig.wait(lambda: rig.c.state == "done")
+    rig.wait(lambda: rig.c.history.count() == 1)
+    assert rig.c.undo_last_paste() is True, "after the release the undo works as before"

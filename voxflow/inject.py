@@ -311,6 +311,14 @@ class Injector:
         d = self.restore_delay
         return d if isinstance(d, (int, float)) and d == d and d > 0 else 0.0
 
+    def modifiers_held(self) -> bool:
+        """True when Win/Alt/Shift is down right now, i.e. a paste would have to wait for it (and after
+        ``modifier_timeout`` would be left on the clipboard instead). Never raises."""
+        try:
+            return bool(self.keys.modifiers_down())
+        except Exception:  # noqa: BLE001 - an unreadable keyboard state is "not held": the paste decides
+            return False
+
     def _wait_modifiers(self) -> bool:
         """Wait for Win/Alt/Shift to be released. False if they are still down at the timeout."""
         end = self._clock() + self.modifier_timeout
