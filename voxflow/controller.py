@@ -11,6 +11,7 @@ emitted on the UI thread.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import logging
 import queue
 import shutil
@@ -23,11 +24,12 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from . import __version__, audio as audiomod, config as cfgmod, fakes, langs, modelhub, speedcheck, store, stream, system
+from . import (__version__, audio as audiomod, config as cfgmod, fakes, langs, modelhub, phrases, speedcheck, store,
+               stream, system)
 from . import sync as syncmod
 from . import updater as updatermod
 from .command import CommandError, CommandMode
-from .context import AppContext, foreground_app, foreground_hwnd
+from .context import AppContext, foreground_app, foreground_hwnd, foreground_is_own
 from .hotkey import HotkeyListener, hotkey_problem, normalize_hotkey, pretty_hotkey
 from .sounds import MediaMuter, SoundPlayer
 
@@ -96,6 +98,7 @@ class Controller(QObject):
     _sig_done = Signal(dict)
     _sig_failed = Signal(str, int)
     _sig_partial = Signal(int, str, str)            # gen, committed, tentative (from the preview thread)
+    _sig_phrase = Signal(int, object)               # gen, phrases.Phrase (from the preview thread)
     _sig_notice = Signal(str, str)
     _sig_notice_action = Signal(str, str, str, str)  # level, message, action id, button label (from any thread)
     _sig_sync = Signal(str, object)                 # step ("read" | "written"), result or exception
@@ -104,7 +107,7 @@ class Controller(QObject):
     def __init__(self, *, demo: bool = False, fake: bool = False, data_dir: str | Path | None = None,
                  install_hook: bool = True, parent=None, modules=None, injector=None, sound_backend=None,
                  mute_backend=None, context_fn=None, autostart=None, speed_check: bool | None = None,
-                 updates=None):
+                 updates=None, own_focus_fn=None):
         """``modules`` = (RecorderClass, transcriber, cleaner) overrides model/mic construction; ``injector``,
         ``sound_backend``, ``mute_backend``, ``context_fn`` and ``autostart`` replace the desktop back-ends.
         With ``demo`` or ``fake`` every desktop back-end that was not passed in is a harmless fake.
@@ -112,7 +115,9 @@ class Controller(QObject):
         ``VOXFLOW_SPEED_CHECK=0``). ``updates``: an ``updater.Updater`` (or a factory ``(data_dir, get, busy)``
         returning one) to use, or a bool for the daily update
         check (default: only the real app, and not when ``VOXFLOW_UPDATES=0``). A fake or demo copy never
-        reaches the network for updates, not even through "Check now"."""
+        reaches the network for updates, not even through "Check now". ``own_focus_fn``: ``() -> bool``, True when
+        one of VoxFlow's own windows has the keyboard focus (phrase streaming never types into it; default: the
+        real check, and always False for a fake or demo copy)."""
         super().__init__(parent)
         self.is_demo = bool(demo)
         self._fake = bool(fake or demo)
@@ -280,6 +285,11 @@ class Controller(QObject):
 
         # ---- live preview (voxflow.stream): display-only words in the Flow bar while the key is held
         self._preview = None
+        self._phrase_stream = None
+        self._stream: _StreamSession | None = None      # the phrase-streaming session of the recording under way
+        self._own_focus_fn = own_focus_fn if own_focus_fn is not None else (
+            (lambda: False) if self._fake else foreground_is_own)
+        self._sleep = time.sleep                        # pacing between pasted phrases (tests replace it)
         self._build_preview()
 
         # ---- worker + timers
@@ -324,6 +334,7 @@ class Controller(QObject):
         self._sig_done.connect(self._on_done)
         self._sig_failed.connect(self._on_failed)
         self._sig_partial.connect(self._on_partial)
+        self._sig_phrase.connect(self._on_phrase)
         self._sig_notice.connect(self.notice)
         self._sig_notice_action.connect(self._notice_action)
         self._sig_sync.connect(self._on_sync_step)
@@ -361,12 +372,18 @@ class Controller(QObject):
         self._preview_told = False
         if self._active:                               # a swap under a running session: its caption must not freeze
             self.partial_text.emit("", "")
+            self._cancel_stream()                      # ... and a phrase session cannot follow another recorder
+        self._phrase_stream = phrases.PhraseStream(self._recorder, lambda gen, phrase: self._sig_phrase.emit(gen, phrase))
         self._preview = stream.Previewer(self._recorder, self._asr,
                                          lambda gen, committed, tentative: self._sig_partial.emit(gen, committed, tentative),
-                                         gain=self._preview_gain)
+                                         gain=self._preview_gain, on_words=self._phrase_stream.feed)
 
-    def _preview_on(self) -> bool:
-        return self.config.live_preview and self._preview.available
+    def _streaming_wanted(self, mode: str) -> bool:
+        """Phrase streaming is an opt-in for the dictation mode (it only dispatches while hands-free: see ``_pump``)."""
+        return bool(self.config.phrase_streaming) and mode == "dictate"
+
+    def _preview_on(self, mode: str = "dictate") -> bool:
+        return (self.config.live_preview or self._streaming_wanted(mode)) and self._preview.available
 
     def _note_preview(self) -> None:
         """Say once, when the previewer first turns out to have given up, so Settings can update its text."""
@@ -448,6 +465,8 @@ class Controller(QObject):
         self.listener.stop()
         self._active = False
         self._preview.close()
+        session = self._stream
+        self._cancel_stream()
         try:
             if self._recorder.is_recording:
                 self._recorder.stop()
@@ -457,6 +476,8 @@ class Controller(QObject):
         if self._worker.is_alive():
             self._work.put(None)
             self._worker.join(3.0)
+            if session is not None and session.phrases_seen:
+                self._flush_stores()                   # the entry of the cancelled session was filed after the first flush
         self.injector.close()
         self.sounds.close()
         from . import app as appmod
@@ -612,8 +633,14 @@ class Controller(QObject):
                 self._switch_recorder(cfg.mic_device)
         elif key == "live_preview":
             if not value and self._active:
-                self._preview.stop()
+                if self._stream is None:               # a phrase session still needs the words
+                    self._preview.stop()
                 self.partial_text.emit("", "")
+        elif key == "phrase_streaming":
+            if not value and self._active and self._stream is not None:
+                self._stream.stopped = True             # nothing more is sent; the release covers the rest
+                if not cfg.live_preview:
+                    self._preview.stop()
         elif key == "whisper_mode":
             try:
                 self._recorder.level_boost = 3.0 if value else 1.0
@@ -1557,6 +1584,7 @@ class Controller(QObject):
         elif ev == "lock":
             if self._active:
                 self._set_state("locked")
+                self._pump_phrases()
         elif ev == "cancel":
             self.cancel()
         elif ev == "stop":
@@ -1596,8 +1624,12 @@ class Controller(QObject):
         self._gen += 1
         self._t_start = time.perf_counter()
         self._active = True
-        if self._preview_on():
+        self._stream = None
+        if self._preview_on(mode):
             self._preview.start(self._gen)
+            if self._streaming_wanted(mode):
+                self._stream = _StreamSession(self._gen)
+                self._phrase_stream.begin(self._gen)
         self.sounds.play("command" if mode == "command" else "start")
         if self.config.mute_media:
             self.muter.mute()
@@ -1623,6 +1655,7 @@ class Controller(QObject):
         self._active = False
         self._preview.stop()                           # before the recorder: no new preview call after this
         self._note_preview()
+        self._cancel_stream()
         self.listener.force_idle()
         try:
             if self._recorder.is_recording:
@@ -1638,16 +1671,20 @@ class Controller(QObject):
         self._active = False
         t_release = time.perf_counter()
         self._preview.stop()                           # before the recorder: no new preview call after the release
+        self._phrase_stream.end()
         self._note_preview()
+        session, self._stream = self._stream, None
         self.muter.unmute()
         try:
             audio = self._recorder.stop()
         except Exception as exc:  # noqa: BLE001
             log.warning("recorder stop failed: %s", exc)
+            self._end_stream(session)
             self._fail("Recording failed")
             return
         from . import app as appmod
         if appmod.too_short(audio, self._recorder, t_release - self._t_start, self.config.min_record_s):
+            self._end_stream(session)
             self._set_state("idle")
             return
         self.sounds.play("stop")
@@ -1656,7 +1693,42 @@ class Controller(QObject):
             speech_s = len(audio) / audiomod.SAMPLE_RATE
         self._set_state("processing")
         self._work.put({"kind": self.mode, "audio": audio, "t_release": t_release, "gen": self._gen,
-                        "context": self._context, "speech_s": float(speech_s)})
+                        "context": self._context, "speech_s": float(speech_s), "stream": session})
+
+    # ---- phrase streaming (design: plan/PHRASE_STREAMING_DESIGN.md sections 5.1-5.3)
+    def _cancel_stream(self) -> None:
+        """The recording ends without a release (Esc, pause, a swapped microphone): what was typed stays, nothing
+        more is sent, and one history entry is filed for it."""
+        self._phrase_stream.end()
+        session, self._stream = self._stream, None
+        if session is not None:
+            session.cancelled = True
+            self._end_stream(session)
+
+    def _end_stream(self, session: "_StreamSession | None") -> None:
+        """Queue the closing job of a session that is over without a tail (after every phrase job already queued)."""
+        if session is None or not session.phrases_seen:
+            return
+        self._work.put({"kind": "stream_end", "gen": session.gen, "session": session, "context": self._context,
+                        "duration_s": max(0.0, time.perf_counter() - self._t_start)})
+
+    def _on_phrase(self, gen: int, phrase) -> None:
+        """A phrase from the preview thread, on the UI thread: only the live session of this recording takes it."""
+        session = self._stream
+        if session is None or gen != self._gen or gen != session.gen or not self._active or session.cancelled:
+            return
+        session.phrases_seen += 1
+        session.queue.append(phrase)
+        self._pump_phrases()
+
+    def _pump_phrases(self) -> None:
+        """Hand the queued phrases to the worker, but only while the dictation is hands-free (locked)."""
+        session = self._stream
+        if session is None or self.state != "locked" or not self.config.phrase_streaming:
+            return
+        while session.queue:
+            self._work.put({"kind": "phrase", "gen": session.gen, "session": session,
+                            "phrase": session.queue.pop(0), "context": self._context})
 
     def _poll_cap(self) -> None:
         """Recorder hit its max_seconds cap: end the recording exactly like a hotkey release (also when locked)."""
@@ -1739,6 +1811,10 @@ class Controller(QObject):
                 kind = job["kind"]
                 if kind == "dictate":
                     self._job_dictate(job)
+                elif kind == "phrase":
+                    self._job_phrase(job)
+                elif kind == "stream_end":
+                    self._job_stream_end(job)
                 elif kind == "command":
                     self._job_command(job)
                 elif kind == "paste":
@@ -1752,7 +1828,12 @@ class Controller(QObject):
                 # the user gets plain words and a next step
                 log.error("pipeline job '%s' failed\n%s", job.get("kind"), system.redacted_traceback(exc))
                 message = _JOB_FAILURES.get(job.get("kind"), _JOB_FAILURES["dictate"])
-                if "gen" in job:
+                if job.get("kind") in ("phrase", "stream_end"):
+                    # the recording goes on (or is over): the flow bar is not failed, nothing more is typed, and the
+                    # release types what is missing from the audio
+                    job["session"].stopped = True
+                    self._sig_notice.emit("error", message)
+                elif "gen" in job:
                     self._sig_failed.emit(message, job["gen"])
                 else:                                   # paste / undo: no flow-bar turn of their own to fail
                     self._sig_notice.emit("error", message)
@@ -1762,6 +1843,14 @@ class Controller(QObject):
         return {"tone": self.styles.tone_for(context.exe, context.title),
                 "terms": self.dictionary.terms(newest_first=True),      # the clean-up ranks them by the speech
                 "language": cfg.language, "smart": cfg.smart_formatting}
+
+    def _rules_cleaner(self):
+        """The model-free clean-up, built on first use."""
+        if self._rule_cleaner is None:
+            from .cleanup import Cleaner
+            self._rule_cleaner = Cleaner(use_llm=False)
+            self._rule_cleaner.load()
+        return self._rule_cleaner
 
     def _personalise(self, text: str, raw: str, context: AppContext) -> str:
         """The user's snippets and dictionary, applied to the cleaned dictation.
@@ -1773,11 +1862,7 @@ class Controller(QObject):
         if raw and raw != text and not self.snippets.matches(text) and self.snippets.matches(raw):
             kwargs = dict(self._clean_kwargs(context), smart=False)
             try:
-                if self._rule_cleaner is None:
-                    from .cleanup import Cleaner
-                    self._rule_cleaner = Cleaner(use_llm=False)
-                    self._rule_cleaner.load()
-                again = self._rule_cleaner.clean(raw, **kwargs)
+                again = self._rules_cleaner().clean(raw, **kwargs)
             except Exception as exc:  # noqa: BLE001 - the rules never fail a dictation
                 log.error("rule clean-up for a snippet failed\n%s", system.redacted_traceback(exc))
                 again = ""
@@ -1797,7 +1882,159 @@ class Controller(QObject):
             return True, "Copied. Press Ctrl+V"
         return False, "Couldn't paste"
 
+    # ---- phrase streaming, worker side (design sections 5.4-5.8)
+    def _clean_phrase(self, session: "_StreamSession", raw: str, ctx: AppContext) -> str:
+        """One phrase through the clean-up: the rules always, the language model only on a GPU and only while it keeps
+        up (a slow answer would hold back every later phrase in the single queue)."""
+        cfg, cleaner = self.config, self._cleaner
+        if not cfg.cleanup_enabled or not getattr(cleaner, "ready", False):
+            return raw
+        use_llm = (session.llm and getattr(cleaner, "backend", "") in ("cuda", "vulkan")
+                   and bool(getattr(cleaner, "has_llm", False)))
+        t0 = time.perf_counter()
+        try:
+            cleaned = (cleaner if use_llm else self._rules_cleaner()).clean(raw, **self._clean_kwargs(ctx)) or ""
+        except Exception as exc:  # noqa: BLE001 - a phrase is never lost to a clean-up problem; never log its text
+            log.warning("phrase clean-up failed (%s)", type(exc).__name__)
+            return raw
+        if use_llm:
+            info = getattr(cleaner, "last_info", None)
+            if (time.perf_counter() - t0 > PHRASE_LLM_SLOW_S) or (isinstance(info, dict) and info.get("rules_only")):
+                session.llm = False
+        return cleaned
+
+    def _send_chunk(self, chunk: str) -> bool:
+        """Paste one chunk (worker thread): True when it reached the app. The caller handles the failure."""
+        self.injector.begin(chunk)
+        self.injector.finish_later()
+        return getattr(self.injector, "last_outcome", "pasted") in ("pasted", "typed")
+
+    def _pace(self, session: "_StreamSession") -> None:
+        """Never start a paste before the previous one's clipboard restore has run (Injector.begin would otherwise
+        put the old clipboard back while a slow app still has to read ours)."""
+        if self.injector.restore and session.last_paste_t is not None:
+            wait = min(PHRASE_PACE_CAP_S,
+                       max(0.0, float(self.injector.restore_delay) - (self._mono() - session.last_paste_t)))
+            if wait > 0:
+                self._sleep(wait)
+
+    def _foreground(self) -> int:
+        try:
+            return int(self._hwnd_fn() or 0)
+        except Exception:  # noqa: BLE001
+            return 0
+
+    def _job_phrase(self, job: dict) -> None:
+        session, phrase, ctx = job["session"], job["phrase"], job["context"]
+        if session.cancelled or session.stopped:
+            return                                      # not sent: its words are in the audio the release re-reads
+        cfg = self.config
+        raw = phrase.text
+        cleaned = self._clean_phrase(session, raw, ctx)
+        if cfg.auto_learn and cfg.save_history and cleaned and cleaned != raw:
+            for suggestion in self.dictionary.learn(raw, cleaned):
+                self._sig_suggestion.emit(suggestion)
+        if cleaned:
+            cleaned = self.dictionary.apply(cleaned)
+        prev = "".join(session.sent) + "".join(piece for piece, _raw in session.held)
+        piece = phrases.finish_chunk(prev, cleaned, raw, phrase.kind, phrase.ends_sentence)
+        if not piece:
+            return                                      # filler only: nothing to type, and no cut to move
+        if self._own_focus_fn():
+            session.held.append((piece, raw))           # VoxFlow's own window has the focus: wait for the next phrase
+            return
+        chunk = "".join(p for p, _raw in session.held) + piece
+        raws = [r for _p, r in session.held] + [raw]
+        self._pace(session)
+        hwnd = self._foreground()
+        ok = self._send_chunk(chunk)
+        session.last_paste_t = self._mono()
+        session.held.clear()
+        if not ok:
+            session.stopped = True
+            log.info("phrase streaming stopped: the text could not be typed into the app")
+            self._sig_notice.emit("warning", "Couldn't type into the app, so the rest will be pasted when you stop.")
+            return
+        session.sent.append(chunk)
+        session.raws.extend(raws)
+        session.sent_cut_s = phrase.cut_s
+        session.last_kind = phrase.kind
+        self._last_paste = {"hwnd": hwnd, "text": chunk, "t": time.time()}
+
+    def _stream_entry(self, text: str, raw: str, ctx: AppContext, duration_s: float, latency_ms: float,
+                      rules_only: bool = False) -> dict:
+        return store.make_entry(text, raw, app_exe=ctx.exe, app_title=ctx.title, duration_s=duration_s,
+                                mode="dictate", latency_ms=latency_ms, rules_only=rules_only,
+                                words=store.count_words(raw))
+
+    def _job_stream_end(self, job: dict) -> None:
+        """A streamed dictation that ended without a release (Esc, pause, shutdown, recorder failure): file what was
+        typed as the one entry of the session."""
+        session, ctx = job["session"], job["context"]
+        if not session.sent:
+            return
+        entry = self._stream_entry("".join(session.sent), " ".join(session.raws), ctx, job["duration_s"], 0.0)
+        self._finish(entry, dataclasses.replace(ctx, hwnd=self._foreground()), job["gen"], "Pasted", None,
+                     pasted=True, track_paste=False, quiet=True)
+
+    def _job_tail(self, job: dict, session: "_StreamSession") -> None:
+        """The release of a streamed dictation: only the audio after the last typed phrase goes through the final
+        pass, and its text is the end of what is in the field. One history entry for the whole dictation."""
+        from . import app as appmod
+        cfg, ctx, gen = self.config, job["context"], job["gen"]
+        full = job["audio"]
+        audio = full[min(len(full), round(session.sent_cut_s * audiomod.SAMPLE_RATE)):]
+        silent = audio.size == 0 or float(np.max(np.abs(audio))) < 1e-4
+        if cfg.whisper_mode and not silent:
+            audio = audiomod.normalize_gain(audio)
+        sent_text = "".join(session.sent)
+        res = {"raw": "", "text": "", "t_asr": 0.0, "t_clean": 0.0, "cleaned": False, "dropped": False,
+               "rules_only": False, "model_skipped": False}
+        if not silent:
+            try:
+                res = appmod.run_pipeline(audio, self._asr, self._cleaner, cfg.cleanup_enabled,
+                                          **self._clean_kwargs(ctx))
+            except Exception as exc:  # noqa: BLE001 - only the recogniser can raise here
+                log.error("speech recognition failed\n%s", system.redacted_traceback(exc))
+                entry = self._stream_entry(sent_text, " ".join(session.raws), ctx, job["speech_s"], 0.0)
+                self._finish(entry, dataclasses.replace(ctx, hwnd=self._foreground()), gen, "Pasted", None,
+                             pasted=True, track_paste=False, quiet=True)
+                self._sig_failed.emit(_SPEECH_FAILURE, gen)
+                return
+            finally:
+                self._check_asr_fallback()
+        text = res["text"]
+        if text.strip():
+            cleaned = text
+            text = self.dictionary.apply(text)           # no snippets in a streamed dictation (design D7)
+            if cfg.auto_learn and cfg.save_history and res["cleaned"]:
+                for suggestion in self.dictionary.learn(res["raw"], cleaned):
+                    self._sig_suggestion.emit(suggestion)
+        piece = phrases.finish_chunk(sent_text, text, res["raw"], "tail", True) if text else ""
+        track = bool(piece)
+        if not piece:
+            piece = phrases.closing_period(sent_text, session.last_kind)
+        ok, message, hwnd = True, "Pasted", self._foreground()
+        if piece and self._own_focus_fn():
+            ok = bool(self.injector.copy_text(piece))   # never type into VoxFlow's own window: copy it instead
+            message, track = "Copied. Press Ctrl+V", False
+        elif piece:
+            self._pace(session)
+            hwnd = self._foreground()
+            ok, message = self._paste(piece)
+        latency = time.perf_counter() - job["t_release"]
+        rules_only = bool(res.get("rules_only"))
+        raws = session.raws + ([res["raw"]] if res["raw"] else [])
+        entry = self._stream_entry(sent_text + piece, " ".join(raws), ctx, job["speech_s"], latency * 1000, rules_only)
+        if ok and rules_only:
+            message += RULES_ONLY_SUFFIX
+        self._finish(entry, dataclasses.replace(ctx, hwnd=hwnd), gen, message, res, pasted=ok, track_paste=track)
+
     def _job_dictate(self, job: dict) -> None:
+        session = job.get("stream")
+        if session is not None and session.sent:
+            self._job_tail(job, session)                # phrases already reached the field: only the end is left
+            return
         from . import app as appmod
         cfg, ctx, gen = self.config, job["context"], job["gen"]
         audio = job["audio"]
@@ -1904,11 +2141,12 @@ class Controller(QObject):
                                   else "Couldn't paste the last transcript.")
 
     def _finish(self, entry: dict, ctx: AppContext, gen: int, message: str, res: dict | None,
-                pasted: bool = True) -> None:
+                pasted: bool = True, track_paste: bool = True, quiet: bool = False) -> None:
         """File the transcript and report the outcome. A transcript that could not be pasted is kept all the
         same (history, ``last_transcript``), so the words are never lost: the user can copy it or paste it again."""
         if pasted:
-            self._last_paste = {"hwnd": ctx.hwnd, "text": entry["text"], "t": time.time()}
+            if track_paste:                            # a streamed dictation keeps its last typed phrase as the undo target
+                self._last_paste = {"hwnd": ctx.hwnd, "text": entry["text"], "t": time.time()}
         elif entry["text"].strip():
             message = ("Couldn't paste. The text is saved in your History." if self.config.save_history
                        else "Couldn't paste. Use Paste last transcript to try again.")
@@ -1919,7 +2157,7 @@ class Controller(QObject):
         # the bar says "Pasted" first; the (slower) file writes follow and can never turn a paste into an error
         # "slow": the model itself ran too long; a skip behind an earlier stuck generation is not counted again
         self._sig_done.emit({"entry": entry, "gen": gen, "message": message, "pasted": pasted,
-                             "slow": not (res or {}).get("model_skipped")})
+                             "slow": not (res or {}).get("model_skipped"), "quiet": quiet})
         if entry["text"].strip():                      # a lone line break is pasted but is not a transcript
             try:
                 if self.config.save_history:
@@ -1951,6 +2189,8 @@ class Controller(QObject):
             if entry.get("rules_only") and payload.get("slow", True):
                 self._note_rules_only()
             self.transcript_ready.emit(dict(entry))
+        if payload.get("quiet"):                       # a streamed dictation that was cancelled: the bar is already idle
+            return
         if not payload.get("pasted", True):
             self._on_failed(payload["message"], payload["gen"])
         elif self._owns_bar(payload["gen"]):
@@ -1993,6 +2233,8 @@ RULES_ONLY_SUFFIX = " · basic clean-up"          # appended to the flow-bar mes
 RULES_ONLY_BURST = 3                             # this many within RULES_ONLY_WINDOW_S earn one notice ...
 RULES_ONLY_WINDOW_S = 300.0
 RULES_ONLY_QUIET_S = 1800.0                      # ... and then none for this long
+PHRASE_LLM_SLOW_S = 1.0                          # a phrase's model answer slower than this ends model use for the session
+PHRASE_PACE_CAP_S = 0.6                          # longest wait for the previous paste's clipboard restore
 RULES_ONLY_NOTICE = ("The language model has been too slow several times, so those dictations got the basic "
                      "clean-up only. They are marked in your History. This usually passes when the computer "
                      "is less busy.")
@@ -2018,6 +2260,25 @@ def classify_error(message: str) -> dict:
             return {"kind": kind, "action": action, "hint": hint, "message": message}
     return {"kind": "other", "action": "", "hint": "Try again; if it keeps happening, restart VoxFlow.",
             "message": message}
+
+
+class _StreamSession:
+    """One hands-free dictation that types phrases while it runs. Written by the UI thread: ``phrases_seen``,
+    ``queue``, ``cancelled`` (and ``stopped`` when the setting is switched off); by the worker: everything else."""
+
+    def __init__(self, gen: int):
+        self.gen = gen
+        self.phrases_seen = 0
+        self.queue: list = []                          # phrases before the lock (kept until it)
+        self.cancelled = False
+        self.stopped = False                           # a paste failed or the setting went off: nothing more is typed
+        self.sent: list[str] = []                      # the chunks that reached the field, in order
+        self.raws: list[str] = []
+        self.sent_cut_s = 0.0                          # audio before this is in the field; the release re-reads the rest
+        self.last_kind = ""
+        self.held: list[tuple[str, str]] = []          # (text, raw) kept back while VoxFlow's own window had the focus
+        self.llm = True                                # the language model may still be used per phrase
+        self.last_paste_t: float | None = None
 
 
 _SPEECH_FAILURE = "The speech model hit an error. Try again; if it keeps happening, restart VoxFlow."

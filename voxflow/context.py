@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -80,6 +81,27 @@ def foreground_hwnd() -> int:
         return int(user32.GetForegroundWindow() or 0)
     except Exception:  # noqa: BLE001
         return 0
+
+
+def foreground_is_own() -> bool:
+    """True when the window that has the focus belongs to this very process (VoxFlow's own window). Never raises;
+    False off Windows and whenever it cannot tell."""
+    if sys.platform != "win32":
+        return False
+    try:
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.GetForegroundWindow.restype = ctypes.c_void_p
+        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return False
+        pid = wintypes.DWORD(0)
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        return bool(pid.value) and int(pid.value) == os.getpid()
+    except Exception:  # noqa: BLE001
+        return False
 
 
 _focus_api = None

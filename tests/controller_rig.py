@@ -168,6 +168,7 @@ class TCleaner:
         self.fail_generate: Exception | None = None
         self.rewrites: dict[str, str] = {}    # raw transcript -> "model" output
         self.clean_calls: list[tuple[str, dict]] = []
+        self.clean_backends: list[str] = []   # the ``backend`` this cleaner had at each clean() call
         self.generate_calls: list[dict] = []
         self.reply = lambda messages: "REWRITTEN"
         self.loads = 0
@@ -181,6 +182,7 @@ class TCleaner:
     def clean(self, text, *, tone=None, terms=None, language=None, smart=False):
         from voxflow.cleanup import apply_tone, clean_foreign, is_english, rule_clean, smart_format
         self.clean_calls.append((text, dict(tone=tone, terms=terms, language=language, smart=smart)))
+        self.clean_backends.append(self.backend)
         if self.fail_clean is not None:
             raise self.fail_clean
         if not is_english(text, language):
@@ -205,6 +207,8 @@ class TInjector:
     def __init__(self):
         self.restore, self.restore_delay = True, 0.5
         self.outcome = "pasted"               # what the next paste does: pasted | typed | copied | failed
+        self.outcomes: list[str] = []         # consumed one per begin(); ``outcome`` applies once it is empty
+        self.events: list[tuple] = []         # ("begin", text) / ("finish_later",) / ("copy_text", text), in order
         self.last_outcome = "failed"
         self.selection: str | None = ""
         self.pasted: list[str] = []
@@ -217,15 +221,17 @@ class TInjector:
         self.selection_grabs = 0
 
     def begin(self, text):
-        self.last_outcome = self.outcome
-        if self.outcome in ("pasted", "typed"):
+        self.events.append(("begin", text))
+        self.last_outcome = outcome = self.outcomes.pop(0) if self.outcomes else self.outcome
+        if outcome in ("pasted", "typed"):
             self.pasted.append(text)
             return True
-        if self.outcome == "copied":
+        if outcome == "copied":
             self.copied.append(text)
         return False
 
     def finish_later(self):
+        self.events.append(("finish_later",))
         self.finished_later += 1
 
     def finish(self):
@@ -245,6 +251,7 @@ class TInjector:
         return self.undo_ok
 
     def copy_text(self, text):
+        self.events.append(("copy_text", text))
         if self.copy_ok:
             self.copied.append(text)
         return self.copy_ok
@@ -325,6 +332,8 @@ class Rig:
         self.injector, self.mixer, self.autostart = TInjector(), TMixer(), TAutostart()
         self.sounds: list[str] = []
         self.context = context or AppContext("notepad.exe", "Untitled - Notepad", 0x100)
+        self.own_focus = False                              # True: "VoxFlow's own window has the keyboard focus"
+        kw.setdefault("own_focus_fn", lambda: self.own_focus)
         self.c = Controller(fake=fake, data_dir=self.data_dir, install_hook=kw.pop("install_hook", False),
                             modules=(TRecorder, self.asr, self.cleaner), injector=self.injector,
                             sound_backend=self._play, mute_backend=self.mixer,
@@ -395,6 +404,19 @@ class Rig:
         self.now += 0.05
         self.keys((WIN, False), (first, False))
         self.now += 0.10
+
+    def lock(self):
+        """Double-tap: the recording starts and locks (hands-free). Returns once ``state == "locked"``."""
+        self.pause()
+        self.tap()
+        self.tap()
+        assert self.c.state == "locked", f"did not lock (state={self.c.state}, {self.c.message!r})"
+
+    def stop_locked(self, held_s=5.0):
+        """End a locked recording with one more tap, after it ran for ``held_s`` seconds."""
+        self.pause(held_s)
+        self.c._t_start -= held_s
+        self.tap()
 
     def pause(self, seconds=2.0):
         """Let time pass between utterances so they are not taken for a double-tap."""
