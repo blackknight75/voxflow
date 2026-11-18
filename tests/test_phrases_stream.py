@@ -365,7 +365,8 @@ def test_a_normal_session_never_reports_a_gap():
     assert r.gaps and not any(r.gaps)
 
 
-def test_spaced_out_calls_force_the_window_forward_and_that_is_reported_once():
+def test_spaced_out_calls_that_skip_tentative_words_are_a_gap_reported_once():
+    """Jump 1 with a real loss: the tentative words of the last pass are cut off by the forced window start."""
     r = rig([words("aa bb cc")], trim_s=3.0, seconds=60.0)
     r.begin()
     r.tick(0.5)
@@ -377,6 +378,28 @@ def test_spaced_out_calls_force_the_window_forward_and_that_is_reported_once():
     r.tick(0.5)
     r.tick(0.5)
     assert r.gaps == [False, False, True, False, False]                             # once
+
+
+def test_a_jump_over_audio_nobody_examined_is_a_gap_even_without_tentative_words():
+    """Jump 1 with a real loss: the model was not called for a long time, the new window start lies after the audio
+    the last pass examined (0.5 s), so what lies between was never transcribed."""
+    r = rig([[]], trim_s=3.0, seconds=60.0)
+    r.begin()
+    r.tick(0.5)
+    r.p._hold_until = 0.0
+    r.tick(8.0)
+    assert r.gaps == [False, True]
+
+
+def test_a_jump_over_audio_that_was_examined_and_held_no_words_is_not_a_gap():
+    """Jump 1 without a loss: a long pause, passes with no words at all; the window start moves over audio that the
+    previous passes did examine."""
+    r = rig([[]], trim_s=3.0, seconds=60.0)
+    r.begin()
+    for _ in range(8):
+        r.p._hold_until = 0.0
+        r.tick(2.0)
+    assert len(r.gaps) == 8 and not any(r.gaps) and r.p._win_start > 0              # the jump did happen
 
 
 def test_a_forced_jump_on_a_tick_the_model_was_busy_for_is_still_reported_once():
@@ -393,7 +416,8 @@ def test_a_forced_jump_on_a_tick_the_model_was_busy_for_is_still_reported_once()
     assert r.gaps[-2:] == [False, False]
 
 
-def test_the_window_floor_in_trim_is_a_gap_too_and_reported_once():
+def test_the_window_floor_that_cuts_off_tentative_words_is_a_gap_reported_once():
+    """Jump 2 with a real loss: the floor lies after the start of the first tentative word."""
     r = rig([words("aa bb"), words("cc dd")], trim_s=1.0)
     r.begin()
     r.tick(0.6)
@@ -404,6 +428,22 @@ def test_the_window_floor_in_trim_is_a_gap_too_and_reported_once():
     assert r.gaps[-1] is False
 
 
+def test_the_window_floor_over_wordless_or_uncut_audio_is_not_a_gap():
+    """Jump 2 without a loss: no tentative words (the audio up to ``end`` was examined and wordless), or the floor
+    lies before the first tentative word (nothing was cut off)."""
+    r = rig([[]], trim_s=1.0)
+    r.begin()
+    r.tick(0.6)
+    r.p._hold_until = 0.0
+    r.tick(0.6)
+    assert r.p._win_start == int(0.2 * SR) and r.gaps == [False, False]            # forced, nobody lost
+    r = rig([words("aa bb", start=0.35), words("cc dd", start=0.35)], trim_s=1.0)
+    r.begin()
+    r.tick(0.6)
+    r.tick(0.6)
+    assert r.p._win_start == int(0.2 * SR) and r.gaps == [False, False]            # floor 0.2 s < first word 0.35 s
+
+
 def test_trim_to_a_word_is_not_a_gap():
     """Starting the window at the first uncommitted word skips only audio whose words are committed."""
     hyps = [words("aa bb"), words("aa bb cc dd"), words("aa bb cc dd ee ff")]
@@ -412,6 +452,33 @@ def test_trim_to_a_word_is_not_a_gap():
     for _ in range(3):
         r.tick(0.5)
     assert r.p._win_start == pytest.approx(0.8 * SR, abs=2) and r.gaps == [False, False, False]
+
+
+def test_a_long_noisy_pause_does_not_stop_the_stream_end_to_end():
+    """A speaker stops talking for longer than the window in a room that is not silent: passes with no words, the
+    window floor and the spaced-out jump both fire on audio that WAS transcribed and was wordless. No gap; the
+    phrases go on afterwards."""
+    first = words("we met today", start=0.0, step=0.5)
+    again = words("and then more words", start=1.5, step=0.4)
+    r = Rig([first, first] + [[]] * 14 + [again, again, []], trim_s=3.0, seconds=90.0)
+    out = []
+    gaps = []
+    ps = ph.PhraseStream(r.rec, lambda g, p: out.append(p))
+
+    def on_words(*a, gap=False):
+        gaps.append(gap)
+        ps.feed(*a, gap=gap)
+
+    r.p._on_words = on_words
+    ps.begin(1)
+    r.begin(1)
+    for _ in range(50):
+        r.p._hold_until = 0.0
+        r.tick(0.4)                                                                 # one preview interval of audio per tick
+    assert not any(gaps) and not ps.stopped                                         # the pause was not a gap
+    texts = [p.text for p in out]
+    assert texts[0] == "we met today" and len(texts) >= 2 and texts[1].endswith("words")
+    assert [w for w, _ in ps.heard()[0]][-4:] == ["and", "then", "more", "words"]
 
 
 def test_phrase_stream_stops_for_good_on_a_gap_and_heard_keeps_working():

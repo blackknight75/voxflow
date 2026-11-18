@@ -252,8 +252,9 @@ class Previewer:
         of the utterance is only read and written under the lock, after a check that it is still the same session;
         the receivers are called after the lock is released. Returns ``(session, gen, samples, gap)`` when the tick ended
         without a model pass (``samples``: the audio actually examined so far, never audio nobody looked at), else
-        None. ``gap``: this tick or pass moved the window start past audio that was never transcribed (the two forced
-        jumps: calls spaced out, and the window floor in ``_trim``); words in that audio are never heard."""
+        None. ``gap``: this tick or pass forced the window start forward (calls spaced out, or the floor in ``_trim``)
+        in a way that may have lost words: tentative words were cut off, or audio that no pass examined was skipped.
+        A jump over audio that was examined and held no words is not a gap."""
         with self._cv:
             if not self._active:
                 return None
@@ -284,7 +285,8 @@ class Previewer:
                 self._empty = 0
             self._silent_prev = silent
             if win_start > stored:
-                jumped = True                                # audio before it is never transcribed: a gap
+                # words may be lost only if tentative words were cut off, or audio that no pass examined is skipped
+                jumped = bool(self._la.prev) or win_start > last_n
                 self._win_start = win_start
                 self._la.prev = []                           # a cut through the tentative words: start afresh
         if self._gain is not None:
@@ -325,7 +327,7 @@ class Previewer:
         """Keep the window short: start it at the first uncommitted word, or just after the last committed one; and
         never let it be longer than ``trim_s`` whatever was recognised (no words at all, a first word that never
         settles): then the oldest words that are still tentative are given up. True when that floor forced the window
-        start past audio that may hold words nobody committed (a gap)."""
+        start past the first tentative word (those words are cut off: a gap)."""
         if (end - self._win_start) / SAMPLE_RATE <= self._trim_s:
             return False
         last = self._la.committed[-1][1] if self._la.committed else None
@@ -340,7 +342,7 @@ class Previewer:
         if self._win_start < floor:
             self._win_start = floor
             self._la.prev = []                                  # a cut through them: the next pass starts afresh
-            return True
+            return bool(tentative) and floor > int(tentative[0][1] * SAMPLE_RATE)
         return False
 
     def _govern(self, t_call: float, cost: float) -> bool:
