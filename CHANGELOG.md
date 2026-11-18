@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-18
+
+### Added
+
+- **Live preview.** While you speak, the words recognised so far appear in a caption above the Flow bar. The
+  pasted text is still tidied up after you release the key. On by default; switch it off under Settings >
+  Dictation > While you speak.
+- **Type while you speak (hands-free), off by default.** In hands-free mode (double-tap the hotkey) each finished
+  sentence is pasted into the app you are in while you keep talking, about 2 seconds behind your voice on a GPU;
+  the last sentence is pasted when you stop. Switch it on under Settings > Dictation > While you speak. This is
+  new and has had little real-world use so far. What to know:
+  - Text that is already pasted is not revised. A pause of about 1.5 seconds in the middle of a sentence is
+    typed as a sentence end.
+  - The text follows the cursor: if you change windows, the next sentence goes to the new window. Nothing is
+    pasted into VoxFlow's own window; that sentence waits for the next one.
+  - Undo removes the last pasted sentence only, and not while you are still dictating. History keeps one entry
+    per dictation. Snippets are not expanded in a dictation that was typed this way; the dictionary still applies.
+  - On a slow PC without a GPU the preview can fall behind; typing then stops for that dictation and the rest
+    is pasted when you stop, so no words are lost.
+  - Hold-to-talk and command mode are unchanged.
+
+### Changed
+
+- Settings is grouped into five tabs (Dictation, Audio, Appearance, Your data, System) instead of one long page;
+  one group is shown at a time. The search box sits beside the page title and looks through all groups. The
+  *Jump to section* menu is gone. The Flow bar options have their own section under Appearance, and Support and
+  About are one section, *Help and about*, under System.
+
 ## [0.2.2] - 2026-11-17
 
 ### Changed
