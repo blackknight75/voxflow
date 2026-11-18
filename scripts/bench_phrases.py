@@ -12,7 +12,7 @@ Metrics (plan/PHRASE_STREAMING_DESIGN.md 10.5):
 
     python scripts/bench_phrases.py [--device auto|cpu|cuda|webgpu] [--seconds 20] [--runs 5] [--gap-s 0.4]
                                     [--slowdown 1] [--wav tests/tts_sample.wav] [--json out.json]
-                                    [--pause-s N] [--sent-pause-s N] [--min-words N] [--end-base-s N]
+                                    [--noise PEAK] [--thinking] [--pause-s N] [--min-words N] [--end-base-s N]
                                     [--end-per-char-s N] [--min-gap-s N] [--cut-margin-s N] [--quiet]
 """
 from __future__ import annotations
@@ -39,6 +39,32 @@ bs = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(bs)
 
 NEAR_CUT = 3          # words either side of a cut that count as "at the cut"
+THINK_AT_S = 7.4      # in the clip: just after "afternoon," (a natural 0.4 s gap there is stretched)
+THINK_EXTRA_S = (0.8, 2.1)   # the clip's repetitions get a 1.2 s and a 2.5 s pause in the middle of a sentence
+
+
+def make_clip(wav: str, seconds: float, gap_s: float = 0.4, noise: float = 0.0, thinking: bool = False) -> np.ndarray:
+    """``seconds`` of the clip looped with ``gap_s`` between repetitions. ``noise``: peak of uniform noise put in the
+    gaps (and in the thinking pauses) instead of digital zeros. ``thinking``: a 1.2 s and a 2.5 s pause in the
+    middle of the second sentence, alternately."""
+    clip = bs.read_wav_16k(wav)
+    rng = np.random.default_rng(0)
+
+    def quiet(sec: float) -> np.ndarray:
+        n = int(sec * SAMPLE_RATE)
+        return rng.uniform(-noise, noise, n).astype(np.float32) if noise > 0 else np.zeros(n, np.float32)
+
+    parts, n, rep = [], 0, 0
+    while n < seconds * SAMPLE_RATE:
+        if thinking:
+            cut = int(THINK_AT_S * SAMPLE_RATE)
+            parts += [clip[:cut], quiet(THINK_EXTRA_S[rep % 2]), clip[cut:]]
+        else:
+            parts.append(clip)
+        parts.append(quiet(gap_s))
+        n = sum(p.size for p in parts)
+        rep += 1
+    return np.concatenate(parts)[: int(seconds * SAMPLE_RATE)].astype(np.float32)
 
 
 def align(full: list[str], streamed: list[str], boundaries: list[int]) -> dict:
@@ -121,7 +147,7 @@ def metrics(r: dict, audio: np.ndarray) -> dict:
         "release_to_tail_ms": r["release_to_tail_s"] * 1000, "last_cut_s": r["cut"],
         "tail_words": len(r["tail"].split()), "total_words": len(full),
         "cuts_monotone": all(a["phrase"].cut_s <= b["phrase"].cut_s for a, b in zip(emitted, emitted[1:])),
-        "texts": [e["phrase"].text for e in emitted] + ["| tail: " + r["tail"]],
+        "texts": [e["phrase"].text for e in emitted] + ["| tail: " + r["tail"]], "full_text": r["final"],
     })
     return m
 
@@ -167,7 +193,7 @@ def bench(tr: Transcriber, audio: np.ndarray, *, runs: int = 5, slowdown: float 
         "preview_duty": med("duty"), "preview_lag_median_s": med("lag_median_s"), "retracted": sum(m["retracted"] for m in per_run),
         "available_at_end": all(m["available_at_end"] for m in per_run),
         "cuts_monotone": all(m["cuts_monotone"] for m in per_run),
-        "example_texts": per_run[0]["texts"],
+        "example_texts": per_run[0]["texts"], "example_full_text": per_run[0]["full_text"],
     }
 
 
@@ -183,31 +209,32 @@ def main() -> None:
     ap.add_argument("--trim-s", type=float, default=None)
     ap.add_argument("--json", default="")
     ap.add_argument("--quiet", action="store_true")
-    for name, mod in (("pause-s", "PAUSE_S"), ("sent-pause-s", "SENT_PAUSE_S"), ("min-words", "MIN_WORDS"),
+    ap.add_argument("--noise", type=float, default=0.0, help="peak of uniform noise in the gaps (default: digital zeros)")
+    ap.add_argument("--thinking", action="store_true", help="a 1.2 s and a 2.5 s pause in the middle of a sentence")
+    for name, mod in (("pause-s", "PAUSE_S"), ("min-words", "MIN_WORDS"),
                       ("end-base-s", "END_BASE_S"), ("end-per-char-s", "END_PER_CHAR_S"), ("min-gap-s", "MIN_GAP_S"),
                       ("cut-margin-s", "CUT_MARGIN_S")):
         ap.add_argument("--" + name, type=float, default=None, help=f"override phrases.{mod}")
     a = ap.parse_args()
     splitter_args = {}
-    for name, key in (("pause_s", "pause_s"), ("sent_pause_s", "sent_pause_s")):
-        if getattr(a, name) is not None:
-            splitter_args[key] = getattr(a, name)
+    if a.pause_s is not None:
+        splitter_args["pause_s"] = a.pause_s
     if a.min_words is not None:
         splitter_args["min_words"] = int(a.min_words)
     for name, mod in (("end_base_s", "END_BASE_S"), ("end_per_char_s", "END_PER_CHAR_S"), ("min_gap_s", "MIN_GAP_S"),
                       ("cut_margin_s", "CUT_MARGIN_S")):
         if getattr(a, name) is not None:
             setattr(phrases, mod, getattr(a, name))
-    audio = bs.make_audio(a.wav, a.seconds, 0.0, a.gap_s)
+    audio = make_clip(a.wav, a.seconds, a.gap_s, a.noise, a.thinking)
     tr = Transcriber(device=a.device)
     t = time.perf_counter()
     tr.load()
     print(f"backend {tr.backend}, loaded in {time.perf_counter() - t:.1f} s; audio {audio.size / SAMPLE_RATE:.1f} s, gap "
-          f"{a.gap_s:g} s, slowdown x{a.slowdown:g}, {a.runs} runs, splitter {splitter_args or 'defaults'} "
+          f"{a.gap_s:g} s, noise {a.noise:g}, thinking {a.thinking}, slowdown x{a.slowdown:g}, {a.runs} runs, splitter {splitter_args or 'defaults'} "
           f"(real time: about {a.runs * audio.size / SAMPLE_RATE:.0f} s)")
     res = bench(tr, audio, runs=a.runs, slowdown=a.slowdown, interval_s=a.interval_s, trim_s=a.trim_s,
                 splitter_args=splitter_args, quiet=a.quiet)
-    res["gap_s"] = a.gap_s
+    res["gap_s"], res["noise"], res["thinking"] = a.gap_s, a.noise, a.thinking
     res["splitter_args"] = splitter_args
     print("\n" + json.dumps(res, indent=2))
     if a.json:

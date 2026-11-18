@@ -4,7 +4,6 @@
     PhraseStream       glue on the preview thread: splitter + the quietest point of the cut window in the audio
     quiet_point        the cut inside a window: the centre of its quietest frame
     finish_chunk       the text to paste for a cleaned phrase, given what was pasted before it in the session
-    closing_period     the full stop to end a streamed sentence when nothing is left to say at release
 
 The audio before ``cut_s`` holds exactly the words of the phrases emitted so far and the audio after it the next
 words (a cut lies after the estimated end of the last word and before the start of the next one), so the final
@@ -327,11 +326,3 @@ def finish_chunk(prev: str, cleaned: str, raw: str, kind: str, ends_sentence: bo
     if prev and not prev.endswith((" ", "\n", "\r")) and not cleaned.startswith(_NO_SPACE_BEFORE):
         cleaned = " " + cleaned
     return cleaned
-
-
-def closing_period(prev: str, last_kind: str) -> str:
-    """"." when the streamed text ends mid-sentence on a pause or cap cut and nothing is left to say; else ""."""
-    if last_kind not in ("pause", "cap") or not prev[-1:].isalnum():
-        return ""
-    last = re.split(r"(?<=[.!?…])\s+|\n+", prev)[-1]
-    return "." if len(last.split()) >= 3 else ""

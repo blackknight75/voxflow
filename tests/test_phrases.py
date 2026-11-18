@@ -370,15 +370,3 @@ def test_finish_chunk_keeps_the_capital_after_a_sentence_end_or_a_line_or_nothin
     for prev in ["", "It is done.", "Done!", "Done?", "Done…", "Name:", "Done.  ", "line one\n", "line one\r\n"]:
         out = fc(prev, "The shop", "the shop", "tail")
         assert "The shop" in out and "the shop" not in out
-
-
-def test_closing_period():
-    cp = ph.closing_period
-    assert cp("so we went to the shop", "pause") == "." and cp("so we went to the shop", "cap") == "."
-    assert cp("so we went to the shop", "sentence") == "" and cp("so we went to the shop", "tail") == ""
-    assert cp("Hello. we went home", "pause") == "." and cp("Hello. we went", "pause") == ""
-    assert cp("Done. we went home", "cap") == "."
-    assert cp("Done. Hello there", "pause") == ""                      # the last sentence has two words
-    assert cp("Done.\nHello there", "pause") == ""
-    assert cp("so we went to the shop,", "pause") == "" and cp("so we went to the shop ", "pause") == ""
-    assert cp("", "pause") == "" and cp("so we went to the 5", "pause") == "."
