@@ -6,6 +6,7 @@ audio and models) and by tests. They mirror the real classes' interfaces exactly
 from __future__ import annotations
 
 import math
+import threading
 import time
 
 import numpy as np
@@ -53,6 +54,18 @@ class FakeRecorder:
         return self._rec
 
     @property
+    def recorded_samples(self) -> int:
+        """Samples so far: grows with the wall clock like what ``stop()`` returns."""
+        if not self._rec:
+            return 0
+        return int(min(time.perf_counter() - self._t0, self.max_seconds) * SAMPLE_RATE)
+
+    def snapshot(self, start: int = 0) -> np.ndarray:
+        n = self.recorded_samples
+        t = np.arange(start, n) / SAMPLE_RATE
+        return (self._env(t) * np.sin(2 * math.pi * 160 * t)).astype(np.float32)
+
+    @property
     def hit_cap(self) -> bool:
         return self._rec and time.perf_counter() - self._t0 >= self.max_seconds
 
@@ -92,6 +105,7 @@ class FakeTranscriber:
                  delay_s: float = 0.4, **k):
         self.text = text
         self.delay_s = delay_s
+        self._lock = threading.Lock()
 
     def load(self) -> None:
         time.sleep(min(self.delay_s, 0.2))
@@ -99,6 +113,18 @@ class FakeTranscriber:
     def transcribe(self, audio) -> str:
         time.sleep(self.delay_s)
         return self.text
+
+    WORDS_PER_S = 3
+
+    def transcribe_timed(self, audio, *, bucket_s: float = 0.0, blocking: bool = False):
+        """The first words of ``text``, three per second of audio: what a growing recording would show."""
+        if not self._lock.acquire(blocking=blocking):
+            return None
+        try:
+            words = self.text.split()[: int(len(audio) / SAMPLE_RATE * self.WORDS_PER_S)]
+            return [(w, i / self.WORDS_PER_S) for i, w in enumerate(words)]
+        finally:
+            self._lock.release()
 
 
 class FakeCleaner:

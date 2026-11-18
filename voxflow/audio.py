@@ -328,6 +328,25 @@ class Recorder:
         """Duration of the last stop() result, excluding the PREROLL_S pre-roll."""
         return self._last_speech_s
 
+    @property
+    def recorded_samples(self) -> int:
+        """Samples of the current utterance so far, pre-roll included (0 when not recording)."""
+        with self._lock:
+            return self._rec_samples if self._recording else 0
+
+    def snapshot(self, start: int = 0) -> np.ndarray:
+        """A copy of the current utterance from sample ``start`` on (offset 0 = the first pre-roll sample) while it
+        is being recorded; empty when not recording. Only the list of chunks is read under the lock: the copying is
+        done outside it, so the audio callback never waits for a long window."""
+        with self._lock:
+            chunks = list(self._chunks) if self._recording else []
+        out, at = [], 0
+        for c in chunks:
+            if at + c.size > start:
+                out.append(c[max(0, start - at):])
+            at += c.size
+        return np.concatenate(out) if out else np.zeros(0, dtype=np.float32)
+
     def level(self) -> float:
         return float(self._level)
 

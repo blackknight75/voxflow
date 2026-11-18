@@ -22,7 +22,6 @@ from __future__ import annotations
 import argparse
 import difflib
 import os
-import re
 import sys
 import threading
 import time
@@ -32,56 +31,9 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from voxflow.app import read_wav_16k  # noqa: E402
 from voxflow.asr import SAMPLE_RATE, Transcriber  # noqa: E402
+from voxflow.stream import LocalAgreement, norm, words_with_times  # noqa: E402,F401  (moved: the app uses them too)
 
 PAD_S = 0.15                       # Transcriber.transcribe pads both ends by this much; the preview does the same
-
-
-def norm(word: str) -> str:
-    """Compare words without case or punctuation: Parakeet re-punctuates as more context arrives."""
-    return re.sub(r"[^\w']+", "", word.lower())
-
-
-def words_with_times(tokens, stamps) -> list[tuple[str, float]]:
-    """Join sub-word tokens (a leading space starts a word) into (word, start time in s)."""
-    out: list[list] = []
-    for tok, ts in zip(tokens, stamps):
-        if tok.startswith(" ") or not out:
-            out.append([tok.strip(), float(ts)])
-        else:
-            out[-1][0] += tok
-    return [(w, t) for w, t in out if w]
-
-
-class LocalAgreement:
-    """Commit the longest prefix on which the last two hypotheses agree (after what is already committed)."""
-
-    def __init__(self) -> None:
-        self.committed: list[tuple[str, float]] = []     # (word, absolute start time)
-        self.prev: list[tuple[str, float]] = []
-
-    def new_part(self, hyp: list[tuple[str, float]]) -> list[tuple[str, float]]:
-        """The words of a full hypothesis that come after the committed text. Timestamps move by a frame or two
-        between passes, so a time cut alone repeats the boundary word: like whisper_streaming, words near the cut
-        whose n-gram (n <= 5) equals the end of the committed text are dropped too."""
-        if not self.committed:
-            return hyp
-        last_t = self.committed[-1][1]
-        hyp = [(w, t) for w, t in hyp if t > last_t - 1.0]          # keep a margin around the cut
-        tail = [norm(w) for w, _ in self.committed[-5:]]
-        for n in range(min(5, len(hyp), len(tail)), 0, -1):
-            for skip in range(0, min(3, len(hyp) - n) + 1):           # the n-gram may start a few words in
-                if [norm(w) for w, _ in hyp[skip:skip + n]] == tail[-n:]:
-                    return hyp[skip + n:]
-        return [(w, t) for w, t in hyp if t > last_t + 0.08]
-
-    def update(self, hyp: list[tuple[str, float]]) -> list[tuple[str, float]]:
-        """``hyp``: words of the newest hypothesis that start after the committed ones. Returns the tentative tail."""
-        n = 0
-        while n < len(hyp) and n < len(self.prev) and norm(hyp[n][0]) == norm(self.prev[n][0]):
-            n += 1
-        self.committed += hyp[:n]
-        self.prev = hyp[n:]
-        return self.prev
 
 
 def recognize_timed(tr: Transcriber, audio: np.ndarray, bucket_s: float = 0.0):
