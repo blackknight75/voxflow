@@ -1994,32 +1994,29 @@ class Controller(QObject):
         self._finish(entry, dataclasses.replace(ctx, hwnd=self._foreground()), job["gen"], "Pasted", None,
                      pasted=True, track_paste=False, quiet=True)
 
-    @staticmethod
-    def _tail_has_speech(full, session: "_StreamSession", hint, covered_s: float) -> bool:
-        """Is there anything to say after the last typed phrase? Yes when the preview heard a word at or after the cut,
-        or when the audio the preview never looked at (after ``covered_s``) is above the preview's silence level. The
-        recorder offers no speech detector (only a duration), so the preview's own level gate is used."""
-        if hint is not None:
-            return True
-        rest = full[min(len(full), round(max(session.sent_cut_s, covered_s) * audiomod.SAMPLE_RATE)):]
-        return rest.size > 0 and float(np.max(np.abs(rest))) >= stream.SILENCE_PEAK
-
     def _job_tail(self, job: dict, session: "_StreamSession") -> None:
         """The release of a streamed dictation: only the audio after the last typed phrase goes through the final
         pass, and its text is the end of what is in the field. One history entry for the whole dictation."""
         from . import app as appmod
         cfg, ctx, gen = self.config, job["context"], job["gen"]
         full = job["audio"]
-        audio = full[min(len(full), round(session.sent_cut_s * audiomod.SAMPLE_RATE)):]
-        silent = audio.size == 0 or float(np.max(np.abs(audio))) < 1e-4
-        if cfg.whisper_mode and not silent:
-            audio = audiomod.normalize_gain(audio)
         words, covered_s = session.heard
         hint = phrases.tail_hint(words, session.sent_cut_s)
+        # A word was heard after the cut: the whole tail goes through the final pass. Otherwise only the audio the
+        # preview never looked at can hold something (usually just the stop key's click), so only that is offered to
+        # the model, and only when it rises above the preview's silence level: seconds of room noise are never sent.
+        if hint is not None:
+            start, floor = session.sent_cut_s, 1e-4
+        else:
+            start, floor = max(session.sent_cut_s, covered_s), stream.SILENCE_PEAK
+        audio = full[min(len(full), round(start * audiomod.SAMPLE_RATE)):]
+        silent = audio.size == 0 or float(np.max(np.abs(audio))) < floor
+        if cfg.whisper_mode and not silent:
+            audio = audiomod.normalize_gain(audio)
         sent_text = "".join(session.sent)
         res = {"raw": "", "text": "", "t_asr": 0.0, "t_clean": 0.0, "cleaned": False, "dropped": False,
                "rules_only": False, "model_skipped": False}
-        if not silent and self._tail_has_speech(full, session, hint, covered_s):
+        if not silent:
             try:
                 res = appmod.run_pipeline(audio, self._asr, self._cleaner, cfg.cleanup_enabled,
                                           **self._clean_kwargs(ctx))

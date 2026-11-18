@@ -980,9 +980,21 @@ def test_m3_a_word_in_the_last_uncovered_half_second_is_transcribed(rig):
     rig.stop_locked()
     rig.wait(lambda: rig.c.state == "done")
     assert len(rig.asr.heard) == 1 and rig.injector.pasted[-1] == " The tail words."
+    assert np.array_equal(rig.asr.heard[0], TRecorder.audio[4 * 16000:]), "only the uncovered remainder, not the room noise"
 
 
-def test_m3_a_heard_word_after_the_cut_is_enough_to_transcribe(rig):
+def test_m3_the_remainder_gets_the_whisper_gain_too(rig):
+    rig.c.set("whisper_mode", True)
+    gen = locked(rig)
+    TRecorder.audio = np.concatenate([speech(2.0), np.zeros(int(16000 * 2.5), dtype=np.float32), speech(0.5, amp=0.01)])
+    pstream(rig).heard_value = ((("so", 0.2),), 4.0)
+    send(rig, gen, ph("so the plan is simple", cut=2.0))
+    rig.stop_locked()
+    rig.wait(lambda: rig.c.state == "done")
+    assert np.array_equal(rig.asr.heard[0], audiomod.normalize_gain(TRecorder.audio[4 * 16000:]))
+
+
+def test_m3_a_heard_word_after_the_cut_sends_the_whole_tail(rig):
     gen = locked(rig)
     TRecorder.audio = np.concatenate([speech(2.0), np.full(16000 * 2, 0.001, dtype=np.float32)])
     pstream(rig).heard_value = ((("so", 0.2), ("then", 2.3)), 4.0)
@@ -990,6 +1002,7 @@ def test_m3_a_heard_word_after_the_cut_is_enough_to_transcribe(rig):
     rig.stop_locked()
     rig.wait(lambda: rig.c.state == "done")
     assert len(rig.asr.heard) == 1
+    assert np.array_equal(rig.asr.heard[0], TRecorder.audio[2 * 16000:]), "with a hint the whole tail from the cut"
 
 
 def test_m4_a_held_modifier_holds_the_phrase_like_the_own_window_rule(rig):
