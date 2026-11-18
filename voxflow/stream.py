@@ -135,20 +135,26 @@ class Previewer:
     def start(self, gen: int) -> None:
         """Begin the preview of utterance ``gen``. Returns at once; a no-op when previews are off."""
         with self._cv:
-            if self._closed or not self._available:
+            if not self._begin(gen):
                 return
-            self._session += 1
-            self._gen = gen
-            self._begin_state()
-            self._last_n = int(self._recorder.recorded_samples)     # the pre-roll is not "new" audio
-            if self._trim_s is None:
-                self._trim_s = float(self._trim_arg) if self._trim_arg is not None else _DEFAULT_TRIM[self._gpu()]
-            self._next_at = self._clock() + self.interval_s
-            self._active = True
             if self._thread is None:
                 self._thread = threading.Thread(target=self._run, name="voxflow-preview", daemon=True)
                 self._thread.start()
             self._cv.notify_all()
+
+    def _begin(self, gen: int) -> bool:
+        """Reset the per-utterance state and open the session (the caller holds the lock and wakes the thread)."""
+        if self._closed or not self._available:
+            return False
+        self._session += 1
+        self._gen = gen
+        self._begin_state()
+        self._last_n = int(self._recorder.recorded_samples)     # the pre-roll is not "new" audio
+        if self._trim_s is None:
+            self._trim_s = float(self._trim_arg) if self._trim_arg is not None else _DEFAULT_TRIM[self._gpu()]
+        self._next_at = self._clock() + self.interval_s
+        self._active = True
+        return True
 
     def stop(self) -> None:
         """End the session. Never blocks: a call that is still running is dropped when it returns."""
