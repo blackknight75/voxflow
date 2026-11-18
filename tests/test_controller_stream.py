@@ -296,7 +296,7 @@ def test_real_previewer_shows_growing_words_and_stops_at_the_release(real):
     real.pause()
     real.press()
     for _ in range(3):
-        grow(real, 0.5)
+        grow(real, 0.8)
         n = len(real.spy.of("partial_text"))
         real.wait(lambda n=n: len(real.spy.of("partial_text")) > n)
     texts = [(c + " " + t).strip() for c, t in real.spy.of("partial_text")]
