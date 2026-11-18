@@ -3,7 +3,7 @@
 A WAV is "spoken" at the speed of the clock: the preview thread reads the growing recording through the same
 ``recorded_samples`` / ``snapshot`` interface as ``voxflow.audio.Recorder`` and re-transcribes it through the real
 ``voxflow.asr.Transcriber``. At "release" the preview is stopped and today's final pass runs on the whole recording.
-Prints, and returns, the metrics the design asks for (plan/STREAMING_DESIGN.md section 6-D):
+Prints, and returns, the metrics the design asks for (the live-preview design notes, section 6-D):
 
     first words shown after the speech starts; median caption lag (wall clock minus the audio time of the newest
     shown word); duty (model time of the preview / speaking time); release-to-final with the preview running and

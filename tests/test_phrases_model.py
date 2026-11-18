@@ -1,5 +1,5 @@
 """Phrase streaming with the real speech model, in simulated real time (scripts/bench_phrases.py).
-Thresholds: plan/PHRASE_STREAMING_DESIGN.md 10.5, checked against the numbers in plan/report-pE.md. A 20 s clip is
+Thresholds: phrase-streaming design notes 10.5, checked against the bench numbers (scripts/bench_phrases.py). A 20 s clip is
 spoken at the speed of the clock: about 30 s of wall time per device."""
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ def tr(request):
     return t
 
 
-# (gap between repetitions, noise peak in the gaps, thinking pauses, seconds): the configs of plan/report-pE.md
+# (gap between repetitions, noise peak in the gaps, thinking pauses, seconds): the bench configs (scripts/bench_phrases.py)
 CLIPS = [pytest.param(0.4, 0.0, False, 20.0, id="fluent"), pytest.param(0.9, 0.0, False, 20.0, id="paused"),
          pytest.param(0.4, 0.004, False, 20.0, id="noisy-gaps"), pytest.param(0.4, 0.0, True, 30.0, id="thinking")]
 
@@ -54,7 +54,7 @@ def test_phrases_lose_and_repeat_nothing_and_arrive_in_time(tr, gap_s, noise, th
         "release_to_final_median_ms")})
     if r["stream_similarity_median"] < 0.88:
         print("TEXTS", *r["example_texts"], "FULL", r["example_full_text"], sep=chr(10))
-    # Thresholds (plan/report-pE.md, Round 3). Correctness is asserted as measured everywhere: nothing lost at a cut,
+    # Thresholds (bench, round 3). Correctness is asserted as measured everywhere: nothing lost at a cut,
     # no retraction, similarity. Timing and counts depend on the PC. Measured 4 times under
     # `scripts/coverage.py -k test_phrases_model` (every test traced): GPU lag median 1.97-2.21 s, p95 2.1-2.8 s, phrases
     # 3 (6 for "thinking"); CPU lag median 2.12-2.49 s, p95 2.15-2.76 s, phrases 2-5, tail 102-483 ms vs full pass

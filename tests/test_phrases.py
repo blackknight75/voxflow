@@ -1,4 +1,4 @@
-"""voxflow.phrases: splitter, cut window, quiet point, chunk text helpers (pure; plan/PHRASE_STREAMING_DESIGN.md 4, 10.1)."""
+"""voxflow.phrases: splitter, cut window, quiet point, chunk text helpers (pure; phrase-streaming design notes 4, 10.1)."""
 from __future__ import annotations
 
 import random

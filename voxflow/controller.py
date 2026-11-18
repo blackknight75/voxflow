@@ -1698,7 +1698,7 @@ class Controller(QObject):
         self._work.put({"kind": self.mode, "audio": audio, "t_release": t_release, "gen": self._gen,
                         "context": self._context, "speech_s": float(speech_s), "stream": session})
 
-    # ---- phrase streaming (design: plan/PHRASE_STREAMING_DESIGN.md sections 5.1-5.3)
+    # ---- phrase streaming (phrase-streaming design notes, sections 5.1-5.3)
     def _cancel_stream(self) -> None:
         """The recording ends without a release (Esc, pause, a swapped microphone): what was typed stays, nothing
         more is sent, and one history entry is filed for it."""

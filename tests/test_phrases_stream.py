@@ -1,5 +1,5 @@
 """``Previewer(on_words=...)`` and ``PhraseStream`` (voxflow.phrases) with the scripted doubles of test_stream.py.
-No model, no microphone (plan/PHRASE_STREAMING_DESIGN.md 4.2, 4.3, 10.2)."""
+No model, no microphone (phrase-streaming design notes 4.2, 4.3, 10.2)."""
 from __future__ import annotations
 
 import logging

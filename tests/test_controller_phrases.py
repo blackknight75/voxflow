@@ -1,4 +1,4 @@
-"""Phrase streaming through the real Controller (design: plan/PHRASE_STREAMING_DESIGN.md sections 5, 8, 9, 11).
+"""Phrase streaming through the real Controller (phrase-streaming design notes, sections 5, 8, 9, 11).
 
 The engine (``voxflow.phrases``) is replaced by a scripted ``FakePhraseStream`` that hands over ready-made phrases, and
 the previewer by a ``FakePreviewer``; what is checked here is the controller's own part: when a session exists, what is
@@ -929,7 +929,7 @@ def test_the_real_signal_path_from_the_stream_to_the_controller(tmp_path, qtbot,
         r.close()
 
 
-# =========================================================================== round 2 (plan/RULINGS_REVIEW.md, section C)
+# =========================================================================== round 2 (after the independent review)
 def test_m1_the_tail_gets_the_first_heard_word_after_the_cut_as_a_hint(rig, plain_text):
     gen = locked(rig)
     pstream(rig).heard_value = ((("so", 0.2), ("and", 1.0), ("send", 1.4)), 6.0)

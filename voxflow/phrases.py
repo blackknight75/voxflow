@@ -7,7 +7,7 @@
 
 The audio before ``cut_s`` holds exactly the words of the phrases emitted so far and the audio after it the next
 words (a cut lies after the estimated end of the last word and before the start of the next one), so the final
-pass over ``audio[cut_s:]`` neither loses nor repeats a word. Phrase text is never logged (plan/PHRASE_STREAMING_DESIGN.md
+pass over ``audio[cut_s:]`` neither loses nor repeats a word. Phrase text is never logged (phrase-streaming design notes
 section 9): this module does no logging at all.
 """
 from __future__ import annotations

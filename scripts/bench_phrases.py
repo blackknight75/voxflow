@@ -3,7 +3,7 @@
 A WAV is "spoken" at the speed of the clock into a real ``Previewer`` whose ``on_words`` feeds a real ``PhraseStream``.
 Every phrase is recorded with the wall time it was emitted. At "release" both are stopped, the audio after the last
 phrase's cut goes through the model (the tail) and the whole audio goes through it (today's final pass).
-Metrics (plan/PHRASE_STREAMING_DESIGN.md 10.5):
+Metrics (phrase-streaming design notes 10.5):
 
     phrases / minute, phrase lag (emission wall time minus the start of the phrase's last word), boundaries rejected
     for "no room" (hi - lo < MIN_GAP_S), word-level similarity of phrases + tail with the full pass, words lost /

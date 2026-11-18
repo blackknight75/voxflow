@@ -1,4 +1,4 @@
-"""Live preview through the real Controller (design: plan/STREAMING_DESIGN.md sections 2.4, 3, 4, 6-B).
+"""Live preview through the real Controller (live-preview design notes, sections 2.4, 3, 4, 6-B).
 
 Two kinds of tests. Most use ``FakePreviewer`` (a scripted stand-in for ``voxflow.stream.Previewer``) so the
 controller's own rules are checked deterministically: when a session starts and stops, that stale or late results

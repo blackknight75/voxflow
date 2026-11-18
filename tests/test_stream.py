@@ -672,7 +672,7 @@ def test_s2_trim_anchors_keep_the_last_committed_word_clearly_inside_or_clearly_
 
 
 def _fuzz_run(vocab, trim_s, seed, jitter=0.04, dur=60.0):
-    """plan/review-scratch/fuzz_la.py: the truth is a word list with times; the scripted model returns the words that
+    """A fuzz run from the review: the truth is a word list with times; the scripted model returns the words that
     lie inside the window (times from the window start, with jitter) and replaces the unstable tail by a unique
     garbage token on half of the passes, so a mismatch can only come from the trim / de-duplication logic."""
     rng = random.Random(seed)

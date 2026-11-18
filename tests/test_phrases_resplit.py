@@ -1,7 +1,7 @@
 """LocalAgreement.new_part matches re-heard text on joined normalised characters, so a pass that splits the same
 characters differently ("3.30" / "3 30" / "3:30") does not add them as new words. The hypotheses of the first test are
 the real ones captured from scripts/bench_phrases.py (CPU, `--thinking`, under coverage tracing) where a phrase was typed
-as "... at 3.30 3 30 in the afternoon." (plan/report-pE.md, Round 4)."""
+as "... at 3.30 3 30 in the afternoon." (bench, round 4)."""
 from __future__ import annotations
 
 from voxflow.stream import LocalAgreement

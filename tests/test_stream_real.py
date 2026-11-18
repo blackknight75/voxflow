@@ -1,5 +1,5 @@
 """The live preview with the real speech model on the CPU, in simulated real time (scripts/bench_stream.py).
-Thresholds are those of plan/STREAMING_DESIGN.md section 6-D. A few seconds of speech: about 15 s of wall time."""
+Thresholds are those of the live-preview design notes, section 6-D. A few seconds of speech: about 15 s of wall time."""
 from __future__ import annotations
 
 import importlib.util
