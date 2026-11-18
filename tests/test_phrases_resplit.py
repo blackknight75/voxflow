@@ -123,3 +123,30 @@ def test_a_word_that_merely_starts_with_the_committed_one_is_not_split():
     assert ("re", 1.0) not in la.new_part([("say", 0.5), ("there", 1.0), ("now", 1.4)])
     la.committed = [("at", 0.5), ("3", 1.0)]
     assert la.new_part([("at", 0.5), ("3.", 1.0)]) == []                   # nothing after the separator: nothing new
+
+
+def test_the_second_captured_sequence_three_then_thirty_then_three_thirty_never_doubles():
+    """The traced bench run that typed "... at 3 30 3 30 in the afternoon." (real new_part inputs, window offset 0):
+    "3" committed from "3 30.", the next pass heard one word "3:30" (only "30" is new), and the following passes split it
+    again as "3" "30", 0.4 s after "3"."""
+    la = LocalAgreement()
+    la.committed = [("for", 4.65), ("Thursday", 4.73)]
+    la.prev = [("at", 5.13), ("3.", 5.29)]
+    passes = [
+        [("Please", 3.29), ("schedule", 3.77), ("the", 4.25), ("meeting", 4.41), ("for", 4.73), ("Thursday", 4.89),
+         ("at", 5.29), ("3", 5.45), ("30.", 5.69)],
+        [("the", 4.25), ("meeting", 4.41), ("for", 4.73), ("Thursday", 4.89), ("at", 5.29), ("3:30", 5.45), ("in", 6.09),
+         ("the", 6.17), ("aft.", 6.25)],
+        [("meeting", 4.41), ("for", 4.73), ("Thursday", 4.89), ("at", 5.37), ("3", 5.53), ("30", 5.85), ("in", 6.33),
+         ("the", 6.49), ("afternoon.", 6.57)],
+        [("the", 4.33), ("meeting", 4.41), ("for", 4.73), ("Thursday", 4.89), ("at", 5.37), ("3:30", 5.53), ("in", 6.33),
+         ("the", 6.49), ("afternoon.", 6.65)],
+        [("meeting", 4.41), ("for", 4.73), ("Thursday", 4.89), ("at", 5.37), ("3", 5.53), ("30", 5.85), ("in", 6.33),
+         ("the", 6.49), ("afternoon.", 6.65)],
+        [("at", 5.37), ("3:30", 5.53), ("in", 6.33), ("the", 6.49), ("afternoon.", 6.65), ("And", 8.2)],
+    ]
+    for hyp in passes:
+        tent = la.update(la.new_part(hyp, 0.0))
+        out = [w for w, _ in la.committed] + [w for w, _ in tent]
+        assert digits(out[2:]) == "330", out                     # "3 30 3 30" / "3 30 30" doubled it
+    assert out[-3:] == ["in", "the", "afternoon."] or out[-1] == "And"

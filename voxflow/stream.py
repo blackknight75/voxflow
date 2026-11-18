@@ -114,7 +114,9 @@ class LocalAgreement:
                                 return hyp[j + 1:]
                             rest = _after_chars(hyp[j][0], len(target) - (len(acc) - len(norm(hyp[j][0]))))
                             if acc.startswith(target) and rest:
-                                return [(rest, hyp[j][1])] + hyp[j + 1:]      # "3" committed, now heard as "3.30"
+                                # "3" committed, now heard as "3.30": only the rest is new. Its start is a guess (a pass that
+                                # splits the word later puts "30" about 0.3-0.4 s after "3"), so that pass is still "heard again"
+                                return [(rest, hyp[j][1] + REHEARD_S)] + hyp[j + 1:]
                         break
         return [(w, t) for w, t in hyp if t > last_t + 0.08]
 
