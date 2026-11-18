@@ -230,9 +230,9 @@ class Previewer:
         except Exception as exc:  # noqa: BLE001 - the receiver's problem must not stop the preview
             log.warning("preview receiver failed (%s)", type(exc).__name__)
 
-    def _deliver_words(self, gen: int, new: list, tentative: list | None, now_s: float) -> None:
+    def _deliver_words(self, gen: int, new: list, tentative: list | None, now_s: float, gap: bool = False) -> None:
         try:
-            self._on_words(gen, new, tentative, now_s)
+            self._on_words(gen, new, tentative, now_s, gap=gap)
         except Exception as exc:  # noqa: BLE001 - the receiver's problem must not stop the preview
             log.warning("preview words receiver failed (%s)", type(exc).__name__)
 
@@ -241,18 +241,19 @@ class Previewer:
         tells ``on_words`` that time has passed, so a pause is seen even when the model is not called."""
         idle = self._pass()
         if idle is not None and self._on_words is not None:
-            session, gen, n = idle
+            session, gen, n, gap = idle
             with self._cv:
                 live = self._active and self._session == session
             if live:
-                self._deliver_words(gen, [], None, n / SAMPLE_RATE)
+                self._deliver_words(gen, [], None, n / SAMPLE_RATE, gap)
 
     def _pass(self):
         """One preview pass: snapshot the window, transcribe it (never waiting), stabilise, emit, adapt. The state
         of the utterance is only read and written under the lock, after a check that it is still the same session;
-        the receivers are called after the lock is released. Returns ``(session, gen, samples)`` when the tick ended
+        the receivers are called after the lock is released. Returns ``(session, gen, samples, gap)`` when the tick ended
         without a model pass (``samples``: the audio actually examined so far, never audio nobody looked at), else
-        None."""
+        None. ``gap``: this tick or pass moved the window start past audio that was never transcribed (the two forced
+        jumps: calls spaced out, and the window floor in ``_trim``); words in that audio are never heard."""
         with self._cv:
             if not self._active:
                 return None
@@ -262,8 +263,8 @@ class Previewer:
             self._next_at = t_call + self.interval_s
         n = int(self._recorder.recorded_samples)
         if n - last_n < MIN_NEW_S * SAMPLE_RATE or n - self._start_n < MIN_FIRST_S * SAMPLE_RATE:
-            return session, gen, last_n                      # that audio was not looked at: time does not move
-        stored = win_start
+            return session, gen, last_n, False               # that audio was not looked at: time does not move
+        stored, jumped = win_start, False
         if n - win_start > (trim_s + self.interval_s) * SAMPLE_RATE:       # calls were spaced out: still bounded
             win_start = n - int(trim_s * SAMPLE_RATE)
         window = self._recorder.snapshot(win_start)
@@ -275,14 +276,15 @@ class Previewer:
                 return None
             if silent and self._silent_prev:
                 self._last_n = win_start + window.size       # nothing to say: do not look at it again
-                return session, gen, n
+                return session, gen, n, False
             risen = peak >= RISE_FACTOR * max(self._ref_peak, SILENCE_PEAK)
             if t_call < self._hold_until and not risen:
-                return session, gen, last_n                  # backing off: the audio stays "new" for the next look
+                return session, gen, last_n, False           # backing off: the audio stays "new" for the next look
             if risen:
                 self._empty = 0
             self._silent_prev = silent
             if win_start > stored:
+                jumped = True                                # audio before it is never transcribed: a gap
                 self._win_start = win_start
                 self._la.prev = []                           # a cut through the tentative words: start afresh
         if self._gain is not None:
@@ -293,7 +295,7 @@ class Previewer:
             self._disable(str(exc) or "the speech model cannot do previews")
             return None
         if words is None:                                      # the model was busy (a final pass): try again later
-            return session, gen, last_n                        # the window was not examined: time does not move
+            return session, gen, last_n, jumped                # the window was not examined: time does not move
         cost = self._clock() - t_call
         with self._cv:
             if not self._active or self._session != session:
@@ -309,22 +311,23 @@ class Previewer:
             gained = self._la.committed[k0:]
             shown = (" ".join(w for w, _ in self._la.committed), " ".join(w for w, _ in tentative))
             changed, self._shown = shown != self._shown, shown
-            self._trim(end, tentative)
+            forced = self._trim(end, tentative)
             give_up = self._govern(t_call, cost)
         if changed:
             self._deliver(gen, shown[0], shown[1])
         if self._on_words is not None:
-            self._deliver_words(gen, gained, list(tentative), end / SAMPLE_RATE)
+            self._deliver_words(gen, gained, list(tentative), end / SAMPLE_RATE, jumped or forced)
         if give_up:
             self._disable("the speech model is too slow on this PC")
         return None
 
-    def _trim(self, end: int, tentative: list[tuple[str, float]]) -> None:
+    def _trim(self, end: int, tentative: list[tuple[str, float]]) -> bool:
         """Keep the window short: start it at the first uncommitted word, or just after the last committed one; and
         never let it be longer than ``trim_s`` whatever was recognised (no words at all, a first word that never
-        settles): then the oldest words that are still tentative are given up."""
+        settles): then the oldest words that are still tentative are given up. True when that floor forced the window
+        start past audio that may hold words nobody committed (a gap)."""
         if (end - self._win_start) / SAMPLE_RATE <= self._trim_s:
-            return
+            return False
         last = self._la.committed[-1][1] if self._la.committed else None
         if tentative:
             start = tentative[0][1] - 0.2
@@ -337,6 +340,8 @@ class Previewer:
         if self._win_start < floor:
             self._win_start = floor
             self._la.prev = []                                  # a cut through them: the next pass starts afresh
+            return True
+        return False
 
     def _govern(self, t_call: float, cost: float) -> bool:
         """Bound the duty cycle; shrink the window when a call is slow. True: the PC cannot keep up, give up."""

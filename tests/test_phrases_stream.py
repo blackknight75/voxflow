@@ -18,8 +18,14 @@ def rd(ws):
 
 def rig(hyps=(), **kw):
     got: list[tuple] = []
-    r = Rig(hyps, on_words=lambda *a: got.append(a), **kw)
-    r.got = got
+    gaps: list[bool] = []
+
+    def on_words(*a, gap=False):
+        got.append(a)
+        gaps.append(gap)
+
+    r = Rig(hyps, on_words=on_words, **kw)
+    r.got, r.gaps = got, gaps
     return r
 
 
@@ -128,7 +134,7 @@ def test_on_words_is_called_after_the_lock_is_released():
     r = rig([words("a b c")])
     seen = []
 
-    def on_words(*a):
+    def on_words(*a, **kw):
         got = r.p._cv.acquire(blocking=False)
         seen.append(got)
         if got:
@@ -143,7 +149,7 @@ def test_on_words_is_called_after_the_lock_is_released():
 
 def test_a_failing_words_receiver_is_swallowed_and_never_logs_the_words(caplog):
     r = rig([words("secret words")])
-    r.p._on_words = lambda *a: 1 / 0
+    r.p._on_words = lambda *a, **kw: 1 / 0
     r.begin()
     with caplog.at_level(logging.DEBUG, logger="voxflow.stream"):
         r.tick()
@@ -181,7 +187,7 @@ class Snap:
 
 def stream_rig(audio=None, **kw):
     out: list[tuple] = []
-    audio = np.full(SR * 20, 0.1, np.float32) if audio is None else audio
+    audio = np.full(SR * 20, 0.003, np.float32) if audio is None else audio     # room noise: no speech
     rec = Snap(audio)
     ps = ph.PhraseStream(rec, lambda g, p: out.append((g, p)), **kw)
     return ps, rec, out
@@ -191,7 +197,7 @@ SENTENCE = [("we", 1.0), ("met", 1.5), ("today.", 2.0), ("Then", 3.0)]
 
 
 def test_a_phrase_is_emitted_with_the_gen_and_the_cut_at_the_quietest_point():
-    audio = np.full(SR * 20, 0.1, np.float32)
+    audio = np.full(SR * 20, 0.003, np.float32)
     audio[int(2.71 * SR):int(2.75 * SR)] = 0.0                                       # a quiet frame inside the window
     ps, rec, out = stream_rig(audio)
     ps.begin(5)
@@ -265,8 +271,7 @@ def test_the_real_chain_previewer_to_phrase_stream():
     """Previewer.on_words -> PhraseStream.feed -> phrases, with committed words coming from scripted passes."""
     hyps = [[("we", 1.0), ("met", 1.5), ("today.", 2.0), ("Then", 3.2)]] * 6
     r = Rig(hyps, seconds=30.0)
-    r.rec.audio[:] = 0.1
-    snap = Snap(r.rec.audio)
+    snap = Snap(np.zeros(SR * 30, np.float32))
     out = []
     ps = ph.PhraseStream(snap, lambda g, p: out.append((g, p)))
     r.p._on_words = ps.feed
@@ -294,7 +299,7 @@ def test_a_busy_model_never_lets_the_chain_cut_into_unseen_speech():
     hyps = [[("we", 1.0), ("met", 1.5), ("today", 2.0)]] * 4
     r = Rig(hyps, seconds=30.0)
     out = []
-    ps = ph.PhraseStream(Snap(r.rec.audio), lambda g, p: out.append(p))
+    ps = ph.PhraseStream(Snap(np.zeros(SR * 30, np.float32)), lambda g, p: out.append(p))
     r.p._on_words = ps.feed
     ps.begin(1)
     r.begin(1)
@@ -346,3 +351,100 @@ def test_begin_end_feed_heard_exclude_each_other():
     ps._on_phrase = on_phrase
     ps.feed(1, SENTENCE[:3], [], 9.0)
     assert seen == [False]
+
+
+# ======================================================================== audio the preview skipped (gap)
+def test_a_normal_session_never_reports_a_gap():
+    r = rig([words("one two three four five six"), words("one two three four five six seven eight")])
+    r.begin()
+    for _ in range(10):
+        r.tick(0.5)
+    r.asr.busy = True
+    r.tick(0.1)
+    r.tick(0.5)                                                                     # busy: a time-only tick, no gap
+    assert r.gaps and not any(r.gaps)
+
+
+def test_spaced_out_calls_force_the_window_forward_and_that_is_reported_once():
+    r = rig([words("aa bb cc")], trim_s=3.0, seconds=60.0)
+    r.begin()
+    r.tick(0.5)
+    r.tick(0.5)
+    assert r.gaps == [False, False]
+    r.tick(8.0)                                                                     # 9 s in the window > 3 s + interval
+    assert r.gaps == [False, False, True] and r.p._win_start == int(6.0 * SR)
+    r.p._trim_s = 100.0                                                             # no window floor from here on
+    r.tick(0.5)
+    r.tick(0.5)
+    assert r.gaps == [False, False, True, False, False]                             # once
+
+
+def test_a_forced_jump_on_a_tick_the_model_was_busy_for_is_still_reported_once():
+    r = rig([words("aa bb cc")], trim_s=3.0, seconds=60.0)
+    r.begin()
+    r.tick(0.5)
+    r.asr.busy = True
+    r.tick(8.0)                                                                     # the window start moved, no pass
+    assert r.got[-1][2] is None and r.gaps[-1] is True
+    r.p._trim_s = 100.0                                                             # no window floor from here on
+    r.asr.busy = False
+    r.tick(0.5)
+    r.tick(0.5)
+    assert r.gaps[-2:] == [False, False]
+
+
+def test_the_window_floor_in_trim_is_a_gap_too_and_reported_once():
+    r = rig([words("aa bb"), words("cc dd")], trim_s=1.0)
+    r.begin()
+    r.tick(0.6)
+    assert r.gaps == [False]
+    r.tick(0.6)                                                                     # 1.2 s > 1 s, the words never agree
+    assert r.gaps == [False, True] and r.p._win_start == int(0.2 * SR)
+    r.tick(0.1)                                                                     # too little audio: time only
+    assert r.gaps[-1] is False
+
+
+def test_trim_to_a_word_is_not_a_gap():
+    """Starting the window at the first uncommitted word skips only audio whose words are committed."""
+    hyps = [words("aa bb"), words("aa bb cc dd"), words("aa bb cc dd ee ff")]
+    r = rig(hyps, trim_s=1.0, bucket_s=0, interval_s=2.0)
+    r.begin()
+    for _ in range(3):
+        r.tick(0.5)
+    assert r.p._win_start == pytest.approx(0.8 * SR, abs=2) and r.gaps == [False, False, False]
+
+
+def test_phrase_stream_stops_for_good_on_a_gap_and_heard_keeps_working():
+    ps, rec, out = stream_rig()
+    ps.begin(1)
+    assert not ps.stopped
+    ps.feed(1, SENTENCE[:3], [], 9.0)                                               # a phrase before the gap stays sent
+    assert len(out) == 1 and not ps.stopped
+    ps.feed(1, [("next", 10.0), ("one", 10.4), ("here.", 10.8), ("Then", 12.0)], [], 12.5, gap=True)
+    assert ps.stopped and len(out) == 1                                             # nothing from the call with the gap
+    ps.feed(1, [("more", 13.0), ("words", 13.4), ("again.", 13.8), ("Ok", 15.0)], [], 16.0)
+    assert len(out) == 1                                                            # nor ever after
+    words_, covered = ps.heard()
+    assert ("Then", 12.0) in words_ and words_[-1] == ("Ok", 15.0) and covered == 16.0
+    ps.begin(2)
+    assert not ps.stopped
+    ps.feed(2, SENTENCE[:3], [], 9.0)
+    assert len(out) == 2
+
+
+def test_words_inside_skipped_audio_are_never_claimed_by_a_phrase_cut():
+    """The bench's real loss (similarity 0.535): the preview stalled and its window jumped over 17 s of speech, so the
+    committed words ended at "at" and resumed at "And". A "pause" phrase "... at" then got a cut window over all of
+    the skipped audio and its cut fell in the middle of words nobody had heard."""
+    ws = [("Please", 1.0), ("schedule", 1.4), ("the", 1.8), ("meeting", 2.0), ("at", 2.6)]
+    resumed = [("And", 22.0), ("then", 22.3)]
+    ps, rec, out = stream_rig()
+    ps.begin(1)
+    ps.feed(1, ws, [], 3.0)                                                         # no pause yet
+    ps.feed(1, resumed, [], 23.0, gap=True)                                         # the window jumped past 3 s .. 22 s
+    assert out == [] and ps.stopped
+    # the splitter alone, which cannot know about the jump, did claim a cut inside the skipped audio
+    sp = ph.PhraseSplitter()
+    sp.feed(ws, None, 3.0)
+    claimed = sp.feed(resumed, None, 23.0)
+    assert claimed and claimed[0].cut_lo < 6.0 < claimed[0].cut_s < 22.0

@@ -232,7 +232,9 @@ def quiet_point(samples, t0: float, lo: float, hi: float, frame_s: float = 0.04)
 
 class PhraseStream:
     """The part that lives on the preview thread: ``feed`` is the Previewer's ``on_words``. ``begin``, ``end``, ``feed``
-    and ``heard`` are mutually exclusive (one lock), so a new session never receives words of the old one."""
+    and ``heard`` are mutually exclusive (one lock), so a new session never receives words of the old one. ``stopped``:
+    the preview reported ``gap`` (it moved its window past audio it never transcribed), so no phrase is emitted any
+    more in this session."""
 
     def __init__(self, recorder, on_phrase, *, splitter=None, frame_s=0.04):
         self._recorder, self._on_phrase, self._frame_s = recorder, on_phrase, frame_s
@@ -243,12 +245,14 @@ class PhraseStream:
         self._committed: list[tuple[str, float]] = []
         self._tentative: list[tuple[str, float]] = []
         self._covered = 0.0
+        self.stopped = False                 # the preview skipped audio it never transcribed: no more phrases
 
     def begin(self, gen: int) -> None:
         """New session (UI thread)."""
         with self._lock:
             self.splitter.reset()
             self._cut = self._covered = 0.0
+            self.stopped = False
             self._committed, self._tentative = [], []
             self._gen = gen
 
@@ -264,16 +268,21 @@ class PhraseStream:
         with self._lock:
             return tuple(self._committed) + tuple(self._tentative), self._covered
 
-    def feed(self, gen, new_committed, tentative, now_s) -> None:
+    def feed(self, gen, new_committed, tentative, now_s, gap=False) -> None:
         with self._lock:
             if self._gen is None or gen != self._gen:
                 return
             self._committed.extend((str(w), float(t)) for w, t in new_committed)
+            if tentative is not None:
+                self._tentative = [(str(w), float(t)) for w, t in tentative]
+                self._covered = max(self._covered, float(now_s))
+            if gap:
+                self.stopped = True       # audio was skipped untranscribed: words in it are in no phrase; stop for good
+            if self.stopped:
+                return                    # heard() keeps working; the tail covers everything after the last sent cut
             if tentative is None:
                 found = self.splitter.tick(now_s)
             else:
-                self._tentative = [(str(w), float(t)) for w, t in tentative]
-                self._covered = max(self._covered, float(now_s))
                 found = self.splitter.feed(new_committed, tentative[0][1] if tentative else None, now_s)
             for ph in found:
                 cut = max(self._cut, self._refine(ph))

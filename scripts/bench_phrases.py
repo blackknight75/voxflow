@@ -38,7 +38,7 @@ _spec = importlib.util.spec_from_file_location("bench_stream", os.path.join(HERE
 bs = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(bs)
 
-NEAR_CUT = 3          # words either side of a cut that count as "at the cut"
+NEAR_CUT = 2          # words either side of a cut that count as "at the cut": a word lost or repeated by a cut sits next to it
 THINK_AT_S = 7.4      # in the clip: just after "afternoon," (a natural 0.4 s gap there is stretched)
 THINK_EXTRA_S = (0.8, 2.1)   # the clip's repetitions get a 1.2 s and a 2.5 s pause in the middle of a sentence
 
@@ -121,7 +121,7 @@ def play(tr: Transcriber, audio: np.ndarray, *, slowdown: float, interval_s: flo
     return {"rec": rec, "shown": shown, "calls": list(probe.calls), "final": final, "release_to_final_s": full_s,
             "available": p.available, "trim_s": p._trim_s, "emitted": emitted, "tail": tail,
             "release_to_tail_s": release_to_tail, "cut": cut,
-            "rejected": splitter.rejected_final + len(splitter.rejected_at)}
+            "rejected": splitter.rejected_final + len(splitter.rejected_at), "stopped": ps.stopped}
 
 
 def metrics(r: dict, audio: np.ndarray) -> dict:
@@ -142,7 +142,7 @@ def metrics(r: dict, audio: np.ndarray) -> dict:
         "phrase_lag_median_s": statistics.median(lags) if lags else None,
         "phrase_lag_max_s": max(lags) if lags else None, "phrase_lags": lags,
         "kinds": {k: sum(1 for e in emitted if e["phrase"].kind == k) for k in ("sentence", "pause", "cap")},
-        "rejected_no_room": r["rejected"],
+        "rejected_no_room": r["rejected"], "stopped": r["stopped"],
         "stream_similarity": bs.similarity(streamed, full),
         "release_to_tail_ms": r["release_to_tail_s"] * 1000, "last_cut_s": r["cut"],
         "tail_words": len(r["tail"].split()), "total_words": len(full),
@@ -164,7 +164,7 @@ def bench(tr: Transcriber, audio: np.ndarray, *, runs: int = 5, slowdown: float 
         m = metrics(play(tr, a, slowdown=slowdown, interval_s=interval_s, trim_s=trim_s, splitter=sp), a)
         per_run.append(m)
         if not quiet:
-            print(f"  run {i + 1}: {m['phrases']} phrases {m['kinds']}, rejected {m['rejected_no_room']}, lag "
+            print(f"  run {i + 1}: {m['phrases']} phrases {m['kinds']}, rejected {m['rejected_no_room']}, stopped {m['stopped']}, lag "
                   f"{m['phrase_lag_median_s']}, similarity {m['stream_similarity']:.3f}, at cuts lost "
                   f"{m['lost_at_cuts']} extra {m['extra_at_cuts']} replaced {m['replaced_at_cuts']} (elsewhere "
                   f"{m['lost_elsewhere']}/{m['extra_elsewhere']}/{m['replaced_elsewhere']}), tail "
@@ -177,6 +177,7 @@ def bench(tr: Transcriber, audio: np.ndarray, *, runs: int = 5, slowdown: float 
         "phrases_median": med("phrases"), "phrases_per_min": med("phrases_per_min"),
         "kinds": {k: sum(m["kinds"][k] for m in per_run) for k in ("sentence", "pause", "cap")},
         "rejected_no_room_total": sum(m["rejected_no_room"] for m in per_run),
+        "runs_stopped": sum(1 for m in per_run if m["stopped"]),
         "phrase_lag_median_s": statistics.median(lags) if lags else None,
         "phrase_lag_p95_s": lags[min(len(lags) - 1, int(0.95 * len(lags)))] if lags else None,
         "phrase_lag_max_s": max(lags) if lags else None,
