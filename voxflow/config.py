@@ -90,6 +90,7 @@ class Config:
     restore_delay_s: float = 0.5      # wait after Ctrl+V before the old clipboard is put back
     # ---- interface (stored for the UI)
     show_idle_pill: bool = False      # the Flow bar only appears while a hotkey is in use
+    live_preview: bool = True         # the Flow bar shows the words recognised so far while the key is held
     theme: str = "system"
     reduced_motion: bool = False
     overlay_position: Any = None      # None or [x, y]
