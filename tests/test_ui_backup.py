@@ -454,7 +454,7 @@ def test_choosing_a_sync_folder_turns_sync_on_and_the_row_follows_the_controller
     populate(ui.c)
     folder = tmp_path / "cloud"
     folder.mkdir()
-    ui.page("settings")
+    ui.page("settings").show_tab("data")
     folder_is(monkeypatch, folder)
     ui.find("settings_sync_choose").click()
     assert ui.c.get("sync_folder") == str(folder) and ui.c.sync_status()["enabled"]
@@ -510,7 +510,7 @@ def test_sync_now_runs_a_round_and_picks_up_another_device(other, make_ui, monke
     idle(other)
 
     ui = make_ui()
-    ui.page("settings")
+    ui.page("settings").show_tab("data")
     folder_is(monkeypatch, folder)
     ui.find("settings_sync_choose").click()
     idle(ui)
@@ -566,7 +566,7 @@ def test_folder_offline_shows_one_calm_sentence_in_the_row_and_no_toasts(ui, tmp
     folder.mkdir()
     ui.c.set("sync_folder", str(folder))
     idle(ui)
-    ui.page("settings")
+    ui.page("settings").show_tab("data")
     shutil.rmtree(folder)                                         # the network drive went away
     toasts_before = list(ui.toasts())
     for _ in range(3):

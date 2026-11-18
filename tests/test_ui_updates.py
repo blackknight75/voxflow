@@ -15,6 +15,7 @@ from voxflow.ui.onboarding import STEPS, Onboarding
 
 def section(demo):
     page = demo.page("settings")
+    page.show_tab("system")
     return page, page.updates
 
 

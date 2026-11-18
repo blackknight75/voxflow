@@ -73,6 +73,7 @@ def test_the_speed_check_row_tells_what_it_is_doing():
 # =========================================================================== the page
 def page_of(d):
     page = d.page("settings")
+    page.show_tab("system")
     page.refresh()
     flush()
     return page

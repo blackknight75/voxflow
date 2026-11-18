@@ -530,11 +530,15 @@ def test_settings_finder_and_sections(demo):
     bar = page.scroll.verticalScrollBar()
     at_models = min(bar.maximum(), max(0, target.y() - 4))
     assert bar.value() == at_models > 0
-    page._jump_to(99)
-    page._jump_to(-1)
-    assert bar.value() == at_models, "an unknown section moves nothing"
-    page.jump.chosen.emit(1)
-    assert bar.value() == max(0, sections[1].y() - 4) < at_models and page.jump.value is None
+    assert page.tabs.value == "system" and target.isVisibleTo(page)
+    assert all(s.isVisibleTo(page) == (s.tab == "system") for s in sections), "one group at a time"
+    page.find.setText("whisper")                               # a search looks through every group, from the top
+    assert bar.value() == 0
+    assert [s.caption.text().lower() for s in sections if s.isVisibleTo(page)] == ["microphone"]
+    page.tabs.changed.emit("audio")                            # choosing a group ends the search
+    assert page.find.text() == "" and page.tabs.value == "audio" and bar.value() == 0
+    assert [s.caption.text().lower() for s in sections if s.isVisibleTo(page)] == ["microphone", "sound"]
+    assert {s.tab for s in sections} == {key for key, _title in page._TABS}, "every section is in a group"
 
 
 def test_settings_language_hint_volume_and_microphones(demo):
@@ -736,6 +740,7 @@ def test_settings_sync_row(demo, monkeypatch, tmp_path):
 
 def test_settings_mic_test_flow_bar_arranging_and_reset(demo):
     page, c = demo.page("settings"), demo.c
+    page.show_tab("appearance")
     page.btn_test.click()
     assert c._monitor and page.btn_test.text() == "Stop" and page.meter.source == c.level
     page.btn_test.click()
