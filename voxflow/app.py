@@ -421,7 +421,7 @@ def selftest(wav_path: str | None, fake: bool = False) -> int:
 
 # --------------------------------------------------------------------------- the Qt application
 _DEMO_CYCLE = [
-    ("listening", "dictate", "", 3.4), ("processing", "dictate", "", 1.4), ("done", "dictate", "Pasted", 1.4),
+    ("listening", "dictate", "", 9.0), ("processing", "dictate", "", 1.4), ("done", "dictate", "Pasted", 1.4),
     ("idle", "dictate", "", 1.2), ("locked", "dictate", "", 2.6), ("processing", "dictate", "", 1.2),
     ("error", "dictate", "Didn't catch that", 1.6), ("idle", "dictate", "", 1.2),
     ("listening", "command", "", 2.6), ("processing", "command", "", 1.6), ("done", "command", "Rewritten", 1.4),
@@ -432,7 +432,8 @@ _DEMO_CYCLE = [
 # what the demo "says" while its Flow bar listens: the live-preview caption grows by DEMO_WORDS_PER_S, and the
 # newest DEMO_TENTATIVE words are still unsettled (dim), as with the real model
 _DEMO_CAPTIONS = {
-    "dictate": "so this is a demo of the live preview the words show up here while you are still talking",
+    "dictate": ("so this is a demo of the live preview the words show up here while you are still talking and "
+                "when the sentence gets too long for the bar the beginning drops away so the newest words stay"),
     "command": "make this paragraph shorter and a bit more friendly",
 }
 DEMO_WORDS_PER_S = 3.0
