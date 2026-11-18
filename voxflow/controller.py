@@ -23,7 +23,7 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from . import __version__, audio as audiomod, config as cfgmod, fakes, langs, modelhub, speedcheck, store, system
+from . import __version__, audio as audiomod, config as cfgmod, fakes, langs, modelhub, speedcheck, store, stream, system
 from . import sync as syncmod
 from . import updater as updatermod
 from .command import CommandError, CommandMode
@@ -66,6 +66,7 @@ class Controller(QObject):
     notice_action = Signal(str, str, str)   # (message, action_id, label): sent right after the `notice` with that message
     error_info_changed = Signal(dict)       # {"kind", "action", "hint", "message"} just before state "error"
     transcript_ready = Signal(dict)
+    partial_text = Signal(str, str)                 # live preview while the key is held: committed, tentative
     history_changed = Signal()
     stats_changed = Signal()
     dictionary_changed = Signal()
@@ -94,6 +95,7 @@ class Controller(QObject):
     _sig_model = Signal(str, dict)
     _sig_done = Signal(dict)
     _sig_failed = Signal(str, int)
+    _sig_partial = Signal(int, str, str)            # gen, committed, tentative (from the preview thread)
     _sig_notice = Signal(str, str)
     _sig_notice_action = Signal(str, str, str, str)  # level, message, action id, button label (from any thread)
     _sig_sync = Signal(str, object)                 # step ("read" | "written"), result or exception
@@ -276,6 +278,10 @@ class Controller(QObject):
         self._apply_hold_limits()
         self.injector.settle = self.listener.settle     # never paste while a menu-focus check is outstanding
 
+        # ---- live preview (voxflow.stream): display-only words in the Flow bar while the key is held
+        self._preview = None
+        self._build_preview()
+
         # ---- worker + timers
         self._work: queue.Queue = queue.Queue()
         self._worker = threading.Thread(target=self._worker_loop, name="voxflow-pipeline", daemon=True)
@@ -317,6 +323,7 @@ class Controller(QObject):
         self._sig_model.connect(self._on_model_event)
         self._sig_done.connect(self._on_done)
         self._sig_failed.connect(self._on_failed)
+        self._sig_partial.connect(self._on_partial)
         self._sig_notice.connect(self.notice)
         self._sig_notice_action.connect(self._notice_action)
         self._sig_sync.connect(self._on_sync_step)
@@ -342,6 +349,27 @@ class Controller(QObject):
         except Exception:  # noqa: BLE001 - foreign recorder classes may not allow it
             pass
         return rec
+
+    def _preview_gain(self, audio):
+        """Whisper mode raises quiet speech for the preview just as it does for the final pass."""
+        return audiomod.normalize_gain(audio) if self.config.whisper_mode else audio
+
+    def _build_preview(self) -> None:
+        """(Re)build the previewer around the current recorder and speech model (both can be swapped)."""
+        if self._preview is not None:
+            self._preview.close()
+        self._preview = stream.Previewer(self._recorder, self._asr,
+                                         lambda gen, committed, tentative: self._sig_partial.emit(gen, committed, tentative),
+                                         gain=self._preview_gain)
+
+    def _preview_on(self) -> bool:
+        return self.config.live_preview and self._preview.available
+
+    def _on_partial(self, gen: int, committed: str, tentative: str) -> None:
+        """A preview result on the UI thread: only the utterance that is still being recorded may show it."""
+        if gen != self._gen or not self._active:
+            return
+        self.partial_text.emit(committed, tentative)
 
     def _apply_hold_limits(self) -> None:
         # watchdog slightly above the Recorder's own cap, so the (cleaner) hit_cap path normally fires first
@@ -409,6 +437,7 @@ class Controller(QObject):
         self._flush_stores()
         self.listener.stop()
         self._active = False
+        self._preview.close()
         try:
             if self._recorder.is_recording:
                 self._recorder.stop()
@@ -571,6 +600,10 @@ class Controller(QObject):
             self._apply_hold_limits()
             if not self._active:
                 self._switch_recorder(cfg.mic_device)
+        elif key == "live_preview":
+            if not value and self._active:
+                self._preview.stop()
+                self.partial_text.emit("", "")
         elif key == "whisper_mode":
             try:
                 self._recorder.level_boost = 3.0 if value else 1.0
@@ -849,6 +882,11 @@ class Controller(QObject):
 
     # ================================================================== status
     def status(self) -> dict:
+        """The status line (level, title, detail) plus ``live_preview_available``: False once the preview has
+        paused itself on this PC (too slow), so Settings can say so."""
+        return {**self._status_line(), "live_preview_available": bool(self._preview.available)}
+
+    def _status_line(self) -> dict:
         cfg = self.config
         hk = pretty_hotkey(cfg.hotkey)
         if self._problems:
@@ -933,6 +971,7 @@ class Controller(QObject):
                 self._cleaner = old_cleaner
             self.command.cleaner = self._cleaner
             del old_asr, old_cleaner
+            self._build_preview()
         self._load_models(names)
 
     def _load_models(self, names=("asr", "cleanup")) -> None:
@@ -1294,6 +1333,7 @@ class Controller(QObject):
             log.warning("recorder could not be created: %s", exc)
             self._problems["mic"] = audiomod.describe_mic_error(exc)
             return
+        self._build_preview()
         self._check_mic()
 
     def _check_mic(self, initial: bool = False) -> None:
@@ -1541,6 +1581,8 @@ class Controller(QObject):
         self._gen += 1
         self._t_start = time.perf_counter()
         self._active = True
+        if self._preview_on():
+            self._preview.start(self._gen)
         self.sounds.play("command" if mode == "command" else "start")
         if self.config.mute_media:
             self.muter.mute()
@@ -1564,6 +1606,7 @@ class Controller(QObject):
         if not self._active:
             return
         self._active = False
+        self._preview.stop()                           # before the recorder: no new preview call after this
         self.listener.force_idle()
         try:
             if self._recorder.is_recording:
@@ -1578,6 +1621,7 @@ class Controller(QObject):
             return
         self._active = False
         t_release = time.perf_counter()
+        self._preview.stop()                           # before the recorder: no new preview call after the release
         self.muter.unmute()
         try:
             audio = self._recorder.stop()

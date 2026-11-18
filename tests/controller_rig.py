@@ -48,6 +48,8 @@ class TRecorder:
         self.reopened = 0
         self.starts = self.stops = 0
         self.last_speech_seconds = 0.0
+        self.recorded = 0                     # samples "recorded so far" in the current utterance (the preview reads it)
+        self.snapshots: list[int] = []        # the ``start`` offset of every snapshot() call
         TRecorder.instances.append(self)
 
     def start(self):
@@ -55,6 +57,7 @@ class TRecorder:
             raise TRecorder.fail_start
         self.starts += 1
         self.is_recording, self.hit_cap = True, False
+        self.recorded = min(len(TRecorder.audio), 4800)      # the pre-roll; tests grow it with ``recorded += n``
 
     def stop(self):
         if TRecorder.fail_stop is not None:
@@ -64,6 +67,16 @@ class TRecorder:
         self.is_recording = False
         self.last_speech_seconds = TRecorder.speech_seconds
         return TRecorder.audio
+
+    @property
+    def recorded_samples(self):
+        return self.recorded if self.is_recording else 0
+
+    def snapshot(self, start=0):
+        self.snapshots.append(start)
+        if not self.is_recording:
+            return np.zeros(0, dtype=np.float32)
+        return np.array(TRecorder.audio[start:self.recorded], copy=True)
 
     def level(self):
         return 0.42
@@ -99,6 +112,30 @@ class TAsr:
         self.load_gate = None                 # threading.Event: load() blocks until it is set
         self.delay_s = 0.0
         self.loads = 0
+        self.timed_calls: list[dict] = []     # every transcribe_timed() call: samples, bucket_s, blocking
+        self.partials = None                  # scripted preview: a list of word lists (one per call), or a callable
+        self.timed_busy = False               # True: the model is "busy", transcribe_timed returns None
+        self.fail_timed: Exception | None = None
+
+    def transcribe_timed(self, audio, *, bucket_s=0.0, blocking=False):
+        """The preview call: scripted hypotheses (``partials``), else a growing prefix of ``text``."""
+        self.timed_calls.append({"samples": len(audio), "bucket_s": bucket_s, "blocking": blocking})
+        if self.fail_timed is not None:
+            raise self.fail_timed
+        if self.timed_busy:
+            return None
+        if float(np.max(np.abs(audio), initial=0.0)) < 1e-4:
+            return []                         # like the real model: silence says nothing
+        n = len(self.timed_calls) - 1
+        if callable(self.partials):
+            words = self.partials(n, audio)
+        elif self.partials is not None:
+            words = self.partials[min(n, len(self.partials) - 1)]
+        else:
+            text = self.text(audio) if callable(self.text) else self.text
+            every = text.split()
+            words = every[:max(1, int(len(every) * min(1.0, len(audio) / (2.0 * SAMPLE_RATE))))]
+        return [(w, 0.3 * i) for i, w in enumerate(words)]
 
     def load(self):
         self.loads += 1
@@ -250,7 +287,7 @@ class Spy:
     NAMES = ("state_changed", "level_changed", "transcript_ready", "history_changed", "stats_changed",
              "dictionary_changed", "suggestions_changed", "dictionary_suggestion", "snippets_changed",
              "styles_changed", "config_changed", "status_changed", "model_status_changed", "microphones_changed",
-             "hotkey_captured", "notice", "activate_requested", "update_changed", "update_available",
+             "hotkey_captured", "notice", "activate_requested", "update_changed", "update_available", "partial_text",
              "restart_requested")
 
     def __init__(self, controller):
