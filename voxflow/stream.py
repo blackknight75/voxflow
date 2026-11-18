@@ -251,7 +251,8 @@ class Previewer:
         """One preview pass: snapshot the window, transcribe it (never waiting), stabilise, emit, adapt. The state
         of the utterance is only read and written under the lock, after a check that it is still the same session;
         the receivers are called after the lock is released. Returns ``(session, gen, samples)`` when the tick ended
-        without a model pass, else None."""
+        without a model pass (``samples``: the audio actually examined so far, never audio nobody looked at), else
+        None."""
         with self._cv:
             if not self._active:
                 return None
@@ -261,7 +262,7 @@ class Previewer:
             self._next_at = t_call + self.interval_s
         n = int(self._recorder.recorded_samples)
         if n - last_n < MIN_NEW_S * SAMPLE_RATE or n - self._start_n < MIN_FIRST_S * SAMPLE_RATE:
-            return session, gen, n
+            return session, gen, last_n                      # that audio was not looked at: time does not move
         stored = win_start
         if n - win_start > (trim_s + self.interval_s) * SAMPLE_RATE:       # calls were spaced out: still bounded
             win_start = n - int(trim_s * SAMPLE_RATE)
@@ -292,7 +293,7 @@ class Previewer:
             self._disable(str(exc) or "the speech model cannot do previews")
             return None
         if words is None:                                      # the model was busy (a final pass): try again later
-            return session, gen, n
+            return session, gen, last_n                        # the window was not examined: time does not move
         cost = self._clock() - t_call
         with self._cv:
             if not self._active or self._session != session:

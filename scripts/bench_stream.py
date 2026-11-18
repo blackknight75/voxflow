@@ -151,11 +151,12 @@ def metrics(r: dict, audio: np.ndarray) -> dict:
     }
 
 
-def make_audio(wav: str, seconds: float, lead_noise_s: float = 0.0) -> np.ndarray:
+def make_audio(wav: str, seconds: float, lead_noise_s: float = 0.0, gap_s: float = 0.4) -> np.ndarray:
     """``seconds`` of the clip looped, after ``lead_noise_s`` of steady low noise (peak 0.01: above the preview's
-    silence gate, below speech) that nobody speaks over: the case that used to make the window grow."""
+    silence gate, below speech) that nobody speaks over: the case that used to make the window grow. ``gap_s``:
+    the silence between two repetitions of the clip."""
     clip = read_wav_16k(wav)
-    gap = np.zeros(int(0.4 * SAMPLE_RATE), dtype=np.float32)
+    gap = np.zeros(int(gap_s * SAMPLE_RATE), dtype=np.float32)
     parts, n = [], 0
     while n < seconds * SAMPLE_RATE:
         parts += [clip, gap]

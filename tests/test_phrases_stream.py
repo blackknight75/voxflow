@@ -55,17 +55,17 @@ def test_the_committed_words_handed_over_are_a_copy_with_absolute_times():
 
 
 def test_a_tick_without_a_pass_is_reported_as_time_only():
-    # too little new audio
+    # too little new audio: nobody looked at it, time does not move
     r = rig([words("hi")])
     r.begin()
     r.tick(grow=0.1)
-    assert r.got == [(1, [], None, pytest.approx(0.1))]
-    # before the first 0.7 s
+    assert r.got == [(1, [], None, 0.0)]
+    # before the first 0.7 s: the same
     r = rig([words("hi")])
     r.begin(gate=True)
     r.tick(grow=0.5)
-    assert r.got == [(1, [], None, pytest.approx(0.5))] and r.asr.calls == []
-    # silence, after the first look
+    assert r.got == [(1, [], None, 0.0)] and r.asr.calls == []
+    # silence, after the first look: the peak was measured, so the time moves
     r = rig([[], words("back")])
     r.rec.audio = np.concatenate([np.zeros(SR * 3, np.float32), loud(5)])
     r.begin()
@@ -73,18 +73,28 @@ def test_a_tick_without_a_pass_is_reported_as_time_only():
     assert r.got[-1][2] == []                                                       # a pass (no words): tentative []
     r.tick(1.0)
     assert r.got[-1] == (1, [], None, pytest.approx(2.0))                           # skipped silence: time only
-    # backing off
+    # backing off (peak measured, not risen): the time moves
     r = rig([words("hi")])
     r.begin()
     r.p._hold_until, r.p._ref_peak = r.clock.t + 100, 0.1
     r.tick(1.0)
     assert r.got == [(1, [], None, pytest.approx(1.0))] and r.asr.calls == []
-    # a busy model
-    r = rig([words("hi")])
+
+
+def test_time_only_ticks_never_report_audio_that_was_not_examined():
+    # a pass looks at 0.5 s; a short tick and a busy model then leave the reported time at that pass's end
+    r = rig([words("hi there you")])
     r.begin()
+    r.tick(0.5)
+    assert r.got[-1][3] == pytest.approx(0.5) and r.got[-1][2] is not None
+    r.tick(grow=0.1)                                                                # too little new audio
+    assert r.got[-1] == (1, [], None, pytest.approx(0.5))
     r.asr.busy = True
-    r.tick(1.0)
-    assert r.got == [(1, [], None, pytest.approx(1.0))]
+    r.tick(1.0)                                                                     # the model is busy: 1.2 s exist
+    assert r.got[-1] == (1, [], None, pytest.approx(0.5)) and r.rec.n == int(1.6 * SR)
+    r.asr.busy = False
+    r.tick(0.0)
+    assert r.got[-1][3] == pytest.approx(1.6) and r.got[-1][2] is not None          # looked at now: time moves
 
 
 def test_nothing_is_reported_after_stop_or_for_a_replaced_session():
@@ -264,3 +274,33 @@ def test_the_real_chain_previewer_to_phrase_stream():
         r.tick(0.7)
     assert out and out[0][1].text == "we met today." and out[0][0] == 1
     assert stream.norm("x") == "x"
+
+
+def test_no_pause_phrase_is_emitted_across_audio_nobody_examined():
+    """Splitter level: only the examined time counts as silence. The words end at 2.0; 0.5 s were examined, and the
+    recording went on while the model was busy (3 s more that may hold speech): no pause, no cut window there."""
+    sp = ph.PhraseSplitter()
+    ws = [("we", 1.0), ("met", 1.5), ("today", 2.0)]
+    assert sp.feed(ws, None, 2.6) == []
+    for _ in range(5):
+        assert sp.tick(2.6) == []                                                   # time does not move: nothing
+    out = sp.tick(3.3)                                                              # examined silence: the pause
+    assert [p.text for p in out] == ["we met today"] and out[0].cut_hi <= 3.3
+
+
+def test_a_busy_model_never_lets_the_chain_cut_into_unseen_speech():
+    hyps = [[("we", 1.0), ("met", 1.5), ("today", 2.0)]] * 4
+    r = Rig(hyps, seconds=30.0)
+    out = []
+    ps = ph.PhraseStream(Snap(r.rec.audio), lambda g, p: out.append(p))
+    r.p._on_words = ps.feed
+    ps.begin(1)
+    r.begin(1)
+    r.tick(2.6)                                                                     # examined up to 2.6 s
+    r.asr.busy = True
+    for _ in range(3):
+        r.tick(1.0)                                                                 # 3 s more recorded, never examined
+    assert out == []
+    r.asr.busy = False
+    r.tick(0.0)                                                                     # looked at: it agrees with pass 1
+    assert [p.text for p in out] == ["we met today"] and all(p.cut_hi <= r.rec.n / SR for p in out)
