@@ -191,12 +191,24 @@ class Previewer:
                 self._disable(f"preview failed ({type(exc).__name__})")
 
     def _disable(self, why: str) -> None:
+        """Switch the preview off for the app session. A caption that is on screen is cleared (once), so it does
+        not freeze there until the key is released."""
         with self._cv:
-            was = self._available
+            was, midway, gen, shown = self._available, self._active, self._gen, self._shown
             self._available = self._active = False
+            if midway:
+                self._shown = ("", "")
             self._cv.notify_all()
         if was:
             log.info("live preview is off for this session: %s", why)
+        if midway and shown != ("", ""):
+            self._deliver(gen, "", "")
+
+    def _deliver(self, gen: int, committed: str, tentative: str) -> None:
+        try:
+            self._on_partial(gen, committed, tentative)
+        except Exception as exc:  # noqa: BLE001 - the receiver's problem must not stop the preview
+            log.warning("preview receiver failed (%s)", type(exc).__name__)
 
     def _tick(self) -> None:
         """One preview pass: snapshot the window, transcribe it (never waiting), stabilise, emit, adapt."""
@@ -242,10 +254,7 @@ class Previewer:
         if shown == self._shown:
             return
         self._shown = shown
-        try:
-            self._on_partial(gen, shown[0], shown[1])
-        except Exception as exc:  # noqa: BLE001 - the receiver's problem must not stop the preview
-            log.warning("preview receiver failed (%s)", type(exc).__name__)
+        self._deliver(gen, shown[0], shown[1])
 
     def _trim(self, end: int, tentative: list[tuple[str, float]]) -> None:
         """Keep the window short: start it at the first uncommitted word, or just after the last committed one."""

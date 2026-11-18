@@ -531,3 +531,72 @@ def test_fake_transcriber_timed_shows_three_words_a_second_and_honours_blocking(
 
 def test_module_constants_describe_the_governor():
     assert stream.COST_BUDGET_S < stream.GIVE_UP_S and stream.TRIM_FLOOR_S == 4.0 and asr.PAD_S == 0.15
+
+
+# ======================================================================== a caption is cleared when the preview gives up
+def test_giving_up_in_the_middle_clears_the_caption_once():
+    r = Rig([words("a b"), words("a b")], cost=0.5, trim_s=4)
+    r.begin(3)
+    r.tick()
+    r.tick()
+    assert not r.p.available
+    assert r.out == [(3, "", "a b"), (3, "a b", ""), (3, "", "")]
+    assert r.out.count((3, "", "")) == 1
+    n = len(r.out)
+    r.p._disable("again")
+    assert len(r.out) == n
+
+
+def test_nothing_is_cleared_when_no_text_was_ever_shown_or_the_session_was_already_over():
+    r = Rig([[]], cost=0.5, trim_s=4)
+    r.begin()
+    r.tick()
+    r.tick()
+    assert not r.p.available and r.out == []
+    q = Rig([words("a b")])
+    q.begin()
+    q.tick()
+    q.p.stop()                                                         # released: the controller clears the caption
+    n = len(q.out)
+    q.p._disable("late")
+    assert len(q.out) == n
+
+
+def test_an_error_clears_the_caption_too_and_a_failing_receiver_does_not_matter(caplog):
+    r = Rig([words("hello there")])
+    r.begin(4)
+    r.tick()
+    r.asr.transcribe_timed = lambda *a, **k: (_ for _ in ()).throw(PreviewUnavailable("boom"))
+    r.tick()
+    assert r.out[-1] == (4, "", "") and not r.p.available
+    q = Rig([words("hello")])
+    q.begin()
+    q.tick()
+    q.p._on_partial = lambda *a: 1 / 0
+    with caplog.at_level(logging.WARNING, logger="voxflow.stream"):
+        q.p._disable("x")
+    assert "receiver failed" in caplog.text
+
+
+def test_an_unexpected_error_in_the_thread_clears_the_caption():
+    class Dies(Rec):
+        reads = 0
+
+        @property
+        def recorded_samples(self):
+            Dies.reads += 1
+            if Dies.reads > 2:
+                raise OSError("device gone")
+            return self.n
+
+    rec = Dies(loud(5))
+    rec.n = 8000
+    out = []
+    asr_ = Asr(Clock(), [words("x y")])
+    p = Previewer(rec, asr_, lambda *a: out.append(a), interval_s=0.01)
+    rec.n = 0
+    p.start(9)
+    rec.n = 8000                                                       # one tick of new audio, then the device dies
+    wait_for(lambda: not p.available)
+    assert out[0] == (9, "", "x y") and out[-1] == (9, "", "")
+    p.close()
