@@ -64,7 +64,7 @@ def test_every_documented_setting_can_be_set_through_the_controller(rig):
         "auto_learn": False, "language": "fr", "whisper_mode": True, "mic_device": "USB Mic", "sounds_enabled": False,
         "sound_volume": 0.8, "mute_media": True, "launch_at_login": True, "start_minimized": True,
         "save_history": False, "history_retention_days": 30, "history_limit": 100, "restore_clipboard": False,
-        "restore_delay_s": 1.5, "show_idle_pill": True, "live_preview": False, "theme": "light",
+        "restore_delay_s": 1.5, "show_idle_pill": True, "live_preview": False, "phrase_streaming": True, "theme": "light",
         "reduced_motion": True,
         "overlay_position": [10, 20], "ui_state": {"page": "history"}, "onboarding_done": True,
         "asr_device": "cpu", "cleanup_device": "vulkan", "cleanup_timeout_s": 6.0, "command_timeout_s": 30.0,
