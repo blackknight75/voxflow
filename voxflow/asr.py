@@ -473,8 +473,8 @@ class Transcriber:
         try:
             res = self._model.with_timestamps().recognize(np.concatenate([pad, audio, tail]),
                                                           sample_rate=SAMPLE_RATE)
+            return words_with_times(res.tokens or [], [t - PAD_S for t in (res.timestamps or [])])
         except Exception as e:  # noqa: BLE001
             raise PreviewUnavailable(f"{type(e).__name__}") from e
         finally:
             self._lock.release()
-        return words_with_times(res.tokens or [], [t - PAD_S for t in (res.timestamps or [])])

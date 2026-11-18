@@ -11,7 +11,7 @@ Prints, and returns, the metrics the design asks for (plan/STREAMING_DESIGN.md s
     committed word was ever taken back; what the governor did.
 
     python scripts/bench_stream.py [--device auto|cpu|cuda|webgpu] [--seconds 20] [--runs 5] [--slowdown 1]
-                                   [--wav tests/tts_sample.wav] [--trim-s N] [--json out.json]
+                                   [--wav tests/tts_sample.wav] [--trim-s N] [--lead-noise-s N] [--json out.json]
 
 ``--slowdown N`` makes every model call (preview and final) take N times longer, to imitate a weak CPU.
 """
@@ -127,9 +127,11 @@ def metrics(r: dict, audio: np.ndarray) -> dict:
     first = next((s for s in shown if s["committed"] or s["tentative"]), None)
     # lag: when a call ended, how far the speaker had got beyond the start of the newest word that call returned
     lags = [(c["end"] - rec.t0) - c["last_word_s"] for c in calls if c["last_word_s"] is not None]
-    committed_words = [s["committed"].split() for s in shown]
+    # the caption cleared when the governor gives up is not a retraction and not the text that was last shown
+    texts = [s for s in shown if s["committed"] or s["tentative"]]
+    committed_words = [s["committed"].split() for s in texts]
     retracted = sum(1 for a, b in zip(committed_words, committed_words[1:]) if b[:len(a)] != a)
-    last = shown[-1] if shown else {"committed": "", "tentative": ""}
+    last = texts[-1] if texts else {"committed": "", "tentative": ""}
     final_words = r["final"].split()
     shown_words = (last["committed"] + " " + last["tentative"]).split()
     com = last["committed"].split()
@@ -138,7 +140,8 @@ def metrics(r: dict, audio: np.ndarray) -> dict:
         "lag_median_s": statistics.median(lags) if lags else None,
         "lag_max_s": max(lags) if lags else None,
         "duty": sum(c["cost"] for c in calls) / speaking,
-        "calls": len(calls), "cost_median_ms": 1000 * statistics.median([c["cost"] for c in calls]) if calls else 0.0,
+        "calls": len(calls), "max_window_s": max([c["audio_s"] for c in calls], default=0.0),
+        "cost_median_ms": 1000 * statistics.median([c["cost"] for c in calls]) if calls else 0.0,
         "cost_max_ms": 1000 * max([c["cost"] for c in calls], default=0.0),
         "similarity": similarity(shown_words, final_words),
         "committed_match": similarity(com, final_words[:len(com)]) if com else 1.0,
@@ -148,14 +151,18 @@ def metrics(r: dict, audio: np.ndarray) -> dict:
     }
 
 
-def make_audio(wav: str, seconds: float) -> np.ndarray:
+def make_audio(wav: str, seconds: float, lead_noise_s: float = 0.0) -> np.ndarray:
+    """``seconds`` of the clip looped, after ``lead_noise_s`` of steady low noise (peak 0.01: above the preview's
+    silence gate, below speech) that nobody speaks over: the case that used to make the window grow."""
     clip = read_wav_16k(wav)
     gap = np.zeros(int(0.4 * SAMPLE_RATE), dtype=np.float32)
     parts, n = [], 0
     while n < seconds * SAMPLE_RATE:
         parts += [clip, gap]
         n += clip.size + gap.size
-    return np.concatenate(parts)[: int(seconds * SAMPLE_RATE)].copy()
+    speech = np.concatenate(parts)[: int(seconds * SAMPLE_RATE)]
+    noise = np.random.default_rng(0).uniform(-0.01, 0.01, int(lead_noise_s * SAMPLE_RATE)).astype(np.float32)
+    return np.concatenate([noise, speech]).astype(np.float32)
 
 
 def bench(tr: Transcriber, audio: np.ndarray, *, runs: int = 5, slowdown: float = 1.0, interval_s: float = 0.4,
@@ -182,7 +189,7 @@ def bench(tr: Transcriber, audio: np.ndarray, *, runs: int = 5, slowdown: float 
         m[k] is not None for m in per_run) else None
     return {"backend": tr.backend, "slowdown": slowdown, "seconds": audio.size / SAMPLE_RATE, "runs": runs,
             "first_words_s": med("first_words_s"), "lag_median_s": med("lag_median_s"), "duty": med("duty"),
-            "calls": med("calls"), "cost_max_ms": max(m["cost_max_ms"] for m in per_run),
+            "calls": med("calls"), "max_window_s": max(m["max_window_s"] for m in per_run), "cost_max_ms": max(m["cost_max_ms"] for m in per_run),
             "similarity": med("similarity"), "committed_match": med("committed_match"),
             "retracted": sum(m["retracted"] for m in per_run),
             "release_to_final_with_ms": statistics.median(with_p), "release_to_final_without_ms": statistics.median(base),
@@ -196,18 +203,19 @@ def main() -> None:
     ap.add_argument("--wav", default=os.path.join(os.path.dirname(__file__), "..", "tests", "tts_sample.wav"))
     ap.add_argument("--device", default="auto")
     ap.add_argument("--seconds", type=float, default=20.0)
+    ap.add_argument("--lead-noise-s", type=float, default=0.0, help="seconds of low noise (no speech) before the speech")
     ap.add_argument("--runs", type=int, default=5)
     ap.add_argument("--slowdown", type=float, default=1.0)
     ap.add_argument("--interval-s", type=float, default=0.4)
     ap.add_argument("--trim-s", type=float, default=None)
     ap.add_argument("--json", default="")
     a = ap.parse_args()
-    audio = make_audio(a.wav, a.seconds)
+    audio = make_audio(a.wav, a.seconds, a.lead_noise_s)
     tr = Transcriber(device=a.device)
     t = time.perf_counter()
     tr.load()
     print(f"backend {tr.backend}, loaded in {time.perf_counter() - t:.1f} s; audio {audio.size / SAMPLE_RATE:.1f} s, "
-          f"slowdown x{a.slowdown:g}, {a.runs} runs (real time: about {a.runs * a.seconds:.0f} s)")
+          f"slowdown x{a.slowdown:g}, {a.runs} runs (real time: about {a.runs * audio.size / SAMPLE_RATE:.0f} s)")
     res = bench(tr, audio, runs=a.runs, slowdown=a.slowdown, interval_s=a.interval_s, trim_s=a.trim_s)
     print("\n" + json.dumps(res, indent=2))
     if a.json:

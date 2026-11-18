@@ -2,7 +2,9 @@
 parts in audio.py / asr.py / fakes.py. No model, no microphone, no sleeping longer than a few milliseconds."""
 from __future__ import annotations
 
+import itertools
 import logging
+import random
 import threading
 import time
 import types
@@ -224,24 +226,24 @@ def test_the_window_stays_short_by_starting_at_the_first_uncommitted_word():
     r.tick(0.5)                                                       # 1.0 s: still not longer
     assert r.p._win_start == 0
     r.tick(0.5)                                                       # 1.5 s > 1: "aa".."dd" agree; start at "ee" (1.2 s) - 0.2 s
-    assert r.p._win_start == int(1.0 * SR)
+    assert r.p._win_start == pytest.approx(0.8 * SR, abs=2)           # "dd" (0.9 s) is right behind "ee": kept inside
     r.tick(0.5)
-    assert r.rec.snaps[-1] == int(1.0 * SR)
+    assert r.rec.snaps[-1] == pytest.approx(0.8 * SR, abs=2)
 
 
 def test_the_window_starts_after_the_last_committed_word_when_nothing_is_tentative():
-    r = Rig([words("aa bb"), words("aa bb"), words("aa bb")], trim_s=1.0)
+    r = Rig([words("aa bb"), words("aa bb"), words("aa bb")], trim_s=1.5)
     r.begin()
     for _ in range(3):
         r.tick(0.6)
-    assert r.p._la.prev == [] and r.p._win_start == int((0.3 + 0.4) * SR)
+    assert r.p._la.prev == [] and r.p._win_start == int((0.3 + 0.5) * SR)
 
 
-def test_the_window_is_left_alone_when_there_is_nothing_to_anchor_it():
+def test_with_nothing_to_anchor_it_the_window_is_cut_to_trim_s():
     r = Rig([[]], trim_s=1.0)
     r.begin()
     r.tick(2.0)
-    assert r.p._win_start == 0
+    assert r.p._win_start == SR                       # 2 s of audio, 1 s allowed
 
 
 def test_defaults_depend_on_the_backend_and_arguments_override_them():
@@ -600,3 +602,187 @@ def test_an_unexpected_error_in_the_thread_clears_the_caption():
     wait_for(lambda: not p.available)
     assert out[0] == (9, "", "x y") and out[-1] == (9, "", "")
     p.close()
+
+
+# ======================================================================== round 3: review findings S1 S2 S3 N1 N2 N4
+def _sizes(rig, seconds, tick=0.4):
+    """Run ticks over ``seconds`` of audio and return the largest window (s) that was sent to the model."""
+    big = 0.0
+    while rig.rec.n < seconds * SR:
+        rig.rec.grow(tick)
+        rig.clock.t += tick
+        rig.asr.calls.clear()
+        rig.p._next_at = 0
+        rig.p._tick()
+        big = max([big] + [c["size"] / SR for c in rig.asr.calls])
+    return big
+
+
+def test_s1_the_window_never_exceeds_trim_s_plus_a_tick_with_no_words_at_all():
+    r = Rig([[]], seconds=95.0, cost=0.01)
+    r.begin()
+    assert _sizes(r, 90) <= r.p._trim_s + 0.5 and r.p.available
+
+
+def test_s1_the_window_is_capped_when_the_first_word_never_settles_and_the_cut_resets_the_tentative_tail():
+    class Flicker(Asr):
+        def transcribe_timed(self, audio, **k):
+            super().transcribe_timed(audio, **k)
+            n = len(self.calls)
+            return [("a" if n % 2 else "the", 0.1)] + [
+                (f"w{i}", 0.5 + 0.4 * i) for i in range(int(max(0, audio.size / SR - 1) / 0.4))]
+
+    r = Rig(seconds=95.0, cost=0.01)
+    r.asr = Flicker(r.clock, cost=0.01)
+    r.p._transcriber = r.asr
+    r.begin()
+    assert _sizes(r, 90) <= r.p._trim_s + 0.5
+    r.p._la.committed = []
+    r.p._la.prev = words("x y")                       # a cut through tentative words forgets them
+    r.p._win_start = 0
+    r.p._trim(int(40 * SR), words("x y"))
+    assert r.p._win_start == int((40 - r.p._trim_s) * SR) and r.p._la.prev == []
+
+
+def test_s2_a_word_that_repeats_the_last_committed_one_after_a_trim_is_kept():
+    la = LocalAgreement()
+    la.committed = [("we", 1.0), ("are", 1.4), ("very", 2.0)]
+    hyp = [("very", 2.5), ("happy", 2.9)]             # a window that starts at 2.4 s: this is the second "very"
+    assert [w for w, _ in la.new_part(hyp, since=2.4)] == ["very", "happy"]
+    heard = [("are", 1.4), ("very", 2.0), ("very", 2.5), ("happy", 2.9)]
+    assert [w for w, _ in la.new_part(heard, since=0.0)] == ["very", "happy"]      # the committed words heard again
+    assert [w for w, _ in la.new_part(heard)] == ["very", "happy"]
+
+
+def test_s2_trim_anchors_keep_the_last_committed_word_clearly_inside_or_clearly_outside_the_window():
+    r = Rig([[]], trim_s=5.0)
+    r.begin()
+    r.p._la.committed = [("a", 3.0)]
+    r.p._trim(int(6.5 * SR), [("b", 3.3)])              # 3.3 - 0.2 is right behind "a": pulled back to include it
+    assert r.p._win_start == int(2.9 * SR)
+    r.p._win_start = 0
+    r.p._trim(int(6.5 * SR), [("b", 4.5)])              # far behind: starts 0.2 s before "b"
+    assert r.p._win_start == int(4.3 * SR)
+    r.p._win_start = 0
+    r.p._trim(int(6.5 * SR), [])                      # nothing tentative: just after "a"
+    assert r.p._win_start == int(3.5 * SR)
+
+
+def _fuzz_run(vocab, trim_s, seed, jitter=0.04, dur=60.0):
+    """plan/review-scratch/fuzz_la.py: the truth is a word list with times; the scripted model returns the words that
+    lie inside the window (times from the window start, with jitter) and replaces the unstable tail by a unique
+    garbage token on half of the passes, so a mismatch can only come from the trim / de-duplication logic."""
+    rng = random.Random(seed)
+    truth, t = [], 0.3
+    while t < dur - 1:
+        truth.append((rng.choice(vocab), t))
+        t += rng.uniform(0.25, 0.6)
+    clk = Clock()
+    clk.t = 0.0
+    rec = Rec(np.full(int(dur * SR) + SR, 0.1, np.float32))
+    junk = itertools.count()
+
+    class Model:
+        backend = "cpu"
+
+        def transcribe_timed(self, window, bucket_s=0, blocking=False):
+            w0, now, out = rec.snaps[-1] / SR, rec.n / SR, []
+            for w, t in truth:
+                if t < w0 - 0.05 or t > now - 0.15:
+                    continue
+                tt = t - w0 + rng.uniform(-jitter, jitter)
+                if now - t < 1.2 and rng.random() < 0.5:
+                    w = f"zz{next(junk)}"
+                elif rng.random() < 0.3:
+                    w = w.capitalize() + rng.choice(["", ",", "."])
+                out.append((w, max(0.0, tt)))
+            return out
+
+    got = []
+    pv = Previewer(rec, Model(), lambda g, c, tn: got.append(c), trim_s=trim_s, clock=clk)
+    with pv._cv:
+        pv._begin(1)
+    for _ in range(int(dur / 0.4) + 4):
+        clk.t += 0.4
+        rec.n = min(rec.audio.size, int(clk.t * SR))
+        pv._next_at = 0
+        pv._tick()
+    clean = lambda w: "".join(ch for ch in w.lower() if ch.isalnum() or ch == "'")  # noqa: E731
+    c, e = [clean(w) for w, _ in pv._la.committed], [clean(w) for w, _ in truth]
+    retract = any(not b.startswith(a) for a, b in zip(got, got[1:]))
+    return retract, not (c == e[:len(c)] and len(c) >= len(e) - 6)
+
+
+KNOWN_RESIDUAL = 1     # measured, see the report: runs (of 90) with a word dropped or repeated at one trim
+
+
+@pytest.mark.parametrize("vocab_size", [10, 40])
+def test_s2_randomised_trims_never_retract_and_keep_repeated_words(vocab_size):
+    """Seeded: 90 utterances of 60 s with trims of 4, 8 and 15 s. A committed word is never taken back. With
+    timestamp jitter of +-40 ms a word is still dropped or repeated at one trim in a few runs (it sits at the very
+    edge of the window): ``KNOWN_RESIDUAL`` is that measured count, not a hope."""
+    vocab = [f"w{i}" for i in range(vocab_size)]
+    runs = [_fuzz_run(vocab, trim, seed) for trim in (4.0, 8.0, 15.0) for seed in range(30)]
+    assert not any(r for r, _ in runs), "a committed word was retracted"
+    assert sum(b for _, b in runs) <= KNOWN_RESIDUAL, "more dropped / repeated words at a trim than ever measured"
+
+
+def test_s3_state_is_only_written_while_the_session_is_still_the_current_one():
+    r = Rig([words("old words")])
+    r.begin(1)
+    r.rec.grow(2.0)
+    snap = r.rec.snapshot
+
+    def replaced(start=0):
+        out = snap(start)
+        r.rec.snapshot = snap
+        r.p.stop()
+        r.begin(2)                                    # key released and pressed again while the window is copied
+        return out
+
+    r.rec.snapshot = replaced
+    r.clock.t += 0.5
+    r.p._tick()
+    assert r.asr.calls == [] and r.p._gen == 2 and r.p._last_n == r.rec.n and r.out == []
+
+
+def test_s3_the_receiver_is_called_after_the_lock_is_released():
+    r = Rig([words("hello there")])
+    held = []
+    r.p._on_partial = lambda *a: held.append(r.p._cv._is_owned())
+    r.begin()
+    r.tick()
+    assert held == [False]
+
+
+def test_n1_stop_forgets_the_words_of_the_utterance():
+    r = Rig([words("hello there"), words("hello there")])
+    r.begin()
+    r.tick()
+    r.tick()
+    assert r.p._la.committed and r.p._shown != ("", "")
+    r.p.stop()
+    assert r.p._la.committed == [] and r.p._la.prev == [] and r.p._shown == ("", "")
+
+
+def test_n2_the_window_limit_is_restored_for_every_utterance_but_the_give_up_count_is_not():
+    r = Rig([words("a")], cost=0.3, trim_s=8)
+    r.begin()
+    r.tick()
+    assert r.p._trim_s == 6.0
+    r.p.stop()
+    r.begin()
+    assert r.p._trim_s == 8.0                         # one slow call does not shrink the window for good
+    r.p._slow = 1
+    r.p.stop()
+    r.begin()
+    assert r.p._slow == 1
+
+
+def test_n4_a_result_without_tokens_is_a_preview_error_not_an_attribute_error():
+    m = TimedModel()
+    m.recognize = lambda audio, sample_rate=None, **kw: types.SimpleNamespace()     # no .tokens
+    tr = loaded(m)
+    with pytest.raises(PreviewUnavailable, match="AttributeError"):
+        tr.transcribe_timed(speech(1.0))
+    assert not tr._lock.locked()

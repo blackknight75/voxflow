@@ -33,6 +33,8 @@ COST_BUDGET_S = 0.25        # a call that costs more shrinks the window
 GIVE_UP_S = 0.4             # a call that costs more with the window at its floor ...
 GIVE_UP_COUNT = 2           # ... this many times in a row switches the preview off for the session
 TRIM_FLOOR_S = 4.0
+CLEAR_S = 0.45             # a window that starts this long after the last committed word cannot contain it
+REHEARD_S = 0.3             # a word this much after the last committed one can still be that word (timestamp drift)
 DUTY = 3.0                  # the next call starts at least DUTY x its cost after the last one (<= 33 % of a core)
 _GPU_BACKENDS = ("cuda", "webgpu")
 _DEFAULT_TRIM = {True: 15.0, False: 8.0}       # by "runs on a GPU"
@@ -62,18 +64,24 @@ class LocalAgreement:
         self.committed: list[tuple[str, float]] = []     # (word, absolute start time)
         self.prev: list[tuple[str, float]] = []
 
-    def new_part(self, hyp: list[tuple[str, float]]) -> list[tuple[str, float]]:
+    def new_part(self, hyp: list[tuple[str, float]], since: float | None = None) -> list[tuple[str, float]]:
         """The words of a full hypothesis that come after the committed text. Timestamps move by a frame or two
         between passes, so a time cut alone repeats the boundary word: like whisper_streaming, words near the cut
-        whose n-gram (n <= 5) equals the end of the committed text are dropped too."""
+        whose n-gram (n <= 5) equals the end of the committed text are dropped too. ``since``: where the audio of
+        this hypothesis starts; when the last committed word lies before it, nothing committed can be heard again
+        and a word that repeats it ("very very", "no no") is a new one."""
         if not self.committed:
             return hyp
         last_t = self.committed[-1][1]
         hyp = [(w, t) for w, t in hyp if t > last_t - 1.0]          # keep a margin around the cut
         tail = [norm(w) for w, _ in self.committed[-5:]]
-        for n in range(min(5, len(hyp), len(tail)), 0, -1):
+        heard_again = since is None or last_t >= since - 0.05
+        for n in range(min(5, len(hyp), len(tail)) if heard_again else 0, 0, -1):
             for skip in range(0, min(3, len(hyp) - n) + 1):           # the n-gram may start a few words in
-                if [norm(w) for w, _ in hyp[skip:skip + n]] == tail[-n:]:
+                # it is the committed text heard again only if it ENDS about where the committed text ends: a word
+                # that starts clearly later is new, even when it repeats the last committed one
+                if hyp[skip + n - 1][1] <= last_t + REHEARD_S and [
+                        norm(w) for w, _ in hyp[skip:skip + n]] == tail[-n:]:
                     return hyp[skip + n:]
         return [(w, t) for w, t in hyp if t > last_t + 0.08]
 
@@ -150,8 +158,7 @@ class Previewer:
         self._gen = gen
         self._begin_state()
         self._last_n = int(self._recorder.recorded_samples)     # the pre-roll is not "new" audio
-        if self._trim_s is None:
-            self._trim_s = float(self._trim_arg) if self._trim_arg is not None else _DEFAULT_TRIM[self._gpu()]
+        self._trim_s = float(self._trim_arg) if self._trim_arg is not None else _DEFAULT_TRIM[self._gpu()]
         self._next_at = self._clock() + self.interval_s
         self._active = True
         return True
@@ -160,6 +167,7 @@ class Previewer:
         """End the session. Never blocks: a call that is still running is dropped when it returns."""
         with self._cv:
             self._active = False
+            self._begin_state()                     # the words of the utterance are not kept in memory
             self._cv.notify_all()
 
     def close(self) -> None:
@@ -211,23 +219,27 @@ class Previewer:
             log.warning("preview receiver failed (%s)", type(exc).__name__)
 
     def _tick(self) -> None:
-        """One preview pass: snapshot the window, transcribe it (never waiting), stabilise, emit, adapt."""
+        """One preview pass: snapshot the window, transcribe it (never waiting), stabilise, emit, adapt. The state
+        of the utterance is only read and written under the lock, after a check that it is still the same session;
+        the receiver is called after the lock is released."""
         with self._cv:
             if not self._active:
                 return
-            session, gen = self._session, self._gen
-        t_call = self._clock()
-        self._next_at = t_call + self.interval_s
-        n = int(self._recorder.recorded_samples)
-        if n - self._last_n < MIN_NEW_S * SAMPLE_RATE:
+            session, gen, win_start, last_n = self._session, self._gen, self._win_start, self._last_n
+            t_call = self._clock()
+            self._next_at = t_call + self.interval_s
+        if int(self._recorder.recorded_samples) - last_n < MIN_NEW_S * SAMPLE_RATE:
             return
-        window = self._recorder.snapshot(self._win_start)
-        new = max(0, window.size - max(0, self._last_n - self._win_start))
+        window = self._recorder.snapshot(win_start)
+        new = max(0, window.size - max(0, last_n - win_start))
         silent = new == 0 or float(np.max(np.abs(window[-new:]))) < SILENCE_PEAK
-        if silent and self._silent_prev:
-            self._last_n = self._win_start + window.size      # nothing to say: do not look at it again
-            return
-        self._silent_prev = silent
+        with self._cv:
+            if not self._active or self._session != session:
+                return
+            if silent and self._silent_prev:
+                self._last_n = win_start + window.size       # nothing to say: do not look at it again
+                return
+            self._silent_prev = silent
         if self._gain is not None:
             window = self._gain(window)
         try:
@@ -241,37 +253,43 @@ class Previewer:
         with self._cv:
             if not self._active or self._session != session:
                 return                                          # released, cancelled or replaced meanwhile
-        end = self._win_start + window.size
-        self._last_n = end
-        off = self._win_start / SAMPLE_RATE
-        tentative = self._la.update(self._la.new_part([(w, t + off) for w, t in words]))
-        self._emit(gen, tentative)
-        self._trim(end, tentative)
-        self._govern(t_call, cost)
-
-    def _emit(self, gen: int, tentative: list[tuple[str, float]]) -> None:
-        shown = (" ".join(w for w, _ in self._la.committed), " ".join(w for w, _ in tentative))
-        if shown == self._shown:
-            return
-        self._shown = shown
-        self._deliver(gen, shown[0], shown[1])
+            end = win_start + window.size
+            self._last_n = end
+            off = win_start / SAMPLE_RATE
+            tentative = self._la.update(self._la.new_part([(w, t + off) for w, t in words], off))
+            shown = (" ".join(w for w, _ in self._la.committed), " ".join(w for w, _ in tentative))
+            changed, self._shown = shown != self._shown, shown
+            self._trim(end, tentative)
+            give_up = self._govern(t_call, cost)
+        if changed:
+            self._deliver(gen, shown[0], shown[1])
+        if give_up:
+            self._disable("the speech model is too slow on this PC")
 
     def _trim(self, end: int, tentative: list[tuple[str, float]]) -> None:
-        """Keep the window short: start it at the first uncommitted word, or just after the last committed one."""
+        """Keep the window short: start it at the first uncommitted word, or just after the last committed one; and
+        never let it be longer than ``trim_s`` whatever was recognised (no words at all, a first word that never
+        settles): then the oldest words that are still tentative are given up."""
         if (end - self._win_start) / SAMPLE_RATE <= self._trim_s:
             return
+        last = self._la.committed[-1][1] if self._la.committed else None
         if tentative:
-            self._win_start = max(self._win_start, int((tentative[0][1] - 0.2) * SAMPLE_RATE))
-        elif self._la.committed:
-            self._win_start = max(self._win_start, int(min(end / SAMPLE_RATE, self._la.committed[-1][1] + 0.4)
-                                                       * SAMPLE_RATE))
+            start = tentative[0][1] - 0.2
+            if last is not None and start < last + CLEAR_S:
+                start = last - 0.1       # not right behind the last committed word: it is either clearly in or clearly out
+            self._win_start = max(self._win_start, int(start * SAMPLE_RATE))
+        elif last is not None:
+            self._win_start = max(self._win_start, int(min(end / SAMPLE_RATE, last + CLEAR_S + 0.05) * SAMPLE_RATE))
+        floor = end - int(self._trim_s * SAMPLE_RATE)
+        if self._win_start < floor:
+            self._win_start = floor
+            self._la.prev = []                                  # a cut through them: the next pass starts afresh
 
-    def _govern(self, t_call: float, cost: float) -> None:
-        """Bound the duty cycle; shrink the window when a call is slow; give up on a PC that cannot keep up."""
+    def _govern(self, t_call: float, cost: float) -> bool:
+        """Bound the duty cycle; shrink the window when a call is slow. True: the PC cannot keep up, give up."""
         self._next_at = t_call + max(self.interval_s, DUTY * cost)
         at_floor = self._trim_s <= TRIM_FLOOR_S
         if cost > COST_BUDGET_S:
             self._trim_s = max(TRIM_FLOOR_S, self._trim_s * 0.75)
         self._slow = self._slow + 1 if at_floor and cost > GIVE_UP_S else 0
-        if self._slow >= GIVE_UP_COUNT:
-            self._disable("the speech model is too slow on this PC")
+        return self._slow >= GIVE_UP_COUNT
