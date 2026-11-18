@@ -184,6 +184,23 @@ def test_the_caption_fades_in_unless_motion_is_reduced(pill, clock):
     assert pill._pv_w == 1.0
 
 
+def test_the_bubble_is_drawn_once_per_change_not_once_per_frame(pill, clock):
+    pill.set_state("listening")
+    pill.set_preview("hello", "there")
+    shot(pill, clock)
+    first = pill._pv_pm
+    assert first is not None
+    shot(pill, clock)
+    assert pill._pv_pm is first, "the same pixmap is blitted every frame"
+    pill._pv_dpr = 7.0                                       # the bar moved to a screen with another scale
+    shot(pill, clock)
+    assert pill._pv_pm is not first and pill._pv_dpr == pill.devicePixelRatioF()
+    pill.set_preview("hello", "there again")
+    assert pill._pv_pm is None, "new words are drawn on the next paint"
+    pill.set_preview("", "")
+    assert pill._pv_pm is None
+
+
 def test_the_caption_does_not_keep_the_bar_awake(pill, clock):
     pill.set_state("listening")
     pill.set_preview("hello", "there")

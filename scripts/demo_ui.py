@@ -136,6 +136,29 @@ def child(args) -> int:
     bar("command", "listening", "command", secs=1.4)
     bar("processing", "processing", secs=1.0)
     bar("command_processing", "processing", "command", secs=0.9)
+
+    # live-preview caption: scripted words, so the look can be checked without a speech model
+    pcrop = QRect(10, 10, 500, 130)
+    sentence = "Please schedule the meeting for Thursday at three thirty in the afternoon and send the report"
+
+    def caption(name: str, state: str, committed: str, tentative: str, mode: str = "dictate",
+                light_bg: bool = False) -> None:
+        ctl.demo_set_state(state, mode, "")
+        pill.set_preview(committed, tentative)
+        pump(1.2)
+        save(pill, f"overlay_caption_{name}", light_bg, pcrop)
+
+    caption("listening", "listening", "Please schedule the meeting for", "Thursday")
+    caption("listening_on_light", "listening", "Please schedule the meeting for", "Thursday", light_bg=True)
+    caption("listening_long", "listening", sentence[:-12], sentence[-12:])
+    caption("locked", "locked", "Please schedule the meeting for", "Thursday")
+    caption("command", "listening", "Make this sound more polite", "please", mode="command")
+    ctl.demo_set_state("processing", "dictate", "")
+    pump(0.6)
+    save(pill, "overlay_caption_processing", False, pcrop)
+    ctl.demo_set_state("idle")
+    pump(0.3)
+
     bar("done", "done", message="Pasted", secs=0.7)
     bar("done_rules_only", "done", message="Pasted · basic clean-up", secs=0.7)
     bar("done_rules_only_longest", "done", message="Copied. Press Ctrl+V · basic clean-up", secs=0.7)

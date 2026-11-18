@@ -144,6 +144,8 @@ class OverlayPill(QWidget):
         self._pv_head_w = 0.0
         self._pv_tail_w = 0.0
         self._pv_w = 0.0                  # caption opacity weight 0..1
+        self._pv_pm: QPixmap | None = None    # the finished bubble, drawn once per change and blitted every frame
+        self._pv_dpr = 0.0
         self._pv_font = T.font(T.F_BODY, T.W_SEMI, 0.1)
 
         self._timer = QTimer(self)
@@ -225,6 +227,7 @@ class OverlayPill(QWidget):
     def _clear_preview(self) -> None:
         self._pv_committed = self._pv_tentative = self._pv_head = self._pv_tail = ""
         self._pv_head_w = self._pv_tail_w = self._pv_w = 0.0
+        self._pv_pm = None
 
     def _layout_preview(self) -> None:
         """Work out what the caption shows: the END of the text, with an ellipsis where the start was cut off, split
@@ -234,6 +237,7 @@ class OverlayPill(QWidget):
         if not full:
             self._pv_head = self._pv_tail = ""
             self._pv_head_w = self._pv_tail_w = 0.0
+            self._pv_pm = None
             return
         fm = QFontMetricsF(self._pv_font)
         shown = fm.elidedText(full, Qt.TextElideMode.ElideLeft, PREVIEW_MAX_W - 2 * PREVIEW_PAD_X)
@@ -241,6 +245,7 @@ class OverlayPill(QWidget):
         self._pv_head, self._pv_tail = shown[:cut], shown[cut:]
         self._pv_head_w = fm.horizontalAdvance(self._pv_head)
         self._pv_tail_w = fm.horizontalAdvance(self._pv_tail)
+        self._pv_pm = None                  # drawn again by the next paint (once, not every frame)
 
     def set_locked(self, locked: bool) -> None:
         """Hands-free lock indicator; only meaningful while listening."""
@@ -700,21 +705,42 @@ class OverlayPill(QWidget):
         p.setPen(T.alpha(D.TEXT, fade))
         p.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
 
+    def _preview_pixmap(self) -> QPixmap:
+        """The caption bubble at full strength, rendered when the text (or the screen's scale) changes and blitted
+        every frame with the fade as opacity: painting rounded rectangles and two text runs per frame costs more
+        than the caption is worth."""
+        dpr = self.devicePixelRatioF()
+        if self._pv_pm is None or self._pv_dpr != dpr:
+            width = self._pv_head_w + self._pv_tail_w + 2 * PREVIEW_PAD_X
+            pm = QPixmap(int(math.ceil(width * dpr)), int(PREVIEW_H * dpr))
+            pm.setDevicePixelRatio(dpr)
+            pm.fill(Qt.GlobalColor.transparent)
+            q = QPainter(pm)
+            q.setRenderHint(QPainter.RenderHint.Antialiasing)
+            q.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+            q.setPen(QPen(QColor(255, 255, 255, 46), 1.0))
+            q.setBrush(QColor(12, 14, 24, 238))
+            q.drawRoundedRect(QRectF(0.5, 0.5, width - 1, PREVIEW_H - 1), PREVIEW_H / 2, PREVIEW_H / 2)
+            q.setFont(self._pv_font)
+            flags = Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
+            q.setPen(D.TEXT)
+            q.drawText(QRectF(PREVIEW_PAD_X, 0, self._pv_head_w + 4, PREVIEW_H), flags, self._pv_head)
+            q.setPen(T.alpha(D.TEXT_DIM, 0.9))
+            q.drawText(QRectF(PREVIEW_PAD_X + self._pv_head_w, 0, self._pv_tail_w + 4, PREVIEW_H), flags,
+                       self._pv_tail)
+            q.end()
+            self._pv_pm, self._pv_dpr = pm, dpr
+        return self._pv_pm
+
     def _paint_preview(self, p, rect, k) -> None:
         """The live-preview caption: a dark bubble above the pill, the final words in the normal text colour and the
-        ones that may still change dimmer. Everything it needs was worked out in ``_layout_preview``."""
-        width = self._pv_head_w + self._pv_tail_w + 2 * PREVIEW_PAD_X
-        box = QRectF(rect.center().x() - width / 2, rect.top() - PREVIEW_GAP - PREVIEW_H, width, PREVIEW_H)
-        p.setPen(QPen(QColor(255, 255, 255, int(46 * k)), 1.0))
-        p.setBrush(QColor(12, 14, 24, int(238 * k)))
-        p.drawRoundedRect(box.adjusted(0.5, 0.5, -0.5, -0.5), PREVIEW_H / 2, PREVIEW_H / 2)
-        p.setFont(self._pv_font)
-        flags = Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
-        x = box.left() + PREVIEW_PAD_X
-        p.setPen(T.alpha(D.TEXT, k))
-        p.drawText(QRectF(x, box.top(), self._pv_head_w + 4, PREVIEW_H), flags, self._pv_head)
-        p.setPen(T.alpha(D.TEXT_DIM, k * 0.9))
-        p.drawText(QRectF(x + self._pv_head_w, box.top(), self._pv_tail_w + 4, PREVIEW_H), flags, self._pv_tail)
+        ones that may still change dimmer (see ``_layout_preview`` and ``_preview_pixmap``)."""
+        pm = self._preview_pixmap()
+        p.save()
+        p.setOpacity(p.opacity() * k)
+        p.drawPixmap(QPointF(rect.center().x() - pm.width() / pm.devicePixelRatio() / 2,
+                             rect.top() - PREVIEW_GAP - PREVIEW_H), pm)
+        p.restore()
 
     def _paint_text(self, p, rect, wgt, text, right_pad: float = 20) -> None:
         """Message text. Anything after " · " is a secondary hint (e.g. "Pasted · basic clean-up") and is
