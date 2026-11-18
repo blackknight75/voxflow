@@ -5,6 +5,9 @@ few hundred milliseconds and stabilises the result with LocalAgreement-2 (as in 
 a word is *committed* once two consecutive hypotheses agree on it, the rest of the newest hypothesis is *tentative*.
 
     Previewer(recorder, transcriber, on_partial)    on_partial(gen, committed, tentative) runs on the preview thread
+    Previewer(..., on_words=f)                      f(gen, new_committed, tentative, now_s): the words committed by
+                                                    each pass with their times (tentative None = a tick without a
+                                                    pass, only time moved); feeds voxflow.phrases
     .start(gen) / .stop()                           one session per utterance; both return at once
     .close()                                        stop and join (shutdown)
     .available                                      False once a governor or an error switched previews off
@@ -227,20 +230,38 @@ class Previewer:
         except Exception as exc:  # noqa: BLE001 - the receiver's problem must not stop the preview
             log.warning("preview receiver failed (%s)", type(exc).__name__)
 
+    def _deliver_words(self, gen: int, new: list, tentative: list | None, now_s: float) -> None:
+        try:
+            self._on_words(gen, new, tentative, now_s)
+        except Exception as exc:  # noqa: BLE001 - the receiver's problem must not stop the preview
+            log.warning("preview words receiver failed (%s)", type(exc).__name__)
+
     def _tick(self) -> None:
+        """One preview tick. A tick that ended without a model pass (too little audio, silence, back-off, busy model)
+        tells ``on_words`` that time has passed, so a pause is seen even when the model is not called."""
+        idle = self._pass()
+        if idle is not None and self._on_words is not None:
+            session, gen, n = idle
+            with self._cv:
+                live = self._active and self._session == session
+            if live:
+                self._deliver_words(gen, [], None, n / SAMPLE_RATE)
+
+    def _pass(self):
         """One preview pass: snapshot the window, transcribe it (never waiting), stabilise, emit, adapt. The state
         of the utterance is only read and written under the lock, after a check that it is still the same session;
-        the receiver is called after the lock is released."""
+        the receivers are called after the lock is released. Returns ``(session, gen, samples)`` when the tick ended
+        without a model pass, else None."""
         with self._cv:
             if not self._active:
-                return
+                return None
             session, gen, last_n = self._session, self._gen, self._last_n
             win_start, trim_s = self._win_start, self._trim_s
             t_call = self._clock()
             self._next_at = t_call + self.interval_s
         n = int(self._recorder.recorded_samples)
         if n - last_n < MIN_NEW_S * SAMPLE_RATE or n - self._start_n < MIN_FIRST_S * SAMPLE_RATE:
-            return
+            return session, gen, n
         stored = win_start
         if n - win_start > (trim_s + self.interval_s) * SAMPLE_RATE:       # calls were spaced out: still bounded
             win_start = n - int(trim_s * SAMPLE_RATE)
@@ -250,13 +271,13 @@ class Previewer:
         silent = peak < SILENCE_PEAK
         with self._cv:
             if not self._active or self._session != session:
-                return
+                return None
             if silent and self._silent_prev:
                 self._last_n = win_start + window.size       # nothing to say: do not look at it again
-                return
+                return session, gen, n
             risen = peak >= RISE_FACTOR * max(self._ref_peak, SILENCE_PEAK)
             if t_call < self._hold_until and not risen:
-                return                                       # backing off: the audio stays "new" for the next look
+                return session, gen, n                       # backing off: the audio stays "new" for the next look
             if risen:
                 self._empty = 0
             self._silent_prev = silent
@@ -269,28 +290,33 @@ class Previewer:
             words = self._transcriber.transcribe_timed(window, bucket_s=self._bucket(), blocking=False)
         except PreviewUnavailable as exc:
             self._disable(str(exc) or "the speech model cannot do previews")
-            return
+            return None
         if words is None:                                      # the model was busy (a final pass): try again later
-            return
+            return session, gen, n
         cost = self._clock() - t_call
         with self._cv:
             if not self._active or self._session != session:
-                return                                          # released, cancelled or replaced meanwhile
+                return None                                     # released, cancelled or replaced meanwhile
             end = win_start + window.size
             self._last_n = end
             self._empty = 0 if words else self._empty + 1
             self._ref_peak = peak
             self._hold_until = t_call + min(HOLD_CAP_S, self.interval_s * 2 ** self._empty) if self._empty else 0.0
             off = win_start / SAMPLE_RATE
+            k0 = len(self._la.committed)
             tentative = self._la.update(self._la.new_part([(w, t + off) for w, t in words], off))
+            gained = self._la.committed[k0:]
             shown = (" ".join(w for w, _ in self._la.committed), " ".join(w for w, _ in tentative))
             changed, self._shown = shown != self._shown, shown
             self._trim(end, tentative)
             give_up = self._govern(t_call, cost)
         if changed:
             self._deliver(gen, shown[0], shown[1])
+        if self._on_words is not None:
+            self._deliver_words(gen, gained, list(tentative), end / SAMPLE_RATE)
         if give_up:
             self._disable("the speech model is too slow on this PC")
+        return None
 
     def _trim(self, end: int, tentative: list[tuple[str, float]]) -> None:
         """Keep the window short: start it at the first uncommitted word, or just after the last committed one; and
