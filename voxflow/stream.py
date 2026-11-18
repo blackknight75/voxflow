@@ -29,6 +29,10 @@ log = logging.getLogger("voxflow.stream")
 SAMPLE_RATE = 16000
 MIN_NEW_S = 0.25            # less new audio than this since the last call: wait for more
 SILENCE_PEAK = 0.003        # new audio quieter than this is silence
+MIN_FIRST_S = 0.7           # no call before this much audio beyond the pre-roll: 0.3-0.4 s of noise alone made the
+                            # model write "Yeah." (measured; nothing from 0.5 s on)
+HOLD_CAP_S = 2.0            # calls that return no words are spaced further apart (x2, x4, ...) up to this long ...
+RISE_FACTOR = 4.0           # ... until the new audio is this many times louder than what the empty call heard
 COST_BUDGET_S = 0.25        # a call that costs more shrinks the window
 GIVE_UP_S = 0.4             # a call that costs more with the window at its floor ...
 GIVE_UP_COUNT = 2           # ... this many times in a row switches the preview off for the session
@@ -125,6 +129,10 @@ class Previewer:
         self._win_start = 0                # first sample of the window (offset into the utterance)
         self._last_n = 0                   # samples of the utterance seen by the last call
         self._silent_prev = False
+        self._start_n = 0                  # samples already there when the session began (the pre-roll)
+        self._empty = 0                    # consecutive calls that returned no words
+        self._hold_until = 0.0             # no model call before this time unless the sound rises
+        self._ref_peak = 0.0               # peak of the audio the last empty call heard
         self._shown = ("", "")
         self._next_at = 0.0
 
@@ -157,7 +165,7 @@ class Previewer:
         self._session += 1
         self._gen = gen
         self._begin_state()
-        self._last_n = int(self._recorder.recorded_samples)     # the pre-roll is not "new" audio
+        self._last_n = self._start_n = int(self._recorder.recorded_samples)     # the pre-roll is not "new" audio
         self._trim_s = float(self._trim_arg) if self._trim_arg is not None else _DEFAULT_TRIM[self._gpu()]
         self._next_at = self._clock() + self.interval_s
         self._active = True
@@ -225,21 +233,35 @@ class Previewer:
         with self._cv:
             if not self._active:
                 return
-            session, gen, win_start, last_n = self._session, self._gen, self._win_start, self._last_n
+            session, gen, last_n = self._session, self._gen, self._last_n
+            win_start, trim_s = self._win_start, self._trim_s
             t_call = self._clock()
             self._next_at = t_call + self.interval_s
-        if int(self._recorder.recorded_samples) - last_n < MIN_NEW_S * SAMPLE_RATE:
+        n = int(self._recorder.recorded_samples)
+        if n - last_n < MIN_NEW_S * SAMPLE_RATE or n - self._start_n < MIN_FIRST_S * SAMPLE_RATE:
             return
+        stored = win_start
+        if n - win_start > (trim_s + self.interval_s) * SAMPLE_RATE:       # calls were spaced out: still bounded
+            win_start = n - int(trim_s * SAMPLE_RATE)
         window = self._recorder.snapshot(win_start)
         new = max(0, window.size - max(0, last_n - win_start))
-        silent = new == 0 or float(np.max(np.abs(window[-new:]))) < SILENCE_PEAK
+        peak = float(np.max(np.abs(window[-new:]))) if new else 0.0
+        silent = peak < SILENCE_PEAK
         with self._cv:
             if not self._active or self._session != session:
                 return
             if silent and self._silent_prev:
                 self._last_n = win_start + window.size       # nothing to say: do not look at it again
                 return
+            risen = peak >= RISE_FACTOR * max(self._ref_peak, SILENCE_PEAK)
+            if t_call < self._hold_until and not risen:
+                return                                       # backing off: the audio stays "new" for the next look
+            if risen:
+                self._empty = 0
             self._silent_prev = silent
+            if win_start > stored:
+                self._win_start = win_start
+                self._la.prev = []                           # a cut through the tentative words: start afresh
         if self._gain is not None:
             window = self._gain(window)
         try:
@@ -255,6 +277,9 @@ class Previewer:
                 return                                          # released, cancelled or replaced meanwhile
             end = win_start + window.size
             self._last_n = end
+            self._empty = 0 if words else self._empty + 1
+            self._ref_peak = peak
+            self._hold_until = t_call + min(HOLD_CAP_S, self.interval_s * 2 ** self._empty) if self._empty else 0.0
             off = win_start / SAMPLE_RATE
             tentative = self._la.update(self._la.new_part([(w, t + off) for w, t in words], off))
             shown = (" ".join(w for w, _ in self._la.committed), " ".join(w for w, _ in tentative))

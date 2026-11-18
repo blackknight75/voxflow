@@ -88,9 +88,12 @@ class Rig:
         self.out: list[tuple] = []
         self.p = Previewer(self.rec, self.asr, lambda *a: self.out.append(a), clock=self.clock, **kw)
 
-    def begin(self, gen=1):
+    def begin(self, gen=1, gate=False):
+        """Open a session. ``gate=False``: as if the first 0.7 s had passed (it has tests of its own)."""
         with self.p._cv:
             assert self.p._begin(gen)
+            if not gate:
+                self.p._start_n = -int(stream.MIN_FIRST_S * SR)
 
     def tick(self, grow=0.5):
         self.rec.grow(grow)
@@ -219,7 +222,7 @@ def test_emit_survives_a_receiver_that_raises_and_never_logs_the_words(caplog):
 # ======================================================================== window trimming
 def test_the_window_stays_short_by_starting_at_the_first_uncommitted_word():
     hyps = [words("aa bb"), words("aa bb cc dd"), words("aa bb cc dd ee ff")]
-    r = Rig(hyps, trim_s=1.0, bucket_s=0)
+    r = Rig(hyps, trim_s=1.0, bucket_s=0, interval_s=2.0)          # a long interval: no cut before the call
     r.begin()
     r.tick(0.5)
     assert r.p._win_start == 0                                        # window 0.5 s: not longer than trim_s
@@ -598,7 +601,7 @@ def test_an_unexpected_error_in_the_thread_clears_the_caption():
     p = Previewer(rec, asr_, lambda *a: out.append(a), interval_s=0.01)
     rec.n = 0
     p.start(9)
-    rec.n = 8000                                                       # one tick of new audio, then the device dies
+    rec.n = 16000                                                      # one tick of new audio, then the device dies
     wait_for(lambda: not p.available)
     assert out[0] == (9, "", "x y") and out[-1] == (9, "", "")
     p.close()
@@ -786,3 +789,89 @@ def test_n4_a_result_without_tokens_is_a_preview_error_not_an_attribute_error():
     with pytest.raises(PreviewUnavailable, match="AttributeError"):
         tr.transcribe_timed(speech(1.0))
     assert not tr._lock.locked()
+
+
+# ======================================================================== round 4: first-call gate and empty-result back-off
+def test_no_call_before_seven_tenths_of_a_second_beyond_the_preroll():
+    r = Rig([words("Yeah")])
+    r.rec.n = int(0.3 * SR)                                           # the pre-roll
+    r.begin(gate=True)
+    r.tick(0.4)                                                       # 0.4 s of its own: too early (noise says "Yeah.")
+    r.tick(0.2)                                                       # 0.6 s
+    assert r.asr.calls == []
+    r.tick(0.2)                                                       # 0.8 s
+    assert len(r.asr.calls) == 1 and r.asr.calls[0]["size"] == int(1.1 * SR)
+
+
+def _quiet_rig(hyps=([],), level=0.01, **kw):
+    r = Rig(list(hyps), cost=0.01, **kw)
+    r.rec.audio = np.full(r.rec.audio.size, level, np.float32)
+    return r
+
+
+def _call_times(r, seconds, tick=0.4):
+    """Tick every 0.4 s of fake time; the times at which the model was called."""
+    times, t0 = [], r.clock.t
+    while r.clock.t - t0 < seconds:
+        before = len(r.asr.calls)
+        r.rec.grow(tick)
+        r.clock.t += tick
+        r.p._tick()
+        if len(r.asr.calls) > before:
+            times.append(round(r.clock.t - t0, 1))
+    return times
+
+
+def test_calls_that_return_no_words_are_spaced_x2_x4_up_to_two_seconds():
+    r = _quiet_rig()
+    r.begin()
+    times = _call_times(r, 14.0)
+    gaps = [round(b - a, 1) for a, b in zip(times, times[1:])]
+    assert gaps[:3] == [0.8, 1.6, 2.0] and all(2.0 <= g <= 2.1 for g in gaps[3:])    # 0.4 s x2, x4, then the 2 s cap
+    assert r.p._empty >= 3
+
+
+def test_words_in_a_result_end_the_back_off():
+    r = _quiet_rig([[], [], words("hello")])
+    r.begin()
+    _call_times(r, 4.0)
+    assert len(r.asr.calls) > 3 and r.p._empty == 0 and r.p._hold_until == 0.0      # after the third call: every tick
+
+
+def test_a_clear_rise_in_the_sound_ends_the_back_off_at_once():
+    r = _quiet_rig()
+    r.begin()
+    _call_times(r, 6.0)
+    assert r.p._empty >= 2 and r.p._hold_until > r.clock.t
+    n = len(r.asr.calls)
+    r.rec.audio[r.rec.n:] = 0.2                                        # speech after a pause: 20x the noise
+    r.tick(0.4)
+    assert len(r.asr.calls) == n + 1 and r.p._empty == 1               # called now, counted again if still empty
+    r2 = _quiet_rig()
+    r2.begin()
+    _call_times(r2, 6.0)
+    m = len(r2.asr.calls)
+    r2.rec.audio[r2.rec.n:] = 0.03                                     # louder, but not 4x the 0.01 noise: still holding
+    r2.tick(0.4)
+    assert len(r2.asr.calls) == m
+
+
+def test_a_window_stays_short_while_the_calls_are_spaced_out():
+    r = _quiet_rig(trim_s=3.0, seconds=60.0)
+    r.begin()
+    r.p._la.prev = words("old words")
+    big = 0.0
+    for _ in range(100):
+        r.asr.calls.clear()
+        r.rec.grow(0.4)
+        r.clock.t += 0.4
+        r.p._tick()
+        big = max([big] + [c["size"] / SR for c in r.asr.calls])
+    assert 0 < big <= 3.0 + 0.45 and r.p._la.prev == []
+
+
+def test_a_trim_with_nothing_recognised_cuts_to_the_limit():
+    r = Rig([[]], trim_s=2.0)
+    r.begin()
+    r.p._trim(int(10 * SR), [])
+    assert r.p._win_start == int(8 * SR)
