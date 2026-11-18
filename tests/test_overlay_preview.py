@@ -135,6 +135,21 @@ def test_long_text_keeps_its_end_and_loses_its_start(pill, clock):
     assert bubble_w <= O.PREVIEW_MAX_W + 1 < O.CANVAS_W, "the bubble stays inside the Flow bar's window"
 
 
+def test_the_split_lands_on_a_word_boundary_with_one_space_when_the_start_is_elided(pill):
+    """What the engine sends: whole words, committed + tentative joined by one space."""
+    words = (LONG + " " + LONG).split()
+    for n_tentative in (1, 2, 3, 5):
+        committed, tentative = " ".join(words[:-n_tentative]), " ".join(words[-n_tentative:])
+        pill.set_state("idle")
+        pill.set_state("listening")
+        pill.set_preview(committed, tentative)
+        head, tail = pill._pv_head, pill._pv_tail
+        assert head.startswith("…") and head.endswith(" ") and not head.endswith("  "), (head, tail)
+        assert tail == tentative and not tail.startswith(" ")
+        assert (head + tail).split(" ")[1:] == words[-len((head + tail).split(" ")[1:]):], "whole words only"
+        assert pill._pv_head_w > 0 and pill._pv_tail_w > 0
+
+
 def test_a_tentative_part_longer_than_the_bubble_is_cut_but_still_dimmed(pill, clock):
     pill.set_state("listening")
     pill.set_preview("ok", LONG)
