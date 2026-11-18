@@ -136,6 +136,29 @@ def child(args) -> int:
     bar("command", "listening", "command", secs=1.4)
     bar("processing", "processing", secs=1.0)
     bar("command_processing", "processing", "command", secs=0.9)
+
+    # live-preview caption: scripted words, so the look can be checked without a speech model
+    pcrop = QRect(10, 10, 500, 130)
+    sentence = "Please schedule the meeting for Thursday at three thirty in the afternoon and send the report"
+
+    def caption(name: str, state: str, committed: str, tentative: str, mode: str = "dictate",
+                light_bg: bool = False) -> None:
+        ctl.demo_set_state(state, mode, "")
+        pill.set_preview(committed, tentative)
+        pump(1.2)
+        save(pill, f"overlay_caption_{name}", light_bg, pcrop)
+
+    caption("listening", "listening", "Please schedule the meeting for", "Thursday")
+    caption("listening_on_light", "listening", "Please schedule the meeting for", "Thursday", light_bg=True)
+    caption("listening_long", "listening", sentence[:-12], sentence[-12:])
+    caption("locked", "locked", "Please schedule the meeting for", "Thursday")
+    caption("command", "listening", "Make this sound more polite", "please", mode="command")
+    ctl.demo_set_state("processing", "dictate", "")
+    pump(0.6)
+    save(pill, "overlay_caption_processing", False, pcrop)
+    ctl.demo_set_state("idle")
+    pump(0.3)
+
     bar("done", "done", message="Pasted", secs=0.7)
     bar("done_rules_only", "done", message="Pasted · basic clean-up", secs=0.7)
     bar("done_rules_only_longest", "done", message="Copied. Press Ctrl+V · basic clean-up", secs=0.7)
@@ -163,18 +186,23 @@ def child(args) -> int:
         save(win, f"page_{name}")
 
     def settings_tour(suffix: str = "") -> None:
-        sb = win.pages["settings"].scroll.verticalScrollBar()
+        """Every group of the Settings page, top to bottom: page_settings_<group>_<n>."""
+        settings = win.pages["settings"]
+        sb = settings.scroll.verticalScrollBar()
         win.show_page("settings")
-        pump(0.2)
-        step = max(1, win.pages["settings"].scroll.viewport().height() - 60)
-        pos, i = 0, 1
-        while True:
-            sb.setValue(pos)
-            pump(0.12)
-            save(win, f"page_settings_{i}{suffix}")
-            if pos >= sb.maximum():
-                break
-            pos, i = min(sb.maximum(), pos + step), i + 1
+        for tab, _title in settings._TABS:
+            settings.show_tab(tab)
+            pump(0.2)
+            step = max(1, settings.scroll.viewport().height() - 60)
+            pos, i = 0, 1
+            while True:
+                sb.setValue(pos)
+                pump(0.12)
+                save(win, f"page_settings_{tab}_{i}{suffix}")
+                if pos >= sb.maximum():
+                    break
+                pos, i = min(sb.maximum(), pos + step), i + 1
+        settings.show_tab("dictation")
 
     for theme in ("dark", "light"):
         ctl.set("theme", theme)
@@ -247,6 +275,7 @@ def child(args) -> int:
             tmp = Path(tempfile.mkdtemp(prefix="voxflow-shots-"))
             settings = win.pages["settings"]
             win.show_page("settings")
+            settings.show_tab("data")
             pump(0.15)
 
             def show_sync(name: str) -> None:
@@ -304,7 +333,7 @@ def child(args) -> int:
             save(win, f"modal_pack_share_dictionary{sfx}")
             m.close_modal()
         win.show_page("settings")
-        win.pages["settings"].scroll.verticalScrollBar().setValue(0)
+        win.pages["settings"].show_tab("dictation")
         pump(0.15)
         rec = win.pages["settings"].recorders["command_hotkey"]
         rec.toggle_capture()
@@ -320,7 +349,7 @@ def child(args) -> int:
         pump(0.1)
         for i, target in enumerate((win.pages["settings"].recorders["hotkey"].btn,
                                     win.pages["settings"].findChild(QWidget, "settings_double_tap_lock"),
-                                    win.pages["settings"].mic, win.nav["history"])):
+                                    win.pages["settings"].language, win.nav["history"])):
             target.setFocus(Qt.FocusReason.TabFocusReason)
             pump(0.1)
             save(win, f"focus_ring_{i + 1}{sfx}")
@@ -354,6 +383,7 @@ def child(args) -> int:
 
     def show_devices(name: str) -> None:
         win.show_page("settings")
+        settings.show_tab("system")
         pump(0.15)
         settings.scroll.ensureWidgetVisible(settings.speed_row, 0, 30)
         pump(0.3)
@@ -394,8 +424,9 @@ def child(args) -> int:
         ctl.demo_set_model("cleanup", "failed", "The cleanup model could not be loaded. Dictation still works; "
                                                 "text is tidied with built-in rules.", None)
         win.show_page("settings")
-        sb = win.pages["settings"].scroll.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        win.pages["settings"].show_tab("system")
+        pump(0.15)
+        win.pages["settings"].scroll.ensureWidgetVisible(win.pages["settings"].speed_row, 0, 30)
         pump(0.6)
         save(win, "page_settings_models_busy")
         pill.set_arranging(False)
@@ -749,6 +780,8 @@ def real_screen(args) -> int:
         check(f"window shot on monitor {i + 1} is native resolution (no upscaling blur)",
               abs(pw - win.width() * s.devicePixelRatio()) <= 2, f"{pw}x{ph} px for {win.width()}x{win.height()} logical")
         if i == 0:
+            win.pages["settings"].show_tab("system")
+            pump(0.3)
             sb = win.pages["settings"].scroll.verticalScrollBar()
             sb.setValue(sb.maximum() // 2)
             pump(0.3)

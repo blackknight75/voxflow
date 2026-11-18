@@ -739,7 +739,7 @@ def test_u14_an_app_the_user_added_can_be_removed_again(ui):
 # =========================================================================== Settings
 TOGGLES = ("double_tap_lock", "whisper_mode", "cleanup_enabled", "smart_formatting", "auto_learn", "sounds_enabled",
            "mute_media", "reduced_motion", "show_idle_pill", "save_history", "restore_clipboard", "launch_at_login",
-           "start_minimized")
+           "start_minimized", "live_preview", "phrase_streaming")
 
 
 @pytest.mark.parametrize("key", TOGGLES)
@@ -794,6 +794,7 @@ def test_settings_choices_language_theme_retention_and_microphone(ui):
 
 def test_settings_follow_changes_made_elsewhere(ui):
     page = ui.page("settings")
+    page.show_tab("appearance")
     ui.c.set("mic_device", "Blue Snowball")                   # e.g. from the tray (bug U-05)
     assert page.mic.value == "Blue Snowball"
     ui.c.set("hotkey", "ctrl+alt+space")
@@ -916,6 +917,7 @@ def test_recording_without_a_running_hook_tells_the_user(ui):
 
 def test_model_rows_show_state_progress_failure_and_retry(ui):
     page = ui.page("settings")
+    page.show_tab("system")
     assert ui.find("settings_model_state_asr").text() == "Ready"
     assert not ui.find("settings_model_retry_asr").isVisible()
     ui.c._on_model_event("asr", {"state": "downloading", "detail": "Downloading… 312 MB of 2,550 MB",
@@ -969,6 +971,7 @@ def test_support_buttons_and_about(ui, monkeypatch):
 
 def test_flow_bar_position_arrange_and_reset(ui):
     page = ui.page("settings")
+    page.show_tab("appearance")
     overlay = ui.shell.overlay
     move = ui.find("settings_overlay_move")
     move.click()

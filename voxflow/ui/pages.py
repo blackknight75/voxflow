@@ -1512,7 +1512,7 @@ class SettingsPage(Page):
         sec.add(self._toggle("double_tap_lock", "Hands-free lock",
                              "Double-tap the dictation hotkey to keep listening; tap once more to finish."))
         sec._rows[-1].keywords = _HOTKEY_WORDS
-        self.body.addWidget(sec)
+        self._add(sec, "dictation")
 
         # ---- microphone
         sec = Section("Microphone")
@@ -1546,10 +1546,10 @@ class SettingsPage(Page):
         self.test_row = sec.add(Row("Input level", "Press Test and speak: the bar should move.", test_box))
         sec.add(self._toggle("whisper_mode", "Whisper mode",
                              "Boosts quiet speech so you can dictate under your breath."))
-        self.body.addWidget(sec)
+        self._add(sec, "audio")
 
         # ---- dictation
-        sec = Section("Dictation")
+        sec = Section("Language and text")
         self.language = ChoiceButton(name="Language", fallback="Auto-detect")
         self.language.setObjectName("settings_language")
         self.language.setFixedWidth(200)
@@ -1567,7 +1567,17 @@ class SettingsPage(Page):
                              "Suggests dictionary entries for names VoxFlow wrote differently from what it heard "
                              "(“get hub” written as GitHub), so they are always spelled that way. Paused while "
                              "Keep history is off."))
-        self.body.addWidget(sec)
+        self._add(sec, "dictation")
+
+        # ---- while you speak
+        sec = Section("While you speak")
+        sec.add(self._toggle("live_preview", "Live preview", "Show the words in the Flow bar while you speak. The "
+                                                             "pasted text is still tidied up after you release the key."))
+        sec.add(self._toggle("phrase_streaming", "Type while you speak (hands-free)",
+                             "In hands-free mode (double-tap the shortcut), each phrase is pasted into the app you "
+                             "are in as you finish it. Text already pasted is not revised, and one Undo removes only "
+                             "the last phrase. Hold-to-talk is not affected."))
+        self._add(sec, "dictation")
 
         # ---- sound
         sec = Section("Sound")
@@ -1608,7 +1618,7 @@ class SettingsPage(Page):
         self.vol_row = sec.add(Row("Volume", "", vol_box))
         sec.add(self._toggle("mute_media", "Mute other audio while dictating",
                              "Silences music and videos while you speak, then brings them back."))
-        self.body.addWidget(sec)
+        self._add(sec, "audio")
 
         # ---- appearance
         sec = Section("Appearance")
@@ -1620,6 +1630,10 @@ class SettingsPage(Page):
         sec.add(Row("Theme", "System follows your Windows light or dark mode.", self.theme, icon="moon"))
         sec.add(self._toggle("reduced_motion", "Reduce motion", "Turns off decorative animation everywhere. Always "
                                                                 "on while Windows' Animation effects are off."))
+        self._add(sec, "appearance")
+
+        # ---- flow bar
+        sec = Section("Flow bar")
         sec.add(self._toggle("show_idle_pill", "Show the Flow bar when idle",
                              "Keeps a small pill on screen so you know VoxFlow is ready."))
         pos_box = QWidget()
@@ -1634,9 +1648,9 @@ class SettingsPage(Page):
         self.btn_pos_reset.clicked.connect(lambda: (self._set_arranging(False), self.setting("overlay_position", None)))
         pl.addWidget(self.btn_pos_reset)
         pl.addWidget(self.btn_move)
-        self.pos_row = sec.add(Row("Flow bar position", "", pos_box))
+        self.pos_row = sec.add(Row("Position", "", pos_box))
         self._sync["overlay_position"] = self._sync_position
-        self.body.addWidget(sec)
+        self._add(sec, "appearance")
 
         # ---- history & privacy
         sec = Section("History and privacy")
@@ -1655,7 +1669,7 @@ class SettingsPage(Page):
         self._sync_history_limit(self.ctl.get("history_limit"))
         sec.add(self._toggle("restore_clipboard", "Restore my clipboard",
                              "Puts back whatever you had copied before VoxFlow pasted."))
-        self.body.addWidget(sec)
+        self._add(sec, "data")
 
         # ---- backup and sync
         sec = Section("Backup and sync")
@@ -1694,21 +1708,21 @@ class SettingsPage(Page):
         self._sync_timer = QTimer(self)                 # keeps "synced 4 min ago" honest while the page is open
         self._sync_timer.setInterval(30000)
         self._sync_timer.timeout.connect(self._show_sync)
-        self.body.addWidget(sec)
+        self._add(sec, "data")
         self._sync["sync_folder"] = lambda _v: self._show_sync()
         ctl.sync_status_changed.connect(self._show_sync)
 
         # ---- system
-        sec = Section("System")
+        sec = Section("Startup")
         sec.add(self._toggle("launch_at_login", "Launch at login", "Start VoxFlow when you sign in to Windows.",
                              icon="power")).keywords = "startup autostart boot windows sign in"
         sec.add(self._toggle("start_minimized", "Start in the tray", "Open quietly without showing this window.")
                 ).keywords = "startup minimised minimized hidden"
-        self.body.addWidget(sec)
+        self._add(sec, "system")
 
         # ---- updates
         self.updates = UpdatesSection(self)
-        self.body.addWidget(self.updates)
+        self._add(self.updates, "system")
 
         # ---- models
         sec = Section("On-device models")
@@ -1735,11 +1749,11 @@ class SettingsPage(Page):
         self.speed_row = sec.add(Row("Speed check", "", self.btn_measure, below=self.speed_bar))
         self.speed_row.keywords = _DEVICE_WORDS + " benchmark performance"
         self.speed_row.setObjectName("settings_speed_row")
-        self.body.addWidget(sec)
+        self._add(sec, "system")
         ctl.devices_changed.connect(self._show_devices)
 
         # ---- support
-        sec = Section("Support")
+        sec = Section("Help and about")
         self.btn_onboarding = Button("Open", "secondary", height=30)
         self.btn_onboarding.setObjectName("settings_onboarding")
         self.btn_onboarding.clicked.connect(win.onboarding_requested.emit)
@@ -1763,15 +1777,11 @@ class SettingsPage(Page):
         self.btn_reset.clicked.connect(self._confirm_reset)
         sec.add(Row("Reset settings", "Back to the defaults. Your history, dictionary and snippets are kept.",
                     self.btn_reset, icon="refresh"))
-        self.body.addWidget(sec)
-
-        # ---- about
-        sec = Section("About")
         self.about = Row("About VoxFlow", "Fully local dictation. No cloud, no account, no telemetry: your "
                                                  "voice never leaves this PC.", icon="info")
         self.about.setObjectName("settings_about")
         sec.add(self.about)
-        self.body.addWidget(sec)
+        self._add(sec, "system")
         self.body.addStretch(1)
         self._build_finder()
 
@@ -1780,32 +1790,40 @@ class SettingsPage(Page):
         ctl.microphones_changed.connect(self._fill_mics)
         ctl.model_status_changed.connect(self._on_model)
 
-    # ---- find / jump (D-07)
+    # ---- groups and search (D-07)
+    _TABS = (("dictation", "Dictation"), ("audio", "Audio"), ("appearance", "Appearance"),
+             ("data", "Your data"), ("system", "System"))
+
+    def _add(self, sec: Section, tab: str) -> None:
+        """Put a section on the page, in the group (``_TABS``) it is shown under."""
+        sec.tab = tab
+        self.body.addWidget(sec)
+
     def _sections(self) -> list[Section]:
         return [self.body.itemAt(i).widget() for i in range(self.body.count())
                 if isinstance(self.body.itemAt(i).widget(), Section)]
 
     def _build_finder(self) -> None:
-        """Search box (filters rows by title and description) and a "Jump to" menu above the long page."""
+        """Above the page: a search box that looks through every group (beside the title), and the groups, of
+        which one is shown at a time."""
+        self.tabs = Segmented(list(self._TABS), self._TABS[0][0], name="Settings group")
+        self.tabs.setObjectName("settings_tabs")
+        self.tabs.changed.connect(self.show_tab)
         self.find = SearchField("Search settings")
         self.find.setObjectName("settings_search")
-        self.find.setMaximumWidth(300)
+        self.find.setFixedWidth(240)
         self.find.textChanged.connect(self._filter)
-        self.jump = ChoiceButton(name="Jump to section", fallback="Jump to section")
-        self.jump.setObjectName("settings_jump")
-        self.jump.setFixedWidth(190)
-        self.jump.set_options([(i, sec.caption.text().capitalize()) for i, sec in enumerate(self._sections())], None)
-        self.jump.chosen.connect(self._jump_to)
+        self.find.textChanged.connect(lambda _t: self.scroll.verticalScrollBar().setValue(0))   # results from the top
+        self.actions.addWidget(self.find)
         row = QHBoxLayout()
-        row.setSpacing(T.S2)
         row.setContentsMargins(0, 8, 0, 0)
-        row.addWidget(self.find, 1)
+        row.addWidget(self.tabs)
         row.addStretch(1)
-        row.addWidget(self.jump)
         self.head_col.addLayout(row)
         self.no_match = Label("No setting matches that search.", T.F_BODY, "TEXT_DIM")
         self.no_match.hide()
         self.body.insertWidget(0, self.no_match)
+        self._filter("")
 
     def showEvent(self, e):
         super().showEvent(e)
@@ -1815,7 +1833,7 @@ class SettingsPage(Page):
             while before.focusPolicy() == Qt.FocusPolicy.NoFocus:   # setTabOrder ignores widgets without focus
                 before = before.previousInFocusChain()
             QWidget.setTabOrder(before, self.find)          # built last but first on screen: Tab reaches the
-            QWidget.setTabOrder(self.find, self.jump)       # search and the jump menu before the rows
+            QWidget.setTabOrder(self.find, self.tabs)       # search and the groups before the rows
 
     _SECTION_ALIASES = {"microphone": "Microphone", "models": "On-device models", "hotkeys": "Hotkeys",
                         "privacy": "History and privacy", "sync": "Backup and sync", "updates": "Updates"}
@@ -1829,22 +1847,28 @@ class SettingsPage(Page):
         m = update_dialog(self.win, self.ctl, info)
         return self.win.open_modal(m, focus=m.btn_default)
 
+    def show_tab(self, tab) -> None:
+        """Show one group of settings (a key of ``_TABS``), from its top. Ends a search."""
+        self.tabs.set_value(tab)
+        self.find.setText("")
+        self._filter("")
+        self.scroll.verticalScrollBar().setValue(0)
+
     def show_section(self, name: str) -> None:
-        """Scroll to the section called ``name`` (an alias such as ``"models"`` or its caption); no-op if unknown."""
+        """Open the group that holds the section called ``name`` (an alias such as ``"models"`` or its caption) and
+        scroll to it; no-op if unknown."""
         want = self._SECTION_ALIASES.get(str(name).lower(), str(name)).lower()
         for i, sec in enumerate(self._sections()):
             if sec.caption.text().lower() == want:
-                self.find.setText("")
+                self.show_tab(sec.tab)
                 QTimer.singleShot(0, lambda i=i: self._jump_to(i))    # after the page has been laid out
                 return
 
-    def _jump_to(self, index) -> None:
-        secs = self._sections()
-        if 0 <= int(index) < len(secs):
-            self.scroll.verticalScrollBar().setValue(max(0, secs[int(index)].y() - 4))
-            self.jump.set_value(None)
+    def _jump_to(self, index: int) -> None:
+        self.scroll.verticalScrollBar().setValue(max(0, self._sections()[index].y() - 4))
 
     def _filter(self, text: str) -> None:
+        """No search: the sections of the chosen group. A search: every matching row, whatever its group."""
         q = text.strip().lower()
         any_shown = False
         for sec in self._sections():
@@ -1855,7 +1879,7 @@ class SettingsPage(Page):
                                                                      getattr(row, "keywords", "")))
                 row.setVisible(hit)
                 shown += hit
-            sec.setVisible(bool(shown))
+            sec.setVisible(bool(shown) and (bool(q) or sec.tab == self.tabs.value))
             any_shown = any_shown or bool(shown)
         self.no_match.setVisible(bool(q) and not any_shown)
         if not q:

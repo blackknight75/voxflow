@@ -48,6 +48,8 @@ class TRecorder:
         self.reopened = 0
         self.starts = self.stops = 0
         self.last_speech_seconds = 0.0
+        self.recorded = 0                     # samples "recorded so far" in the current utterance (the preview reads it)
+        self.snapshots: list[int] = []        # the ``start`` offset of every snapshot() call
         TRecorder.instances.append(self)
 
     def start(self):
@@ -55,6 +57,7 @@ class TRecorder:
             raise TRecorder.fail_start
         self.starts += 1
         self.is_recording, self.hit_cap = True, False
+        self.recorded = min(len(TRecorder.audio), 4800)      # the pre-roll; tests grow it with ``recorded += n``
 
     def stop(self):
         if TRecorder.fail_stop is not None:
@@ -64,6 +67,16 @@ class TRecorder:
         self.is_recording = False
         self.last_speech_seconds = TRecorder.speech_seconds
         return TRecorder.audio
+
+    @property
+    def recorded_samples(self):
+        return self.recorded if self.is_recording else 0
+
+    def snapshot(self, start=0):
+        self.snapshots.append(start)
+        if not self.is_recording:
+            return np.zeros(0, dtype=np.float32)
+        return np.array(TRecorder.audio[start:self.recorded], copy=True)
 
     def level(self):
         return 0.42
@@ -99,6 +112,30 @@ class TAsr:
         self.load_gate = None                 # threading.Event: load() blocks until it is set
         self.delay_s = 0.0
         self.loads = 0
+        self.timed_calls: list[dict] = []     # every transcribe_timed() call: samples, bucket_s, blocking
+        self.partials = None                  # scripted preview: a list of word lists (one per call), or a callable
+        self.timed_busy = False               # True: the model is "busy", transcribe_timed returns None
+        self.fail_timed: Exception | None = None
+
+    def transcribe_timed(self, audio, *, bucket_s=0.0, blocking=False):
+        """The preview call: scripted hypotheses (``partials``), else a growing prefix of ``text``."""
+        self.timed_calls.append({"samples": len(audio), "bucket_s": bucket_s, "blocking": blocking})
+        if self.fail_timed is not None:
+            raise self.fail_timed
+        if self.timed_busy:
+            return None
+        if float(np.max(np.abs(audio), initial=0.0)) < 1e-4:
+            return []                         # like the real model: silence says nothing
+        n = len(self.timed_calls) - 1
+        if callable(self.partials):
+            words = self.partials(n, audio)
+        elif self.partials is not None:
+            words = self.partials[min(n, len(self.partials) - 1)]
+        else:
+            text = self.text(audio) if callable(self.text) else self.text
+            every = text.split()
+            words = every[:max(1, int(len(every) * min(1.0, len(audio) / (2.0 * SAMPLE_RATE))))]
+        return [(w, 0.3 * i) for i, w in enumerate(words)]
 
     def load(self):
         self.loads += 1
@@ -131,6 +168,7 @@ class TCleaner:
         self.fail_generate: Exception | None = None
         self.rewrites: dict[str, str] = {}    # raw transcript -> "model" output
         self.clean_calls: list[tuple[str, dict]] = []
+        self.clean_backends: list[str] = []   # the ``backend`` this cleaner had at each clean() call
         self.generate_calls: list[dict] = []
         self.reply = lambda messages: "REWRITTEN"
         self.loads = 0
@@ -144,6 +182,7 @@ class TCleaner:
     def clean(self, text, *, tone=None, terms=None, language=None, smart=False):
         from voxflow.cleanup import apply_tone, clean_foreign, is_english, rule_clean, smart_format
         self.clean_calls.append((text, dict(tone=tone, terms=terms, language=language, smart=smart)))
+        self.clean_backends.append(self.backend)
         if self.fail_clean is not None:
             raise self.fail_clean
         if not is_english(text, language):
@@ -168,6 +207,9 @@ class TInjector:
     def __init__(self):
         self.restore, self.restore_delay = True, 0.5
         self.outcome = "pasted"               # what the next paste does: pasted | typed | copied | failed
+        self.outcomes: list[str] = []         # consumed one per begin(); ``outcome`` applies once it is empty
+        self.modifiers = False                # True: Win / Alt / Shift is "down" (modifiers_held)
+        self.events: list[tuple] = []         # ("begin", text) / ("finish_later",) / ("copy_text", text), in order
         self.last_outcome = "failed"
         self.selection: str | None = ""
         self.pasted: list[str] = []
@@ -180,15 +222,20 @@ class TInjector:
         self.selection_grabs = 0
 
     def begin(self, text):
-        self.last_outcome = self.outcome
-        if self.outcome in ("pasted", "typed"):
+        self.events.append(("begin", text))
+        self.last_outcome = outcome = self.outcomes.pop(0) if self.outcomes else self.outcome
+        if outcome in ("pasted", "typed"):
             self.pasted.append(text)
             return True
-        if self.outcome == "copied":
+        if outcome == "copied":
             self.copied.append(text)
         return False
 
+    def modifiers_held(self):
+        return self.modifiers
+
     def finish_later(self):
+        self.events.append(("finish_later",))
         self.finished_later += 1
 
     def finish(self):
@@ -208,6 +255,7 @@ class TInjector:
         return self.undo_ok
 
     def copy_text(self, text):
+        self.events.append(("copy_text", text))
         if self.copy_ok:
             self.copied.append(text)
         return self.copy_ok
@@ -250,7 +298,7 @@ class Spy:
     NAMES = ("state_changed", "level_changed", "transcript_ready", "history_changed", "stats_changed",
              "dictionary_changed", "suggestions_changed", "dictionary_suggestion", "snippets_changed",
              "styles_changed", "config_changed", "status_changed", "model_status_changed", "microphones_changed",
-             "hotkey_captured", "notice", "activate_requested", "update_changed", "update_available",
+             "hotkey_captured", "notice", "activate_requested", "update_changed", "update_available", "partial_text",
              "restart_requested")
 
     def __init__(self, controller):
@@ -288,6 +336,8 @@ class Rig:
         self.injector, self.mixer, self.autostart = TInjector(), TMixer(), TAutostart()
         self.sounds: list[str] = []
         self.context = context or AppContext("notepad.exe", "Untitled - Notepad", 0x100)
+        self.own_focus = False                              # True: "VoxFlow's own window has the keyboard focus"
+        kw.setdefault("own_focus_fn", lambda: self.own_focus)
         self.c = Controller(fake=fake, data_dir=self.data_dir, install_hook=kw.pop("install_hook", False),
                             modules=(TRecorder, self.asr, self.cleaner), injector=self.injector,
                             sound_backend=self._play, mute_backend=self.mixer,
@@ -358,6 +408,19 @@ class Rig:
         self.now += 0.05
         self.keys((WIN, False), (first, False))
         self.now += 0.10
+
+    def lock(self):
+        """Double-tap: the recording starts and locks (hands-free). Returns once ``state == "locked"``."""
+        self.pause()
+        self.tap()
+        self.tap()
+        assert self.c.state == "locked", f"did not lock (state={self.c.state}, {self.c.message!r})"
+
+    def stop_locked(self, held_s=5.0):
+        """End a locked recording with one more tap, after it ran for ``held_s`` seconds."""
+        self.pause(held_s)
+        self.c._t_start -= held_s
+        self.tap()
 
     def pause(self, seconds=2.0):
         """Let time pass between utterances so they are not taken for a double-tap."""

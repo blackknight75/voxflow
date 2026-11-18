@@ -91,6 +91,13 @@ def github(version="0.3.0", payload=None, sums=None, data=INSTALLER, **kw):
                      f"{REPO}/releases/download/v{version}/{name}": installer})
 
 
+@pytest.fixture(autouse=True)
+def installed_version_is_older(monkeypatch):
+    """These tests offer 0.3.0 as the newer release, so an Updater built without ``version`` (the controller's too)
+    must take the installed version to be an older one, whatever ``voxflow.__version__`` is today."""
+    monkeypatch.setitem(U.Updater.__init__.__kwdefaults__, "version", "0.2.2")
+
+
 @pytest.fixture
 def no_sockets(monkeypatch):
     """Every outgoing connection attempt is recorded and refused."""

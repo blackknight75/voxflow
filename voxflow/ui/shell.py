@@ -45,6 +45,7 @@ class Shell(QObject):
         c.update_available.connect(self._on_update_available)
 
         c.state_changed.connect(self._on_state)
+        c.partial_text.connect(self.overlay.set_preview)          # live preview: caption above the Flow bar
         c.status_changed.connect(self._on_status)
         c.model_status_changed.connect(self._on_model)
         c.config_changed.connect(self._on_config)

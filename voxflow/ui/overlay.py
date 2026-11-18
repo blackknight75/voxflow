@@ -38,6 +38,11 @@ MAX_TEXT_W = 350                # fits the longest controller message ("Window c
 N_PTS = 36
 _TEXT_STATES = ("done", "error", "loading", "arrange")
 HINT_SEP = " · "                # the controller appends secondary hints to a message after this separator
+_PREVIEW_STATES = ("listening", "locked", "processing")     # the live-preview caption exists only in these
+PREVIEW_MAX_W = CANVAS_W - 40   # widest caption bubble (text plus padding); longer text loses its start
+PREVIEW_PAD_X = 12              # bubble padding left and right of the text
+PREVIEW_H = 26                  # bubble height
+PREVIEW_GAP = 8                 # space between the bubble and the pill
 
 
 def _user32():
@@ -130,6 +135,18 @@ class OverlayPill(QWidget):
         self._font = T.font(T.F_BODY, T.W_SEMI, 0.2)
         self._glow_cache: dict = {}       # (w, h, colours) -> pre-rendered glow at full strength (P5)
         self._lock_t = 0.0
+        # live preview (set_preview): the words recognised so far, shown in a caption bubble above the pill. The
+        # elided strings and their widths are worked out when the text changes, never while painting.
+        self._pv_committed = ""
+        self._pv_tentative = ""
+        self._pv_head = ""                # the visible part that is final (may start with "…")
+        self._pv_tail = ""                # the visible part that may still change
+        self._pv_head_w = 0.0
+        self._pv_tail_w = 0.0
+        self._pv_w = 0.0                  # caption opacity weight 0..1
+        self._pv_pm: QPixmap | None = None    # the finished bubble, drawn once per change and blitted every frame
+        self._pv_dpr = 0.0
+        self._pv_font = T.font(T.F_BODY, T.W_SEMI, 0.1)
 
         self._timer = QTimer(self)
         self._timer.setTimerType(Qt.TimerType.PreciseTimer)
@@ -171,9 +188,12 @@ class OverlayPill(QWidget):
                 self._listen_t = now
                 self._hist[:] = 0
                 self._amp[:] = 0
+                self._clear_preview()                  # a new utterance never starts under the last one's words
             if (self.state == "idle" and state != "idle") or (state == "listening" and not was_listening):
                 self._place()                      # every new utterance appears on the screen in use at that moment
         self.state, self.text, self.progress = state, text, progress
+        if state not in _PREVIEW_STATES:
+            self._clear_preview()
         self._announce(prev)
         if state in _TEXT_STATES:
             shown = self._display_text()
@@ -190,6 +210,42 @@ class OverlayPill(QWidget):
             return
         text = (self.text or self._SPOKEN[self.state]).replace(HINT_SEP, ". ")
         a11y.announce(self, text, assertive=self.state == "error")
+
+    def set_preview(self, committed: str, tentative: str = "") -> None:
+        """Live preview: the words recognised so far (``committed`` will not change, ``tentative`` may). Shown in a
+        caption above the pill while listening, hands-free or processing; empty text removes it. Display only:
+        nothing is stored, logged or announced. Text that arrives in any other state is dropped."""
+        committed, tentative = str(committed or "").strip(), str(tentative or "").strip()
+        if self.state not in _PREVIEW_STATES:
+            committed = tentative = ""
+        if (committed, tentative) == (self._pv_committed, self._pv_tentative):
+            return
+        self._pv_committed, self._pv_tentative = committed, tentative
+        self._layout_preview()
+        self._kick()
+
+    def _clear_preview(self) -> None:
+        self._pv_committed = self._pv_tentative = self._pv_head = self._pv_tail = ""
+        self._pv_head_w = self._pv_tail_w = self._pv_w = 0.0
+        self._pv_pm = None
+
+    def _layout_preview(self) -> None:
+        """Work out what the caption shows: the END of the text, with an ellipsis where the start was cut off, split
+        into the final part and the part that may still change (drawn dimmer)."""
+        head, tail = self._pv_committed, self._pv_tentative
+        full = f"{head} {tail}" if head and tail else head or tail
+        if not full:
+            self._pv_head = self._pv_tail = ""
+            self._pv_head_w = self._pv_tail_w = 0.0
+            self._pv_pm = None
+            return
+        fm = QFontMetricsF(self._pv_font)
+        shown = fm.elidedText(full, Qt.TextElideMode.ElideLeft, PREVIEW_MAX_W - 2 * PREVIEW_PAD_X)
+        cut = max(1 if shown != full else 0, len(shown) - len(tail))     # where the tentative words begin
+        self._pv_head, self._pv_tail = shown[:cut], shown[cut:]
+        self._pv_head_w = fm.horizontalAdvance(self._pv_head)
+        self._pv_tail_w = fm.horizontalAdvance(self._pv_tail)
+        self._pv_pm = None                  # drawn again by the next paint (once, not every frame)
 
     def set_locked(self, locked: bool) -> None:
         """Hands-free lock indicator; only meaningful while listening."""
@@ -400,6 +456,8 @@ class OverlayPill(QWidget):
         glow_target = {"idle": 0.0, "listening": 0.5 + 0.5 * self._level, "locked": 0.5 + 0.5 * self._level,
                        "processing": 0.7, "done": 0.9, "error": 0.9, "loading": 0.45, "arrange": 0.8}[self.state]
         self._glow = glow_target if snap else T.smooth(self._glow, glow_target, dt, 8)
+        pv_target = 1.0 if self._pv_head or self._pv_tail else 0.0
+        self._pv_w = pv_target if snap else T.smooth(self._pv_w, pv_target, dt, 14)
         self._shake = max(0.0, self._shake - dt * 1.6)
         self._read_audio(dt)
         if self.state == "arrange" and QGuiApplication.platformName() != "offscreen":
@@ -461,7 +519,9 @@ class OverlayPill(QWidget):
             p.restore()
         if listen_w > 0.02:
             self._paint_listen_extras(p, rect, t, listen_w, wgt["locked"], ca, now)
-        if self.state == "locked" and now - self._lock_t < LOCK_HINT_S:
+        if self._pv_w > 0.01:
+            self._paint_preview(p, rect, self._pv_w)
+        elif self.state == "locked" and now - self._lock_t < LOCK_HINT_S:      # the caption wins the spot
             self._paint_lock_hint(p, rect, now - self._lock_t)
         if wgt["done"] > 0.02:
             self._paint_done(p, rect, since, wgt["done"])
@@ -644,6 +704,43 @@ class OverlayPill(QWidget):
         p.drawRoundedRect(box, 11, 11)
         p.setPen(T.alpha(D.TEXT, fade))
         p.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
+
+    def _preview_pixmap(self) -> QPixmap:
+        """The caption bubble at full strength, rendered when the text (or the screen's scale) changes and blitted
+        every frame with the fade as opacity: painting rounded rectangles and two text runs per frame costs more
+        than the caption is worth."""
+        dpr = self.devicePixelRatioF()
+        if self._pv_pm is None or self._pv_dpr != dpr:
+            width = self._pv_head_w + self._pv_tail_w + 2 * PREVIEW_PAD_X
+            pm = QPixmap(int(math.ceil(width * dpr)), int(PREVIEW_H * dpr))
+            pm.setDevicePixelRatio(dpr)
+            pm.fill(Qt.GlobalColor.transparent)
+            q = QPainter(pm)
+            q.setRenderHint(QPainter.RenderHint.Antialiasing)
+            q.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+            q.setPen(QPen(QColor(255, 255, 255, 46), 1.0))
+            q.setBrush(QColor(12, 14, 24, 238))
+            q.drawRoundedRect(QRectF(0.5, 0.5, width - 1, PREVIEW_H - 1), PREVIEW_H / 2, PREVIEW_H / 2)
+            q.setFont(self._pv_font)
+            flags = Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
+            q.setPen(D.TEXT)
+            q.drawText(QRectF(PREVIEW_PAD_X, 0, self._pv_head_w + 4, PREVIEW_H), flags, self._pv_head)
+            q.setPen(T.alpha(D.TEXT_DIM, 0.9))
+            q.drawText(QRectF(PREVIEW_PAD_X + self._pv_head_w, 0, self._pv_tail_w + 4, PREVIEW_H), flags,
+                       self._pv_tail)
+            q.end()
+            self._pv_pm, self._pv_dpr = pm, dpr
+        return self._pv_pm
+
+    def _paint_preview(self, p, rect, k) -> None:
+        """The live-preview caption: a dark bubble above the pill, the final words in the normal text colour and the
+        ones that may still change dimmer (see ``_layout_preview`` and ``_preview_pixmap``)."""
+        pm = self._preview_pixmap()
+        p.save()
+        p.setOpacity(p.opacity() * k)
+        p.drawPixmap(QPointF(rect.center().x() - pm.width() / pm.devicePixelRatio() / 2,
+                             rect.top() - PREVIEW_GAP - PREVIEW_H), pm)
+        p.restore()
 
     def _paint_text(self, p, rect, wgt, text, right_pad: float = 20) -> None:
         """Message text. Anything after " · " is a secondary hint (e.g. "Pasted · basic clean-up") and is

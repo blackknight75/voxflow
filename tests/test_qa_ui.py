@@ -259,12 +259,12 @@ def _tab_stops(win) -> list[str]:
     return out
 
 
-def test_ui06_search_and_jump_come_first_in_settings(demo):
+def test_ui06_search_and_groups_come_first_in_settings(demo):
     page = demo.page("settings")
     stops = _tab_stops(demo.win)
     i = stops.index("settings_search")
-    assert stops[i + 1] == "settings_jump" and stops[i + 2] == "settings_hotkey_recorder_change"
-    assert stops.index("settings_reset") > i
+    assert stops[i + 1] == "settings_tabs" and stops[i + 2] == "settings_hotkey_recorder_change"
+    assert stops.index("settings_phrase_streaming") > i
     page.hide()
     page.show()                                                # shown again: the order is fixed only once
     assert _tab_stops(demo.win) == stops

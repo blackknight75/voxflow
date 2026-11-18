@@ -132,3 +132,34 @@ def test_real_lookup_is_read_only_and_well_formed():
     c = foreground_app()
     assert isinstance(c, AppContext) and c.exe == c.exe.lower() and len(c.title) <= 200
     assert isinstance(ctypes.sizeof(ctypes.c_void_p), int)
+
+
+# ---- foreground_is_own: does VoxFlow itself have the focus? (phrase streaming never types into its own windows)
+@pytest.mark.skipif(sys.platform != "win32", reason="ctypes.wintypes layout")
+def test_foreground_is_own_compares_the_process_id(desktop):
+    import os
+    desktop(FakeUser32(pid=os.getpid()))
+    assert ctx.foreground_is_own() is True
+    desktop(FakeUser32(pid=os.getpid() + 1))
+    assert ctx.foreground_is_own() is False
+    desktop(FakeUser32(pid=0))
+    assert ctx.foreground_is_own() is False, "an unknown owner is not ours"
+    desktop(FakeUser32(hwnd=0))
+    assert ctx.foreground_is_own() is False, "no foreground window"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="ctypes.wintypes layout")
+def test_foreground_is_own_never_raises(desktop, monkeypatch):
+    desktop()
+    monkeypatch.setattr(ctx.ctypes, "WinDLL", lambda name, **kw: (_ for _ in ()).throw(OSError("no user32")))
+    assert ctx.foreground_is_own() is False
+
+
+def test_foreground_is_own_is_false_off_windows(monkeypatch):
+    monkeypatch.setattr(ctx.sys, "platform", "linux")
+    assert ctx.foreground_is_own() is False
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows only")
+def test_real_foreground_is_own_is_a_plain_bool():
+    assert ctx.foreground_is_own() in (True, False)

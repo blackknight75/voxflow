@@ -148,12 +148,12 @@ def test_d05_a_failing_speech_model_is_reported_as_a_model_problem(make_ui):
 
 
 # ============================================================================ D-06 .. D-09, D-12, D-15
-def test_d07_settings_can_be_searched_and_jumped(make_ui):
+def test_d07_settings_can_be_searched_and_are_grouped(make_ui):
     ui = make_ui()
     page = ui.page("settings")
     search = ui.find("settings_search")
-    jump = ui.find("settings_jump")
-    assert search is not None and jump is not None
+    tabs = ui.find("settings_tabs")
+    assert search is not None and tabs is not None
     toggles = [w for w in page.findChildren(QAbstractButton) if w.objectName() == "settings_whisper_mode"]
     assert toggles
     search.setText("whisper")
@@ -162,6 +162,9 @@ def test_d07_settings_can_be_searched_and_jumped(make_ui):
     other = ui.find("settings_launch_at_login")
     assert not other.isVisibleTo(page), "a search must hide rows that do not match"
     search.setText("")
+    QApplication.processEvents()
+    assert not other.isVisibleTo(page) and not toggles[0].isVisibleTo(page), "back to the chosen group"
+    page.show_tab("system")
     QApplication.processEvents()
     assert other.isVisibleTo(page)
 

@@ -365,6 +365,14 @@ def time_backends(model: str = "nemo-parakeet-tdt-0.6b-v3", names=None, runs: in
     return results
 
 
+class PreviewUnavailable(RuntimeError):
+    """A live-preview call failed (or the model is not there): the caller switches the preview off for the session.
+    Unlike a failed dictation this never rebuilds the model on the CPU."""
+
+
+PAD_S = 0.15                       # silence added before and after the audio of every call (``transcribe`` too)
+
+
 class Transcriber:
     def __init__(self, model: str = "nemo-parakeet-tdt-0.6b-v3", device: str = "auto"):
         self.model_name = model
@@ -426,7 +434,7 @@ class Transcriber:
             return ""
         if float(np.max(np.abs(audio))) < 1e-4:
             return ""
-        pad = np.zeros(int(0.15 * SAMPLE_RATE), dtype=np.float32)
+        pad = np.zeros(int(PAD_S * SAMPLE_RATE), dtype=np.float32)
         audio = np.concatenate([pad, audio, pad])
         with self._lock:
             try:
@@ -440,3 +448,33 @@ class Transcriber:
                 res = self._model.recognize(audio, sample_rate=SAMPLE_RATE)
         text = res if isinstance(res, str) else getattr(res, "text", str(res))
         return text.strip()
+
+    def transcribe_timed(self, audio: np.ndarray, *, bucket_s: float = 0.0,
+                         blocking: bool = False) -> list[tuple[str, float]] | None:
+        """Words of ``audio`` with their start times in seconds from ``audio[0]``, for the live preview; ``None``
+        when the model is busy (``blocking=False``: a dictation's final pass or another call holds the lock, and a
+        preview never waits for it). Same guards and padding as ``transcribe``; ``bucket_s`` pads the end with
+        silence up to a multiple of that length, so the CUDA session sees a few input lengths again and again (a new
+        one costs 2-3x). Any failure is a ``PreviewUnavailable``: the model is not rebuilt on the CPU for it."""
+        from .stream import words_with_times
+
+        if self._model is None:
+            raise PreviewUnavailable("the speech model is not loaded")
+        audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+        if audio.size < MIN_SAMPLES or float(np.max(np.abs(audio))) < 1e-4:
+            return []
+        pad = np.zeros(int(PAD_S * SAMPLE_RATE), dtype=np.float32)
+        tail = pad
+        if bucket_s > 0:
+            step = int(bucket_s * SAMPLE_RATE)
+            tail = np.zeros(pad.size + (-(audio.size + 2 * pad.size)) % step, dtype=np.float32)
+        if not self._lock.acquire(blocking=blocking):
+            return None
+        try:
+            res = self._model.with_timestamps().recognize(np.concatenate([pad, audio, tail]),
+                                                          sample_rate=SAMPLE_RATE)
+            return words_with_times(res.tokens or [], [t - PAD_S for t in (res.timestamps or [])])
+        except Exception as e:  # noqa: BLE001
+            raise PreviewUnavailable(f"{type(e).__name__}") from e
+        finally:
+            self._lock.release()

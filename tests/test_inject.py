@@ -98,3 +98,16 @@ def test_empty_text_and_clipboard_failure_falls_back_to_typing():
     assert inj.inject("") is False and not keys.pasted
     clip.set_text = lambda t: None
     assert inj.inject("typed") is True and keys.typed == ["typed"]
+
+
+def test_modifiers_held_reports_the_keyboard_without_touching_the_clipboard():
+    inj, clip, keys = mk("keep", held=1)
+    assert inj.modifiers_held() is True
+    assert inj.modifiers_held() is False
+    assert clip.log == [] and keys.pasted == []
+
+
+def test_modifiers_held_is_false_when_the_keyboard_cannot_be_read():
+    inj, clip, keys = mk("keep")
+    keys.modifiers_down = lambda: (_ for _ in ()).throw(OSError("no keyboard"))
+    assert inj.modifiers_held() is False

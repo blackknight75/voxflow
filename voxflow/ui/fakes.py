@@ -429,7 +429,7 @@ _DEFAULTS = dict(
     double_tap_lock=True, cleanup_enabled=True, smart_formatting=True, auto_learn=True, language="auto",
     whisper_mode=False, mic_device=None, sounds_enabled=True, sound_volume=0.5, mute_media=False,
     launch_at_login=False, start_minimized=False, save_history=True, history_retention_days=0,
-    history_limit=5000, restore_clipboard=True, restore_delay_s=0.5, show_idle_pill=False, theme="system",
+    history_limit=5000, restore_clipboard=True, restore_delay_s=0.5, show_idle_pill=False, live_preview=True, phrase_streaming=False, theme="system",
     reduced_motion=False, overlay_position=None, ui_state={}, onboarding_done=False, sync_folder="",
     update_mode="notify", update_install_when="quit", update_time="03:00",
     asr_model="nemo-parakeet-tdt-0.6b-v3", asr_device="auto", cleanup_model=None, cleanup_device="auto",
@@ -481,6 +481,7 @@ class FakeController(QObject):
     """In-memory implementation of the Controller facade."""
 
     state_changed = Signal(str, str, str)
+    partial_text = Signal(str, str)            # live preview: (committed, tentative) words so far
     level_changed = Signal(float)
     transcript_ready = Signal(dict)
     history_changed = Signal()

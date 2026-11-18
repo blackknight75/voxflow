@@ -64,7 +64,8 @@ def test_every_documented_setting_can_be_set_through_the_controller(rig):
         "auto_learn": False, "language": "fr", "whisper_mode": True, "mic_device": "USB Mic", "sounds_enabled": False,
         "sound_volume": 0.8, "mute_media": True, "launch_at_login": True, "start_minimized": True,
         "save_history": False, "history_retention_days": 30, "history_limit": 100, "restore_clipboard": False,
-        "restore_delay_s": 1.5, "show_idle_pill": True, "theme": "light", "reduced_motion": True,
+        "restore_delay_s": 1.5, "show_idle_pill": True, "live_preview": False, "phrase_streaming": True, "theme": "light",
+        "reduced_motion": True,
         "overlay_position": [10, 20], "ui_state": {"page": "history"}, "onboarding_done": True,
         "asr_device": "cpu", "cleanup_device": "vulkan", "cleanup_timeout_s": 6.0, "command_timeout_s": 30.0,
         "min_record_s": 0.5, "max_record_s": 60.0, "update_mode": "off", "update_install_when": "time",
@@ -263,7 +264,8 @@ def test_stores_live_in_the_data_dir_and_stats_are_seeded_from_existing_history(
 # =========================================================================== status
 def test_status_priorities(rig):
     c = rig.c
-    assert c.status() == {"level": "ok", "title": "Ready", "detail": "Hold Ctrl + Win to dictate."}
+    assert c.status() == {"level": "ok", "title": "Ready", "detail": "Hold Ctrl + Win to dictate.",
+                          "live_preview_available": True}
     c._warnings["mic"] = "“Yeti” is not connected, so the system default microphone is being used."
     assert c.status()["level"] == "warning" and "Yeti" in c.status()["detail"]
     c._models["cleanup"]["state"] = "loading"
@@ -273,11 +275,13 @@ def test_status_priorities(rig):
     assert c.status()["detail"] == "Hold Ctrl + Win to dictate."
     c._models["asr"] = {"state": "downloading", "detail": "Downloading… 12 MB of 2,550 MB", "progress": 0.01, "backend": ""}
     assert c.status() == {"level": "loading", "title": "Downloading speech model…",
-                          "detail": "Downloading… 12 MB of 2,550 MB"}
+                          "detail": "Downloading… 12 MB of 2,550 MB",
+                          "live_preview_available": True}
     c.set_paused(True)
     assert c.status()["level"] == "paused"
     c._problems["mic"] = "No microphone found."
-    assert c.status() == {"level": "error", "title": "Microphone problem", "detail": "No microphone found."}
+    assert c.status() == {"level": "error", "title": "Microphone problem", "detail": "No microphone found.",
+                          "live_preview_available": True}
     c._problems["asr"] = "The speech model could not be loaded."
     assert c.status()["title"] == "Speech model unavailable"
     c._problems["hook"] = "The global shortcuts could not be registered."

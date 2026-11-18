@@ -103,6 +103,7 @@ hotkey to the paste for a clean sentence, **192 ms** when the language model is 
 | | |
 | --- | --- |
 | **Dictation** | Hold the hotkey to talk, release to paste. Double-tap to lock hands-free, tap again to finish. Esc cancels. |
+| **Live preview** | The words recognised so far appear above the Flow bar while you speak. A separate option, off by default, types each finished sentence into the app while you keep talking in hands-free mode (Settings > Dictation > While you speak). |
 | **Smart cleanup** | Removes "um" and "uh", fixes punctuation and capitals, resolves self-corrections ("at five, no wait, six"), understands "new line", "new paragraph", "bullet point". It never answers or obeys what you dictate. |
 | **Smart formatting** | Spoken numbers, money, percentages, dates, times, e-mail addresses, links, file names and numbered lists are written the way you would type them. |
 | **Command mode** | Hold **Alt + Win** and say what to do with the selected text ("make this more formal", "translate to Spanish", "turn into bullets"); the selection is replaced. With nothing selected it writes new text. |
@@ -229,6 +230,8 @@ is loaded, numbers are clamped to the range shown, and an unreadable file is kep
 | `restore_clipboard` | `true` | Put your previous clipboard back after pasting |
 | `restore_delay_s` | `0.5` | Wait after Ctrl+V before restoring (0.05..5); raise for slow apps |
 | `show_idle_pill` | `false` | Show the Flow bar while idle (off: it appears only while a hotkey is in use, on the screen you are working on) |
+| `live_preview` | `true` | Show the words recognised so far above the Flow bar while you speak |
+| `phrase_streaming` | `false` | Hands-free mode: paste each finished sentence while you keep talking (not synced between PCs) |
 | `theme` | `"system"` | `system`, `dark` or `light` |
 | `reduced_motion` | `false` | Turn off decorative animation |
 | `overlay_position` | `null` | Remembered Flow bar position `[x, y]`; `null` = bottom centre of the active screen |
@@ -355,7 +358,7 @@ language model change applies when VoxFlow restarts. `VOXFLOW_DEVICE` (see Troub
 
 * **Flow bar says "Loading / Downloading speech model":** first run downloads the models; progress is under
   Settings > On-device models. If it failed (no internet), connect once and press **Try again** there.
-* **"Speech model unavailable":** see `%APPDATA%\VoxFlow\logs\voxflow.log` (Settings > Support > Logs), then Try again.
+* **"Speech model unavailable":** see `%APPDATA%\VoxFlow\logs\voxflow.log` (Settings > System > Help and about > Logs), then Try again.
 * **Cleanup is slow or Settings shows the cleanup model as "Limited":** the language model is not loaded and
   only the rule-based cleanup runs (command mode is off). On a source install the llama.cpp libraries are
   usually missing: run `.venv\Scripts\python.exe -m voxflow.cleanup --install-cuda` and
@@ -379,7 +382,7 @@ language model change applies when VoxFlow restarts. `VOXFLOW_DEVICE` (see Troub
 * **Command mode says it needs the language model:** see "Limited" above.
 * **Other apps stayed muted after a crash:** start VoxFlow once; it restores them at start-up.
 * **Launch at login does nothing:** the install was moved; switch the setting off and on again.
-* **Reset everything:** Settings > Support > Reset (keeps your data), or quit VoxFlow and delete `%APPDATA%\VoxFlow`.
+* **Reset everything:** Settings > System > Help and about > Reset (keeps your data), or quit VoxFlow and delete `%APPDATA%\VoxFlow`.
 * **Debugging an installed copy:** `VoxFlow-console.exe` next to `VoxFlow.exe` is the same program with a
   console window (`VoxFlow-console.exe --selftest [clip.wav]`). `set VOXFLOW_DEVICE=cpu` before starting it
   forces the CPU path for both models; `cuda` forces the NVIDIA path, and `webgpu` or `vulkan` (the same thing)
@@ -392,7 +395,7 @@ language model change applies when VoxFlow restarts. `VOXFLOW_DEVICE` (see Troub
 * **Update:** run a newer installer; it updates the installed copy in place.
 * **Install details:** the installer is per-user (no administrator rights), installs to
   `%LOCALAPPDATA%\Programs\VoxFlow`, adds a Start menu entry and an optional desktop shortcut. *Launch at login*
-  is the app's own switch (Settings > General); the installer does not add a second one.
+  is the app's own switch (Settings > System > Startup); the installer does not add a second one.
 * **Uninstall:** Windows Settings > Apps, or the uninstaller in the install folder. It first asks a running
   VoxFlow to close (so what it has not saved yet is saved, and apps it muted get their sound back), then removes
   the program files, the *Launch at login* entry and the GPU kernel cache, nothing else. For a complete removal, also delete `%APPDATA%\VoxFlow` (settings, history, dictionary) and
