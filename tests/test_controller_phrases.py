@@ -287,8 +287,8 @@ def test_a_failed_paste_stops_streaming_and_the_tail_covers_the_rest(rig):
     rig.injector.outcomes = ["pasted", "copied"]                # the second chunk only reaches the clipboard
     send(rig, gen, ph("the first phrase", cut=1.0))
     pstream(rig).emit(gen, ph("the second phrase", cut=2.0))
-    rig.wait(lambda: rig.c._stream.stopped)
-    assert ("warning", "Couldn't type into the app, so the rest will be pasted when you stop.") in rig.spy.notices()
+    told = ("warning", "Couldn't type into the app, so the rest will be pasted when you stop.")
+    rig.wait(lambda: rig.c._stream.stopped and told in rig.spy.notices())
     pstream(rig).emit(gen, ph("the third phrase", cut=3.0))
     rig.settle(50)
     assert rig.injector.pasted == ["The first phrase."] and rig.injector.copied == [" The second phrase."]
@@ -314,7 +314,7 @@ def test_a_crash_inside_a_phrase_job_stops_streaming_without_failing_the_bar(rig
     gen = locked(rig)
     monkeypatch.setattr(rig.c, "_clean_phrase", lambda *a: (_ for _ in ()).throw(RuntimeError("boom")))
     pstream(rig).emit(gen, ph("the first phrase", cut=1.0))
-    rig.wait(lambda: rig.c._stream.stopped)
+    rig.wait(lambda: rig.c._stream.stopped and rig.spy.notices())
     assert rig.c.state == "locked" and rig.spy.notices()[-1][0] == "error"
     rig.stop_locked()
     rig.wait(lambda: rig.c.state == "done")
