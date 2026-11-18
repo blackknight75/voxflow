@@ -83,13 +83,25 @@ class LocalAgreement:
         hyp = [(w, t) for w, t in hyp if t > last_t - 1.0]          # keep a margin around the cut
         tail = [norm(w) for w, _ in self.committed[-5:]]
         heard_again = since is None or last_t >= since - 0.05
-        for n in range(min(5, len(hyp), len(tail)) if heard_again else 0, 0, -1):
-            for skip in range(0, min(3, len(hyp) - n) + 1):           # the n-gram may start a few words in
-                # it is the committed text heard again only if it ENDS about where the committed text ends: a word
-                # that starts clearly later is new, even when it repeats the last committed one
-                if hyp[skip + n - 1][1] <= last_t + REHEARD_S and [
-                        norm(w) for w, _ in hyp[skip:skip + n]] == tail[-n:]:
-                    return hyp[skip + n:]
+        for k in range(min(5, len(tail)) if heard_again else 0, 0, -1):
+            # the text is compared as joined normalised characters, not word by word: a later pass may split the same
+            # characters differently ("3.30" / "3 30" / "3:30"), and those words are not new
+            target = "".join(tail[-k:])
+            if not target:
+                continue
+            at = len(target) - len(tail[-1])                      # where the last committed word begins in ``target``
+            for skip in range(0, min(3, len(hyp) - 1) + 1):           # the run may start a few words in
+                acc, cover = "", skip
+                for j in range(skip, len(hyp)):
+                    if len(acc) <= at:
+                        cover = j                                 # the hyp word the last committed word starts in
+                    acc += norm(hyp[j][0])
+                    if len(acc) >= len(target):
+                        # it is the committed text heard again only if its last word STARTS about where the committed
+                        # one does: a word that starts clearly later is new, even when it repeats the last committed one
+                        if acc == target and hyp[cover][1] <= last_t + REHEARD_S:
+                            return hyp[j + 1:]
+                        break
         return [(w, t) for w, t in hyp if t > last_t + 0.08]
 
     def update(self, hyp: list[tuple[str, float]]) -> list[tuple[str, float]]:
