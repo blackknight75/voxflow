@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import dataclasses
 import re
+import threading
 from dataclasses import dataclass
 
 import numpy as np
@@ -212,35 +213,54 @@ def quiet_point(samples, t0: float, lo: float, hi: float, frame_s: float = 0.04)
 
 
 class PhraseStream:
-    """The part that lives on the preview thread: ``feed`` is the Previewer's ``on_words``."""
+    """The part that lives on the preview thread: ``feed`` is the Previewer's ``on_words``. ``begin``, ``end``, ``feed``
+    and ``heard`` are mutually exclusive (one lock), so a new session never receives words of the old one."""
 
     def __init__(self, recorder, on_phrase, *, splitter=None, frame_s=0.04):
         self._recorder, self._on_phrase, self._frame_s = recorder, on_phrase, frame_s
         self.splitter = splitter if splitter is not None else PhraseSplitter()
+        self._lock = threading.Lock()
         self._gen: int | None = None
         self._cut = 0.0
+        self._committed: list[tuple[str, float]] = []
+        self._tentative: list[tuple[str, float]] = []
+        self._covered = 0.0
 
     def begin(self, gen: int) -> None:
         """New session (UI thread)."""
-        self.splitter.reset()
-        self._cut = 0.0
-        self._gen = gen
+        with self._lock:
+            self.splitter.reset()
+            self._cut = self._covered = 0.0
+            self._committed, self._tentative = [], []
+            self._gen = gen
 
     def end(self) -> None:
-        """Forget the session: later ``feed`` calls are ignored."""
-        self._gen = None
+        """Forget the session: later ``feed`` calls are ignored. ``heard()`` stays valid until the next ``begin``."""
+        with self._lock:
+            self._gen = None
+
+    def heard(self) -> tuple[tuple[tuple[str, float], ...], float]:
+        """``(words, covered_s)``: every word the preview heard in this session in time order with its start time
+        (the committed ones, then the tentative words of the newest pass), and the audio time up to which a model
+        pass has looked (0.0 before the first)."""
+        with self._lock:
+            return tuple(self._committed) + tuple(self._tentative), self._covered
 
     def feed(self, gen, new_committed, tentative, now_s) -> None:
-        if self._gen is None or gen != self._gen:
-            return
-        if tentative is None:
-            found = self.splitter.tick(now_s)
-        else:
-            found = self.splitter.feed(new_committed, tentative[0][1] if tentative else None, now_s)
-        for ph in found:
-            cut = max(self._cut, self._refine(ph))
-            self._cut = cut
-            self._on_phrase(gen, dataclasses.replace(ph, cut_s=cut))
+        with self._lock:
+            if self._gen is None or gen != self._gen:
+                return
+            self._committed.extend((str(w), float(t)) for w, t in new_committed)
+            if tentative is None:
+                found = self.splitter.tick(now_s)
+            else:
+                self._tentative = [(str(w), float(t)) for w, t in tentative]
+                self._covered = max(self._covered, float(now_s))
+                found = self.splitter.feed(new_committed, tentative[0][1] if tentative else None, now_s)
+            for ph in found:
+                cut = max(self._cut, self._refine(ph))
+                self._cut = cut
+                self._on_phrase(gen, dataclasses.replace(ph, cut_s=cut))
 
     def _refine(self, ph: Phrase) -> float:
         try:
@@ -251,7 +271,12 @@ class PhraseStream:
 
 
 # ---------------------------------------------------------------------- text at the edges of a chunk
-def finish_chunk(prev: str, cleaned: str, raw: str, kind: str, ends_sentence: bool) -> str:
+def tail_hint(words, cut_s: float) -> str | None:
+    """The first heard word that starts at or after the cut (the first word of the tail), or None."""
+    return next((w for w, t in words if t >= cut_s - 0.05), None)
+
+
+def finish_chunk(prev: str, cleaned: str, raw: str, kind: str, ends_sentence: bool, hint: str | None = None) -> str:
     """The text to paste for a cleaned phrase (kind "sentence" | "pause" | "cap") or tail ("tail"), given everything
     pasted before it in this session (``prev``, '' for the first chunk)."""
     if not cleaned:
