@@ -237,6 +237,59 @@ def test_demo_cycle_files_sample_transcripts_for_its_first_three_rounds_only(qap
     assert len(added) == 3, "one sample per 'done' during the first three rounds, none afterwards"
 
 
+def test_demo_caption_grows_word_by_word_and_settles_at_the_end():
+    text = "one two three four five"
+    assert app.demo_caption(text, 0.0) == ("", "")
+    assert app.demo_caption(text, -1.0) == ("", ""), "a clock that went backwards shows nothing"
+    assert app.demo_caption(text, 1 / app.DEMO_WORDS_PER_S + 0.01) == ("", "one"), "the newest words are unsettled"
+    assert app.demo_caption(text, 4 / app.DEMO_WORDS_PER_S + 0.01) == ("one two", "three four")
+    assert app.demo_caption(text, 60.0) == (text, ""), "everything said: all of it settled"
+    assert set(app._DEMO_CAPTIONS) == {"dictate", "command"}
+    assert all(len(words.split()) > app.DEMO_TENTATIVE for words in app._DEMO_CAPTIONS.values())
+
+
+def test_demo_cycle_shows_a_scripted_live_caption_while_the_bar_listens(qapp, clean_process_state, monkeypatch):
+    from PySide6.QtWidgets import QApplication
+
+    from voxflow import controller as ctl
+    cycle = [("listening", "dictate", "", 0.12), ("locked", "dictate", "", 0.12), ("processing", "dictate", "", 0.06),
+             ("idle", "dictate", "", 0.02), ("locked", "command", "", 0.12), ("idle", "dictate", "", 0.02)]
+    monkeypatch.setattr(app, "_DEMO_CYCLE", cycle)
+    monkeypatch.setattr(app, "DEMO_CAPTION_MS", 10)
+    monkeypatch.setattr(app, "DEMO_WORDS_PER_S", 40.0)
+    log, states = [], []
+    real_state, real_preview = ctl.Controller.demo_set_state, ctl.Controller.demo_set_preview
+
+    def set_state(self, state, mode="dictate", message=""):
+        states.append(state)
+        log.append(("state", state))
+        real_state(self, state, mode, message)
+        if len(states) > len(cycle):
+            QApplication.instance().quit()
+
+    def set_preview(self, committed, tentative=""):
+        log.append(("caption", states[-1], f"{committed} {tentative}".strip()))
+        real_preview(self, committed, tentative)
+
+    monkeypatch.setattr(ctl.Controller, "demo_set_state", set_state)
+    monkeypatch.setattr(ctl.Controller, "demo_set_preview", set_preview)
+    quit_after(15000)                                             # safety net only
+    assert app.run_app(demo=True) == 0
+    captions = [entry for entry in log if entry[0] == "caption"]
+    assert {entry[1] for entry in captions} == {"listening", "locked"}, "never while processing or idle"
+    texts = [entry[2] for entry in captions if entry[2]]
+    first = [text for text in texts if app._DEMO_CAPTIONS["dictate"].startswith(text)]
+    later = [text for text in texts if app._DEMO_CAPTIONS["command"].startswith(text)]
+    assert first and later and texts == first + later, "each utterance shows its own words, in order"
+    assert [len(text) for text in first] == sorted(len(text) for text in first),         "locking after listening carries on with the same words, it does not start over"
+    assert any(entry[1] == "locked" and entry[2] in first for entry in captions), "it kept growing once locked"
+    from PySide6.QtTest import QTest
+    n = len(log)
+    qapp.processEvents()
+    QTest.qWait(60)
+    assert len(log) == n, "the caption timer is stopped when the demo ends"
+
+
 # =========================================================================== recorder helpers
 def test_recorder_helpers_tolerate_foreign_recorder_objects():
     class Odd:

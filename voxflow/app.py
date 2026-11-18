@@ -429,6 +429,25 @@ _DEMO_CYCLE = [
 ]
 
 
+# what the demo "says" while its Flow bar listens: the live-preview caption grows by DEMO_WORDS_PER_S, and the
+# newest DEMO_TENTATIVE words are still unsettled (dim), as with the real model
+_DEMO_CAPTIONS = {
+    "dictate": "so this is a demo of the live preview the words show up here while you are still talking",
+    "command": "make this paragraph shorter and a bit more friendly",
+}
+DEMO_WORDS_PER_S = 3.0
+DEMO_TENTATIVE = 2
+DEMO_CAPTION_MS = 250
+
+
+def demo_caption(text: str, elapsed_s: float) -> tuple[str, str]:
+    """(committed, tentative) of the scripted demo caption ``elapsed_s`` after the Flow bar began to listen."""
+    words = text.split()
+    shown = words[:max(0, min(len(words), int(elapsed_s * DEMO_WORDS_PER_S)))]
+    settled = len(shown) if len(shown) == len(words) else max(0, len(shown) - DEMO_TENTATIVE)
+    return " ".join(shown[:settled]), " ".join(shown[settled:])
+
+
 def _version() -> str:
     from . import __version__
     return __version__
@@ -610,10 +629,20 @@ def run_app(demo: bool = False, fake: bool = False, open_settings: bool = False,
 
     if demo:
         step_no = [0]
+        said = {"text": "", "t0": 0.0}
+        caption = QTimer(app)                  # one owned timer: stopped below, never fires after the loop ends
+        caption.setInterval(DEMO_CAPTION_MS)
+        caption.timeout.connect(
+            lambda: controller.demo_set_preview(*demo_caption(said["text"], time.perf_counter() - said["t0"])))
 
         def step() -> None:
             state, mode, message, seconds = _DEMO_CYCLE[step_no[0] % len(_DEMO_CYCLE)]
             controller.demo_set_state(state, mode, message)
+            if state not in ("listening", "locked"):
+                caption.stop()
+            elif not caption.isActive():       # a new utterance; "locked" after "listening" carries on with its words
+                said.update(text=_DEMO_CAPTIONS[mode], t0=time.perf_counter())
+                caption.start()
             if state == "done" and step_no[0] < 3 * len(_DEMO_CYCLE):
                 controller.demo_add_transcript()
             step_no[0] += 1
@@ -622,6 +651,8 @@ def run_app(demo: bool = False, fake: bool = False, open_settings: bool = False,
         QTimer.singleShot(600, step)
 
     code = app.exec()
+    if demo:
+        caption.stop()
     controller.shutdown()
     closer = getattr(ui, "close", None)
     if callable(closer):

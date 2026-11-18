@@ -477,3 +477,16 @@ def test_swapping_the_microphone_under_a_session_clears_the_caption(rig):
     rig.release()
     rig.wait(lambda: rig.c.state == "done")
     assert len(preview(rig).starts()) == 0
+
+
+def test_demo_caption_reaches_the_bar_only_in_the_demo_and_only_with_the_setting_on(rig):
+    rig.c.demo_set_preview("hello", "there")
+    assert rig.spy.of("partial_text") == [], "outside the demo this helper does nothing"
+    rig.c.is_demo = True
+    rig.c.demo_set_preview("hello", "there")
+    rig.c.demo_set_preview("hello there")
+    assert rig.spy.of("partial_text") == [("hello", "there"), ("hello there", "")]
+    rig.c.set("live_preview", False)
+    rig.spy.events.clear()
+    rig.c.demo_set_preview("more")
+    assert rig.spy.of("partial_text") == [], "the Settings toggle also governs the demo caption"

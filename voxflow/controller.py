@@ -1511,6 +1511,11 @@ class Controller(QObject):
         if state in ("done", "error"):
             self._idle_timer.stop()                    # screenshots decide when to move on
 
+    def demo_set_preview(self, committed: str, tentative: str = "") -> None:
+        """Demo helper: show a live-preview caption without recording anything (honours the setting)."""
+        if self.is_demo and self.config.live_preview:
+            self.partial_text.emit(committed, tentative)
+
     def demo_set_model(self, name: str, state: str, detail: str = "", progress: float | None = None,
                        backend: str = "") -> None:
         """Demo / screenshot helper: show a model in a given load state (download progress, failure ...)."""
