@@ -385,8 +385,8 @@ def test_an_unexpected_error_in_the_thread_switches_the_preview_off(caplog):
     p = Previewer(rec, Asr(Clock()), lambda *a: None, interval_s=0.01)
     with caplog.at_level(logging.INFO, logger="voxflow.stream"):
         p.start(1)
-        wait_for(lambda: not p.available)
-    assert "preview failed (OSError)" in caplog.text
+        wait_for(lambda: "preview failed (OSError)" in caplog.text)       # _disable sets the flag before it logs
+    assert not p.available
     p.close()
 
 
@@ -602,7 +602,7 @@ def test_an_unexpected_error_in_the_thread_clears_the_caption():
     rec.n = 0
     p.start(9)
     rec.n = 16000                                                      # one tick of new audio, then the device dies
-    wait_for(lambda: not p.available)
+    wait_for(lambda: not p.available and out and out[-1] == (9, "", ""))      # the caption is cleared after the flag
     assert out[0] == (9, "", "x y") and out[-1] == (9, "", "")
     p.close()
 
