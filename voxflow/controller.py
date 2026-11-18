@@ -358,6 +358,7 @@ class Controller(QObject):
         """(Re)build the previewer around the current recorder and speech model (both can be swapped)."""
         if self._preview is not None:
             self._preview.close()
+        self._preview_told = False
         self._preview = stream.Previewer(self._recorder, self._asr,
                                          lambda gen, committed, tentative: self._sig_partial.emit(gen, committed, tentative),
                                          gain=self._preview_gain)
@@ -365,8 +366,15 @@ class Controller(QObject):
     def _preview_on(self) -> bool:
         return self.config.live_preview and self._preview.available
 
+    def _note_preview(self) -> None:
+        """Say once, when the previewer first turns out to have given up, so Settings can update its text."""
+        if not self._preview_told and not self._preview.available:
+            self._preview_told = True
+            self._emit_status()
+
     def _on_partial(self, gen: int, committed: str, tentative: str) -> None:
         """A preview result on the UI thread: only the utterance that is still being recorded may show it."""
+        self._note_preview()
         if gen != self._gen or not self._active:
             return
         self.partial_text.emit(committed, tentative)
@@ -1607,6 +1615,7 @@ class Controller(QObject):
             return
         self._active = False
         self._preview.stop()                           # before the recorder: no new preview call after this
+        self._note_preview()
         self.listener.force_idle()
         try:
             if self._recorder.is_recording:
@@ -1622,6 +1631,7 @@ class Controller(QObject):
         self._active = False
         t_release = time.perf_counter()
         self._preview.stop()                           # before the recorder: no new preview call after the release
+        self._note_preview()
         self.muter.unmute()
         try:
             audio = self._recorder.stop()

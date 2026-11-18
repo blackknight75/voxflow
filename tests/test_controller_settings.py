@@ -264,7 +264,8 @@ def test_stores_live_in_the_data_dir_and_stats_are_seeded_from_existing_history(
 # =========================================================================== status
 def test_status_priorities(rig):
     c = rig.c
-    assert c.status() == {"level": "ok", "title": "Ready", "detail": "Hold Ctrl + Win to dictate."}
+    assert c.status() == {"level": "ok", "title": "Ready", "detail": "Hold Ctrl + Win to dictate.",
+                          "live_preview_available": True}
     c._warnings["mic"] = "“Yeti” is not connected, so the system default microphone is being used."
     assert c.status()["level"] == "warning" and "Yeti" in c.status()["detail"]
     c._models["cleanup"]["state"] = "loading"
@@ -274,11 +275,13 @@ def test_status_priorities(rig):
     assert c.status()["detail"] == "Hold Ctrl + Win to dictate."
     c._models["asr"] = {"state": "downloading", "detail": "Downloading… 12 MB of 2,550 MB", "progress": 0.01, "backend": ""}
     assert c.status() == {"level": "loading", "title": "Downloading speech model…",
-                          "detail": "Downloading… 12 MB of 2,550 MB"}
+                          "detail": "Downloading… 12 MB of 2,550 MB",
+                          "live_preview_available": True}
     c.set_paused(True)
     assert c.status()["level"] == "paused"
     c._problems["mic"] = "No microphone found."
-    assert c.status() == {"level": "error", "title": "Microphone problem", "detail": "No microphone found."}
+    assert c.status() == {"level": "error", "title": "Microphone problem", "detail": "No microphone found.",
+                          "live_preview_available": True}
     c._problems["asr"] = "The speech model could not be loaded."
     assert c.status()["title"] == "Speech model unavailable"
     c._problems["hook"] = "The global shortcuts could not be registered."

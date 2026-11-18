@@ -258,7 +258,8 @@ def test_dictating_before_the_speech_model_is_ready(tmp_path, qtbot, monkeypatch
         rig.c.start()
         rig.wait(lambda: rig.c.model_status("asr")["state"] == "loading")
         assert rig.c.status() == {"level": "loading", "title": "Loading speech model…",
-                                  "detail": "Loading the speech model…"}
+                                  "detail": "Loading the speech model…",
+                                  "live_preview_available": True}
         rig.press()
         assert (rig.c.state, rig.c.message) == ("error", "Speech model still loading…")
         assert rig.rec.starts == 0

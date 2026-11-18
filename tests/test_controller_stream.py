@@ -401,3 +401,58 @@ def test_the_fake_models_run_with_the_real_previewer(tmp_path, qtbot, monkeypatc
         assert r.injector.pasted == ["Hello there world."]
     finally:
         r.close()
+
+
+# =========================================================================== the previewer gave up (round 2)
+def test_status_is_announced_once_when_the_previewer_is_seen_to_have_given_up(rig):
+    p = preview(rig)
+    rig.pause()
+    rig.press()
+    rig.spy.clear()
+    p.available = False
+    p.emit(rig.c._gen, "", "")                                   # its clear when it disables itself
+    rig.release()
+    rig.wait(lambda: rig.c.state == "done")
+    statuses = [a[0] for a in rig.spy.of("status_changed") if a[0].get("live_preview_available") is False]
+    assert len(statuses) == 1, "once, however many times it is observed afterwards"
+    rig.pause()
+    rig.press()
+    rig.keys((ESC, True), (ESC, False))                          # observed again on the cancel path
+    assert len([a for a in rig.spy.of("status_changed") if a[0].get("live_preview_available") is False]) == 1
+
+
+def test_status_is_announced_from_the_release_and_cancel_paths(rig):
+    p = preview(rig)
+    rig.pause()
+    rig.press()
+    p.available = False
+    rig.spy.clear()
+    rig.keys((ESC, True), (ESC, False))
+    assert [a[0]["live_preview_available"] for a in rig.spy.of("status_changed")] == [False]
+    rig.release()
+    rig.c._build_preview()                                       # a rebuilt previewer is told afresh
+    p2 = preview(rig)
+    rig.pause()
+    rig.press()
+    p2.available = False
+    rig.spy.clear()
+    rig.release()
+    assert [a[0]["live_preview_available"] for a in rig.spy.of("status_changed")] == [False]
+    rig.wait(lambda: rig.c.state == "done")
+
+
+def test_the_disable_clear_of_the_real_previewer_reaches_the_caption(real):
+    from voxflow import asr
+    real.asr.partials = [["hello"], ["hello", "world"]]
+    real.pause()
+    real.press()
+    grow(real, 1.0)
+    real.wait(lambda: real.spy.of("partial_text"))
+    real.asr.fail_timed = asr.PreviewUnavailable("gone")
+    grow(real, 1.0)
+    real.wait(lambda: not real.c._preview.available)
+    real.wait(lambda: real.spy.of("partial_text")[-1] == ("", ""))
+    real.wait(lambda: [a for a in real.spy.of("status_changed") if a[0].get("live_preview_available") is False])
+    real.release()
+    real.wait(lambda: real.c.state == "done")
+    assert real.injector.pasted == ["Hello world."]
