@@ -456,3 +456,24 @@ def test_the_disable_clear_of_the_real_previewer_reaches_the_caption(real):
     real.release()
     real.wait(lambda: real.c.state == "done")
     assert real.injector.pasted == ["Hello world."]
+
+
+# =========================================================================== round 3
+def test_a_result_queued_before_the_setting_was_switched_off_does_not_bring_the_caption_back(rig):
+    rig.pause()
+    rig.press()
+    gen = rig.c._gen
+    rig.c.set("live_preview", False)
+    rig.c._on_partial(gen, "queued earlier", "")                # already in the Qt queue when it was switched off
+    assert partials(rig) == [("", "")]
+
+
+def test_swapping_the_microphone_under_a_session_clears_the_caption(rig):
+    rig.pause()
+    rig.press()
+    preview(rig).emit(rig.c._gen, "so far")
+    rig.c._apply("mic_device", "Other Mic")                     # rebuilds the previewer; the new one has no session
+    assert partials(rig)[-1] == ("", "")
+    rig.release()
+    rig.wait(lambda: rig.c.state == "done")
+    assert len(preview(rig).starts()) == 0

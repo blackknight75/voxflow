@@ -359,6 +359,8 @@ class Controller(QObject):
         if self._preview is not None:
             self._preview.close()
         self._preview_told = False
+        if self._active:                               # a swap under a running session: its caption must not freeze
+            self.partial_text.emit("", "")
         self._preview = stream.Previewer(self._recorder, self._asr,
                                          lambda gen, committed, tentative: self._sig_partial.emit(gen, committed, tentative),
                                          gain=self._preview_gain)
@@ -375,7 +377,7 @@ class Controller(QObject):
     def _on_partial(self, gen: int, committed: str, tentative: str) -> None:
         """A preview result on the UI thread: only the utterance that is still being recorded may show it."""
         self._note_preview()
-        if gen != self._gen or not self._active:
+        if not self.config.live_preview or gen != self._gen or not self._active:
             return
         self.partial_text.emit(committed, tentative)
 
