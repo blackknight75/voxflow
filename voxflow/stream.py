@@ -108,8 +108,9 @@ class Previewer:
     a GPU keeps a 15 s window and reuses 1 s input lengths, the CPU a 8 s window and exact lengths."""
 
     def __init__(self, recorder, transcriber, on_partial, *, interval_s: float = 0.4, trim_s: float | None = None,
-                 bucket_s: float | None = None, gain=None, clock=time.perf_counter):
+                 bucket_s: float | None = None, gain=None, clock=time.perf_counter, on_words=None):
         self._recorder, self._transcriber, self._on_partial = recorder, transcriber, on_partial
+        self._on_words = on_words
         self.interval_s = float(interval_s)
         self._trim_arg, self._bucket_arg, self._gain, self._clock = trim_s, bucket_s, gain, clock
         self._cv = threading.Condition()
