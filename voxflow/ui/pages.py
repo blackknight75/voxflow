@@ -1622,6 +1622,8 @@ class SettingsPage(Page):
                                                                 "on while Windows' Animation effects are off."))
         sec.add(self._toggle("show_idle_pill", "Show the Flow bar when idle",
                              "Keeps a small pill on screen so you know VoxFlow is ready."))
+        sec.add(self._toggle("live_preview", "Live preview", "Show the words in the Flow bar while you speak. The "
+                                                             "pasted text is still tidied up after you release the key."))
         pos_box = QWidget()
         pl = QHBoxLayout(pos_box)
         pl.setContentsMargins(0, 0, 0, 0)

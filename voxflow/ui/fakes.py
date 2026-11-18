@@ -481,6 +481,7 @@ class FakeController(QObject):
     """In-memory implementation of the Controller facade."""
 
     state_changed = Signal(str, str, str)
+    partial_text = Signal(str, str)            # live preview: (committed, tentative) words so far
     level_changed = Signal(float)
     transcript_ready = Signal(dict)
     history_changed = Signal()

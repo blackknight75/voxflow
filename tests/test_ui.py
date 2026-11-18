@@ -739,7 +739,7 @@ def test_u14_an_app_the_user_added_can_be_removed_again(ui):
 # =========================================================================== Settings
 TOGGLES = ("double_tap_lock", "whisper_mode", "cleanup_enabled", "smart_formatting", "auto_learn", "sounds_enabled",
            "mute_media", "reduced_motion", "show_idle_pill", "save_history", "restore_clipboard", "launch_at_login",
-           "start_minimized")
+           "start_minimized", "live_preview")
 
 
 @pytest.mark.parametrize("key", TOGGLES)
