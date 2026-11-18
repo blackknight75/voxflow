@@ -102,3 +102,24 @@ def test_words_without_characters_are_never_matched_and_fall_back_to_the_time_cu
     la = LocalAgreement()
     la.committed = [("-", 1.0)]
     assert la.new_part([("-", 1.0), ("x", 1.2)]) == [("x", 1.2)]
+
+
+def test_committed_three_then_heard_as_three_dot_thirty_adds_only_the_rest():
+    """The traced bench run that typed "... at 3 3.30 in the afternoon.": "3" was committed (the window ended there), the
+    next pass heard the one word "3.30"."""
+    passes = [words("we meet at 3"), words("we meet at 3"), words("we meet at 3.30 in the room")]
+    out, la = run(passes)
+    assert out[:5] == ["we", "meet", "at", "3", "30"] and digits(out) == "330" and out[5:] == ["in", "the", "room"]
+    # the same with a colon, and when the committed text ends inside a longer run
+    out, _ = run([words("see you at 3"), words("see you at 3"), words("see you at 3:30 sharp")])
+    assert out == ["see", "you", "at", "3", "30", "sharp"]
+
+
+def test_a_word_that_merely_starts_with_the_committed_one_is_not_split():
+    # "the" committed, now heard as "there": a different word, not a re-tokenisation: nothing is invented
+    la = LocalAgreement()
+    la.committed = [("say", 0.5), ("the", 1.0)]
+    assert la.new_part([("say", 0.5), ("there", 1.0), ("now", 1.4)]) == [("now", 1.4)]
+    assert ("re", 1.0) not in la.new_part([("say", 0.5), ("there", 1.0), ("now", 1.4)])
+    la.committed = [("at", 0.5), ("3", 1.0)]
+    assert la.new_part([("at", 0.5), ("3.", 1.0)]) == []                   # nothing after the separator: nothing new

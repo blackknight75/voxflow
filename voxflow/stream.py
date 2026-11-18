@@ -18,6 +18,7 @@ try-locked, and a governor keeps the cost of a preview call small and backs off 
 """
 from __future__ import annotations
 
+import itertools
 import logging
 import re
 import threading
@@ -64,6 +65,15 @@ def words_with_times(tokens, stamps) -> list[tuple[str, float]]:
     return [(w, t) for w, t in out if w]
 
 
+def _after_chars(word: str, n: int) -> str:
+    """What follows the first ``n`` normalised characters of ``word`` when that is a separator and more text ("3.30" after
+    1 character: "30"); "" when the ``n`` characters end inside a word or at its end."""
+    ends = list(itertools.accumulate(len(norm(c)) for c in word))
+    i = next((k for k, v in enumerate(ends) if v >= n), len(word) - 1)
+    rest = word[i + 1:]
+    return re.sub(r"^[^\w']+", "", rest) if rest[:1] and not re.match(r"[\w']", rest[0]) else ""
+
+
 class LocalAgreement:
     """Commit the longest prefix on which the last two hypotheses agree (after what is already committed)."""
 
@@ -99,8 +109,12 @@ class LocalAgreement:
                     if len(acc) >= len(target):
                         # it is the committed text heard again only if its last word STARTS about where the committed
                         # one does: a word that starts clearly later is new, even when it repeats the last committed one
-                        if acc == target and hyp[cover][1] <= last_t + REHEARD_S:
-                            return hyp[j + 1:]
+                        if hyp[cover][1] <= last_t + REHEARD_S:
+                            if acc == target:
+                                return hyp[j + 1:]
+                            rest = _after_chars(hyp[j][0], len(target) - (len(acc) - len(norm(hyp[j][0]))))
+                            if acc.startswith(target) and rest:
+                                return [(rest, hyp[j][1])] + hyp[j + 1:]      # "3" committed, now heard as "3.30"
                         break
         return [(w, t) for w, t in hyp if t > last_t + 0.08]
 
