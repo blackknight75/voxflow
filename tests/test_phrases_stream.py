@@ -73,12 +73,12 @@ def test_a_tick_without_a_pass_is_reported_as_time_only():
     assert r.got[-1][2] == []                                                       # a pass (no words): tentative []
     r.tick(1.0)
     assert r.got[-1] == (1, [], None, pytest.approx(2.0))                           # skipped silence: time only
-    # backing off (peak measured, not risen): the time moves
+    # backing off: the audio was only peak-checked, not transcribed, so time does not move
     r = rig([words("hi")])
     r.begin()
     r.p._hold_until, r.p._ref_peak = r.clock.t + 100, 0.1
     r.tick(1.0)
-    assert r.got == [(1, [], None, pytest.approx(1.0))] and r.asr.calls == []
+    assert r.got == [(1, [], None, 0.0)] and r.asr.calls == []
 
 
 def test_time_only_ticks_never_report_audio_that_was_not_examined():
@@ -207,7 +207,9 @@ def test_feed_without_tentative_words_and_time_only_ticks():
     ps.begin(1)
     ps.feed(1, SENTENCE[:3], [], 2.2)                                               # no tentative: [] -> start None
     assert out == []
-    ps.feed(1, [], None, 3.0)                                                       # time only: the pause is heard
+    ps.feed(1, [], None, 3.0)                                                       # 0.45 s: a "." not yet confirmed
+    assert out == []
+    ps.feed(1, [], None, 4.5)                                                       # time only: 1.95 s of silence
     assert [p.text for _, p in out] == ["we met today."]
     ps.feed(1, [], None, 9.0)
     assert len(out) == 1
@@ -304,3 +306,43 @@ def test_a_busy_model_never_lets_the_chain_cut_into_unseen_speech():
     r.asr.busy = False
     r.tick(0.0)                                                                     # looked at: it agrees with pass 1
     assert [p.text for p in out] == ["we met today"] and all(p.cut_hi <= r.rec.n / SR for p in out)
+
+
+def test_heard_gives_every_word_in_time_order_and_the_covered_time_and_outlives_end():
+    ps, rec, out = stream_rig()
+    assert ps.heard() == ((), 0.0)
+    ps.begin(1)
+    assert ps.heard() == ((), 0.0)
+    ps.feed(1, [("we", 1.0), ("met", 1.5)], [("today", 2.0)], 2.6)
+    assert ps.heard() == ((("we", 1.0), ("met", 1.5), ("today", 2.0)), 2.6)
+    ps.feed(1, [("today", 2.0)], [("then", 3.0)], 3.4)                        # the tentative words are replaced
+    assert ps.heard() == ((("we", 1.0), ("met", 1.5), ("today", 2.0), ("then", 3.0)), 3.4)
+    ps.feed(1, [], None, 9.0)                                                  # time only: nothing was looked at
+    assert ps.heard()[1] == 3.4
+    ps.feed(2, [("x", 9.0)], [], 9.5)                                          # another gen: ignored
+    assert len(ps.heard()[0]) == 4
+    ps.end()
+    assert ps.heard()[1] == 3.4 and len(ps.heard()[0]) == 4                    # still valid after end()
+    ps.begin(2)
+    assert ps.heard() == ((), 0.0)
+
+
+def test_tail_hint_is_the_first_word_at_or_after_the_cut():
+    heard = (("we", 1.0), ("met", 1.5), ("today", 2.0), ("then", 3.0))
+    assert ph.tail_hint(heard, 2.5) == "then"
+    assert ph.tail_hint(heard, 1.96) == "today"                                # 50 ms of slack before the cut
+    assert ph.tail_hint(heard, 3.5) is None and ph.tail_hint((), 0.0) is None
+
+
+def test_begin_end_feed_heard_exclude_each_other():
+    ps, rec, out = stream_rig()
+    ps.begin(1)
+    seen = []
+
+    def on_phrase(g, p):
+        got = ps._lock.acquire(blocking=False)                                  # the lock is held while phrases go out
+        seen.append(got)
+
+    ps._on_phrase = on_phrase
+    ps.feed(1, SENTENCE[:3], [], 9.0)
+    assert seen == [False]

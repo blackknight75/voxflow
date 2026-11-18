@@ -26,28 +26,48 @@ def feed_all(sp, words, tent=None, now=None):
 
 
 # ---------------------------------------------------------------------- sentence ends
-def test_sentence_end_waits_for_a_later_word_or_a_pause():
+def test_sentence_end_is_confirmed_by_a_later_word_not_by_a_short_pause():
     sp = ph.PhraseSplitter()
     ws = spaced(["we", "met", "today."])
-    # the sentence end is the newest word: the model may still change its punctuation, and no pause is heard yet
+    # the "." is on the newest word: Parakeet ends every hypothesis with one, so it proves nothing yet
     assert sp.feed(ws, None, ws[-1][1] + 0.5) == []
-    assert sp.tick(ws[-1][1] + 0.7) == []                       # 0.7 - est 0.5 = 0.2 s of silence < 0.35
-    out = sp.tick(ws[-1][1] + 1.2)                              # silence 0.7 s >= SENT_PAUSE_S
+    assert sp.tick(ws[-1][1] + 1.0) == []
+    assert sp.tick(ws[-1][1] + 1.3) == []                       # 0.8 s >= PAUSE_S: still no cut after an unconfirmed "."
+    out = sp.tick(ws[-1][1] + 2.2)                              # 1.65 s >= LONG_PAUSE_S: now it is a sentence end
     assert [p.text for p in out] == ["we met today."] and out[0].kind == "sentence" and out[0].ends_sentence
-    # a later committed word confirms it at once
+    # a later committed word that does not start lower-case confirms it at once
     sp2 = ph.PhraseSplitter()
     out = sp2.feed(spaced(["we", "met", "today.", "Then"]), None, 4.3)
     assert [p.text for p in out] == ["we met today."] and sp2.pending == (("Then", 4.0),)
 
 
+def test_a_full_stop_before_a_lower_case_word_is_not_a_sentence_end_and_is_dropped_from_the_text():
+    # the bench's real case: the single pass ended "afternoon." and the next pass went on with "and"
+    ws = [("Please", 1.0), ("schedule", 1.4), ("the", 1.8), ("meeting", 2.0), ("in", 2.6), ("the", 2.8),
+          ("afternoon.", 3.0), ("and", 3.6), ("send", 4.6), ("it", 4.9)]
+    out = ph.PhraseSplitter().feed(ws, None, 5.0)
+    assert all("afternoon." not in p.text for p in out)                       # never split at "afternoon." with the "."
+    # a pause boundary right after it (the next word is late): allowed, and the text carries no "."
+    ws2 = [("Please", 1.0), ("schedule", 1.4), ("the", 1.8), ("afternoon.", 2.0), ("and", 4.0), ("go", 4.3)]
+    out = ph.PhraseSplitter().feed(ws2, None, 4.6)
+    assert [p.text for p in out] == ["Please schedule the afternoon"] and out[0].kind == "pause"
+    assert out[0].words[-1] == ("afternoon.", 2.0) and not out[0].ends_sentence
+    # inside a phrase too, and "?" is kept
+    ws3 = [("a", 1.0), ("bb.", 1.3), ("c", 1.6), ("d?", 1.9), ("e", 2.2), ("f", 5.0)]
+    out = ph.PhraseSplitter().feed(ws3, None, 5.2)
+    assert out[0].text == "a bb c d? e"
+
+
 def test_abbreviations_initials_decimals_are_not_sentence_ends():
-    for word in ["Dr.", "Mr.", "e.g.", "i.e.", "J.", "vs.", "No.", "Inc.", "3.30", "wait...", "now,", "x:"]:
+    for word in ["Dr.", "Mr.", "J.", "vs.", "Inc.", "3.30", "wait...", "now,", "x:"]:
         assert not ph._terminal(word, "Then"), word
-    for word in ["done.", "done!", "done?", "done…", 'done."', "done.)", "3.30."]:
+    for word in ["done.", "done!", "done?", "done…", 'done."', "done.)", "No."]:
         assert ph._terminal(word, None), word
-    # a.m. / p.m. / etc. end a sentence only before a capitalised word
-    assert ph._terminal("a.m.", "Then") and not ph._terminal("a.m.", "then") and not ph._terminal("a.m.", None)
-    assert ph._terminal("etc.", "We") and not ph._terminal("etc.", "we")
+    assert ph._terminal("No.", "Then") and not ph._terminal("done.", "then") and not ph._terminal("done!", "then")
+    # soft ones: a sentence end only before a capitalised word
+    for word in ["a.m.", "p.m.", "etc.", "bzw.", "usw.", "ca.", "nr.", "evtl.", "13.", "z.B.", "U.S.", "e.g.", "i.e.", "3.30."]:
+        assert ph._terminal(word, "Then"), word
+        assert not ph._terminal(word, "then") and not ph._terminal(word, None), word
     sp = ph.PhraseSplitter()
     out = sp.feed(spaced(["see", "Dr.", "Smith", "now"]), None, 5.0)
     assert out == []                                            # no boundary: nothing ends a sentence, no pause
@@ -211,27 +231,39 @@ def test_property_no_word_is_lost_or_repeated():
     rnd = random.Random(7)
     for _ in range(2000):
         sp = ph.PhraseSplitter(max_words=rnd.choice([5, 25]), max_span_s=rnd.choice([4.0, 10.0]))
-        t, now, committed, emitted, last_cut = 0.5, 0.0, [], [], 0.0
+        t, now, floor, committed, emitted, last_cut, tent = 0.5, 0.0, 0.0, [], [], 0.0, None
         for _step in range(rnd.randint(1, 12)):
             new = []
             for _ in range(rnd.randint(0, 4)):
-                t += rnd.choice([0.05, 0.2, 0.4, 0.9, 1.8])
+                # a committed word never starts before time already reported with no tentative word before it
+                t = max(t, floor) + rnd.choice([0.05, 0.2, 0.4, 0.9, 1.8])
                 w = "".join(rnd.choice("abcdefgh") for _ in range(rnd.randint(1, 9)))
-                w = rnd.choice([w, w + ",", w + ".", w + "?", "Dr.", w + "..."])
+                w = rnd.choice([w, w + ",", w + ".", w + "?", "Dr.", w + "...", w.capitalize() + "."])
                 new.append((w, t))
             committed += new
             now = max(now, t + rnd.choice([0.0, 0.3, 1.0, 3.0]))
-            tent = rnd.choice([None, now, t + 0.1])
-            out = sp.tick(now) if rnd.random() < 0.3 and not new else sp.feed(new, tent, now)
+            tick = rnd.random() < 0.3 and not new
+            if not tick:
+                tent = rnd.choice([None, now, t + 0.1])         # a tick reuses the last tentative start
+            if tent is None or tent >= now - 0.05:
+                floor = now
+            out = sp.tick(now) if tick else sp.feed(new, tent, now)
             for p in out:
                 assert p.cut_lo - 1e-9 <= p.cut_s <= p.cut_hi + 1e-9 and p.cut_s >= last_cut
                 assert p.cut_lo >= max(ph.end_est(*p.words[-1]), 0.0) - 1e-9
+                if emitted:                  # the tail starts at the cut: every later word starts at or after it
+                    assert all(tw >= emitted[-1].cut_s for _, tw in p.words)
                 last_cut = p.cut_s
                 emitted.append(p)
+        for p in sp.pending:
+            assert not emitted or p[1] >= emitted[-1].cut_s
         got = [w for p in emitted for w in p.words] + list(sp.pending)
         assert got == committed
         assert [p.seq for p in emitted] == list(range(1, len(emitted) + 1))
-        assert all(p.words and p.text == " ".join(w for w, _ in p.words) for p in emitted)
+        for p in emitted:
+            tw = p.text.split(" ")
+            assert p.words and len(tw) == len(p.words)
+            assert all(a == b or (b.endswith(".") and a == b[:-1]) for a, (b, _) in zip(tw, p.words))
 
 
 # ---------------------------------------------------------------------- quiet point
@@ -267,8 +299,8 @@ def test_quiet_point_is_clamped_to_the_window():
 
 
 # ---------------------------------------------------------------------- finish_chunk
-def fc(prev, cleaned, raw=None, kind="sentence", ends=True):
-    return ph.finish_chunk(prev, cleaned, cleaned if raw is None else raw, kind, ends)
+def fc(prev, cleaned, raw=None, kind="sentence", ends=True, **kw):
+    return ph.finish_chunk(prev, cleaned, cleaned if raw is None else raw, kind, ends, **kw)
 
 
 def test_finish_chunk_spacing():
@@ -296,19 +328,42 @@ def test_finish_chunk_strips_an_added_period_for_pause_and_cap_only():
     assert fc("", "We met", "we met", "pause", False) == "We met"
 
 
-def test_finish_chunk_lowercases_by_the_asr_evidence():
+def test_finish_chunk_lowercases_a_phrase_by_the_asr_evidence():
     prev = "so we went to"
     assert fc(prev, "The shop.", "the shop", "pause", False) == " the shop"             # the / The lowered
-    assert fc(prev, "Berlin.", "Berlin", "tail") == " Berlin."                          # raw capitalised: kept
-    assert fc(prev, "I think.", "I think", "tail") == " I think."                       # raw "I": kept
+    assert fc(prev, "Berlin.", "Berlin", "sentence") == " Berlin."                      # raw capitalised: kept
+    assert fc(prev, "I think.", "I think", "sentence") == " I think."                        # raw "I": kept
     assert fc(prev, "The shop", "um so the shop", "sentence") == " the shop"            # filler in front, raw word "the"
-    assert fc(prev, "NASA said", "nasa said", "tail") == " NASA said"                   # all caps kept
-    assert fc(prev, "Hello", "something else", "tail") == " Hello"                      # no match: kept
-    assert fc(prev, "The, shop", "the shop", "tail") == " the, shop"
-    assert fc(prev, "Der Hund", "der Hund", "tail") == " der Hund"
-    assert fc(prev, "A shop", "a shop", "tail") == " a shop"
-    assert fc(prev, "42 shops", "42 shops", "tail") == " 42 shops"                      # not a letter: untouched
+    assert fc(prev, "NASA said", "nasa said", "sentence") == " NASA said"               # all caps kept
+    assert fc(prev, "Hello", "something else", "pause") == " Hello"                     # no match: kept
+    assert fc(prev, "The, shop", "the shop", "pause") == " the, shop"
+    assert fc(prev, "Der Hund", "der Hund", "cap") == " der Hund"
+    assert fc(prev, "A shop", "a shop", "pause") == " a shop"
+    assert fc(prev, "42 shops", "42 shops", "pause") == " 42 shops"                     # not a letter: untouched
+    assert fc(prev, "the shop", "the shop", "pause") == " the shop"                     # already lower: untouched
+
+
+def test_finish_chunk_tail_raw_casing_is_no_evidence_the_hint_is():
+    prev = "Please schedule the meeting for Thursday in the afternoon"
+    # the model capitalises the first word of every utterance: "And send ..." is "and send ..." mid-sentence
+    assert fc(prev, "And send the report.", "And send the report.", "tail") == " and send the report."
+    assert fc("So we went to the store", "And then we left.", "And then we left.", "tail") == " and then we left."
+    # with the word the preview heard at that place as a hint
+    assert fc(prev, "And send it.", "And send it.", "tail", hint="and") == " and send it."
+    assert fc(prev, "Berlin is big.", "Berlin is big.", "tail", hint="Berlin") == " Berlin is big."
+    assert fc(prev, "Berlin, is big.", "Berlin is big.", "tail", hint="berlin") == " berlin, is big."
+    # a hint that does not match the tail's first word is ignored: the fallback rules apply
+    assert fc(prev, "And send it.", "And send it.", "tail", hint="send") == " and send it."
+    # fallback keeps I, I'm, all caps, words with digits
+    for first in ["I think so.", "I'm done.", "I\u2019ll go.", "NASA said so.", "B2B sales rose.", "A."]:
+        out = fc(prev, first, first, "tail")
+        want = first if first.split()[0] in ("I", "I'm", "I\u2019ll", "NASA", "B2B") else first[0].lower() + first[1:]
+        assert out == " " + want, first
+    assert fc(prev, "42 shops", "42 shops", "tail") == " 42 shops"
     assert fc(prev, "the shop", "the shop", "tail") == " the shop"                      # already lower: untouched
+    # no lowering at the start of the session or after a sentence end
+    assert fc("", "And so.", "And so.", "tail") == "And so."
+    assert fc("It is done.", "And so.", "And so.", "tail") == " And so."
 
 
 def test_finish_chunk_keeps_the_capital_after_a_sentence_end_or_a_line_or_nothing():

@@ -278,7 +278,7 @@ class Previewer:
                 return session, gen, n
             risen = peak >= RISE_FACTOR * max(self._ref_peak, SILENCE_PEAK)
             if t_call < self._hold_until and not risen:
-                return session, gen, n                       # backing off: the audio stays "new" for the next look
+                return session, gen, last_n                  # backing off: the audio stays "new" for the next look
             if risen:
                 self._empty = 0
             self._silent_prev = silent

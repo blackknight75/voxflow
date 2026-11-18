@@ -24,8 +24,7 @@ from .stream import norm
 
 SAMPLE_RATE = 16000
 PAUSE_S = 0.6           # silence (estimated) after a word that ends a phrase on a pause
-SENT_PAUSE_S = 0.35     # silence after a word that ends a sentence, when no later word is committed yet
-LONG_PAUSE_S = 1.5      # a silence this long ends the phrase whatever its length
+LONG_PAUSE_S = 1.5      # a silence this long ends the phrase whatever its length, and confirms a trailing "."
 MIN_WORDS = 3           # shortest phrase emitted (except after LONG_PAUSE_S)
 MAX_WORDS = 25          # length cap, words
 MAX_SPAN_S = 10.0       # length cap, audio seconds (first word start .. last word start)
@@ -37,8 +36,9 @@ END_MAX_S = 0.9
 _CAP_SCAN = 8           # a length cap looks back at most this many words for a place to cut
 _TENTATIVE_SLACK_S = 0.05
 
-_ABBREVIATIONS = frozenset("mr mrs ms dr prof sr jr st vs e.g i.e cf fig no approx inc ltd co".split())
-_SOFT_ABBREVIATIONS = frozenset({"a.m", "p.m", "etc"})   # end a sentence only before a capitalised word
+_ABBREVIATIONS = frozenset("mr mrs ms dr prof sr jr st vs cf fig approx inc ltd co".split())   # never end a sentence
+# these end a sentence only before a capitalised word: "a.m.", "etc.", "bzw.", "13.", "z.B.", "U.S.", "e.g."
+_SOFT_ABBREVIATIONS = frozenset("a.m p.m etc bzw usw ca nr evtl".split())
 _CLOSERS = "\"')]}"
 _NO_SPACE_BEFORE = (" ", "\n", "\r", ",", ".", ";", ":", "!", "?", ")", "]", "}", "%")
 
@@ -61,27 +61,40 @@ def end_est(word: str, start: float) -> float:
 
 
 def _terminal(word: str, later: str | None) -> bool:
-    """Does ``word`` end a sentence? ``later``: the next committed word, None when there is none yet."""
+    """Does ``word`` end a sentence? ``later``: the next committed word, None when there is none yet. A word followed
+    by a lower-case word does not (a "." the model wrote at the end of one hypothesis proves nothing); abbreviations,
+    ordinals and dotted tokens end one only before a capitalised word."""
     w = word.rstrip(_CLOSERS)
     if w.endswith("..."):
         return False                                   # a trailing pause, not an end
     if not w.endswith((".", "!", "?", "…")):
         return False
+    if later is not None and later[:1].islower():
+        return False
     if w.endswith("."):
         stem = w[:-1].lower()
         if re.fullmatch(r"\w", stem) or stem in _ABBREVIATIONS:
             return False                               # an initial, a title
-        if stem in _SOFT_ABBREVIATIONS:
+        if stem in _SOFT_ABBREVIATIONS or re.fullmatch(r"\d+", stem) or re.search(r"[^\W\d_]\.\w|\d\.\d", stem + "."):
             return later is not None and later[:1].isupper()
     return True
+
+
+def _unstop(word: str, nxt: str | None) -> str:
+    """A "." that looked like a sentence end but is followed by a lower-case word was only the end of one hypothesis:
+    leave it out of the text that goes to clean-up."""
+    w = word.rstrip(_CLOSERS)
+    if nxt is not None and nxt[:1].islower() and w.endswith(".") and _terminal(word, "X"):
+        return w[:-1] + word[len(w):]
+    return word
 
 
 class PhraseSplitter:
     """Committed words (append-only, with start times) -> phrases with a cut window. Deterministic, no clock, no I/O."""
 
-    def __init__(self, *, pause_s=PAUSE_S, sent_pause_s=SENT_PAUSE_S, long_pause_s=LONG_PAUSE_S,
+    def __init__(self, *, pause_s=PAUSE_S, long_pause_s=LONG_PAUSE_S,
                  min_words=MIN_WORDS, max_words=MAX_WORDS, max_span_s=MAX_SPAN_S):
-        self.pause_s, self.sent_pause_s, self.long_pause_s = pause_s, sent_pause_s, long_pause_s
+        self.pause_s, self.long_pause_s = pause_s, long_pause_s
         self.min_words, self.max_words, self.max_span_s = min_words, max_words, max_span_s
         self.rejected_at: set[float] = set()   # start times of words whose boundary has "no room" right now
         self.reset()
@@ -120,6 +133,8 @@ class PhraseSplitter:
             i, kind, lo, hi = found
             words = tuple(self._words[:i + 1])
             later = self._words[i + 1][0] if i + 1 < len(self._words) else None
+            nxt = [w for w, _ in self._words[1:i + 2]]
+            text = " ".join(_unstop(w, n) for (w, _), n in zip(words, nxt + [None]))
             self._seq += 1
             dead = {t for t in self.rejected_at if t < words[-1][1]}      # boundaries that stayed rejected: now inside
             self.rejected_final += len(dead)
@@ -127,7 +142,7 @@ class PhraseSplitter:
             self.rejected_at.discard(words[-1][1])
             cut = (lo + hi) / 2
             self._last_cut = cut
-            out.append(Phrase(self._seq, words, " ".join(w for w, _ in words), kind,
+            out.append(Phrase(self._seq, words, text, kind,
                               _terminal(words[-1][0], later), lo, hi, cut))
             del self._words[:i + 1]
         return out
@@ -161,9 +176,13 @@ class PhraseSplitter:
             long_pause = gap >= self.long_pause_s
             if not (i + 1 >= self.min_words or long_pause):
                 continue
+            term = _terminal(w[i][0], later)
             kind = None
-            if _terminal(w[i][0], later) and (later is not None or gap >= self.sent_pause_s):
-                kind = "sentence"
+            if later is not None:
+                # a sentence end is confirmed by a later word; a pause after any other word may cut too
+                kind = "sentence" if term else ("pause" if gap >= self.pause_s else None)
+            elif term:
+                kind = "sentence" if long_pause else None      # an unconfirmed "." needs a long silence
             elif gap >= self.pause_s:
                 kind = "pause"
             if kind is None:
@@ -284,15 +303,25 @@ def finish_chunk(prev: str, cleaned: str, raw: str, kind: str, ends_sentence: bo
     # 1. cleanup adds a full stop or question mark to a phrase that is not a sentence: take it off again
     if kind in ("pause", "cap") and cleaned.endswith((".", "?")) and not raw.rstrip().endswith((".", "!", "?", "…")):
         cleaned = cleaned[:-1]
-    # 2. cleanup capitalises the first letter of every phrase: undo that when the ASR heard a lower-case word and
-    #    the text before is mid-sentence
+    # 2. cleanup capitalises the first letter of every phrase (and the model, of every utterance): undo that when the
+    #    text before is mid-sentence and the evidence says the word is not capitalised
     tail = prev.rstrip()
     prev_open = bool(tail) and not prev.endswith(("\n", "\r")) and tail[-1] not in ".!?…:"
     if prev_open and cleaned[:1].isupper():
         first = cleaned.split()[0]
-        key = norm(first)
-        heard = next((w for w in raw.split() if norm(w) == key), None)
-        if heard is not None and heard[:1].islower() and not (first.isupper() and len(first) > 1):
+        if kind == "tail":
+            # the tail is transcribed as a fresh utterance, so its raw casing proves nothing: the word the preview
+            # heard at that place does (``hint``); without it only words that are capitalised for another reason stay
+            if hint is not None and norm(hint) == norm(first):
+                lower = hint[:1].islower()
+            else:
+                core = re.sub(r"[^\w'’]", "", first)
+                caps = len(re.sub(r"[\W\d_]", "", core)) > 1 and core.isupper()
+                lower = not (core == "I" or core.startswith(("I'", "I’")) or caps or any(c.isdigit() for c in core))
+        else:
+            heard = next((w for w in raw.split() if norm(w) == norm(first)), None)
+            lower = heard is not None and heard[:1].islower() and not (first.isupper() and len(first) > 1)
+        if lower:
             cleaned = cleaned[:1].lower() + cleaned[1:]
     # 3. the space that joins it to the text before (a leading one: the field never ends with a dangling space)
     if prev and not prev.endswith((" ", "\n", "\r")) and not cleaned.startswith(_NO_SPACE_BEFORE):
