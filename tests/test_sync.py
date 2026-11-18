@@ -653,6 +653,7 @@ def test_nothing_private_or_per_computer_is_written_to_the_folder(tmp_path, cloc
     doc = json.loads(text)
     assert not set(doc["records"]["settings"]) & set(S.LOCAL_SETTINGS)
     assert set(doc["records"]["settings"]) == set(S.portable_settings())
+    assert "phrase_streaming" in S.LOCAL_SETTINGS and "phrase_streaming" not in doc["records"]["settings"]
 
 
 def test_an_idle_round_does_not_rewrite_the_file(tmp_path, clock, folder):

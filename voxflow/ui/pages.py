@@ -1624,6 +1624,10 @@ class SettingsPage(Page):
                              "Keeps a small pill on screen so you know VoxFlow is ready."))
         sec.add(self._toggle("live_preview", "Live preview", "Show the words in the Flow bar while you speak. The "
                                                              "pasted text is still tidied up after you release the key."))
+        sec.add(self._toggle("phrase_streaming", "Type while you speak (hands-free)",
+                             "In hands-free mode (double-tap the shortcut), each phrase is pasted into the app you "
+                             "are in as you finish it. Text already pasted is not revised, and one Undo removes only "
+                             "the last phrase. Hold-to-talk is not affected."))
         pos_box = QWidget()
         pl = QHBoxLayout(pos_box)
         pl.setContentsMargins(0, 0, 0, 0)
