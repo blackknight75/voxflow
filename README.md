@@ -18,9 +18,10 @@ VoxFlow is a push-to-talk dictation app for Windows 11. Hold **Ctrl + Win**, tal
 transcribed on your own machine by NVIDIA Parakeet TDT v3, tidied by a small local language model (fillers out,
 punctuation in, self-corrections resolved), and pasted into the focused window.
 
-> **New in 0.3.0:** [live preview](#live-preview-and-type-while-you-speak) shows your words above the Flow bar
-> while you speak; the optional *Type while you speak* pastes each finished sentence in hands-free mode while you
-> keep talking; and [Settings](#configuration) is now grouped into five tabs. All changes are in the
+> **1.0.0** is the first stable release. It adds no features: it fixes what a full test pass of 0.3.0 found
+> (among them a sync-folder bug that could empty your dictionary on other PCs) and Esc now also cancels a
+> dictation after you let go. 0.3.0 brought the [live preview](#live-preview-and-type-while-you-speak), the
+> optional *Type while you speak* and [Settings](#configuration) in five tabs. All changes are in the
 > [changelog](CHANGELOG.md).
 
 ## Download
@@ -192,7 +193,7 @@ Polish, Portuguese, Romanian, Russian, Slovak, Slovenian, Spanish, Swedish and U
 | --- | --- |
 | **Hold Ctrl + Win** | Dictate. Release to paste. |
 | **Double-tap Ctrl + Win** | Lock hands-free. Tap again to stop. |
-| **Esc** | Cancel the recording (the Esc is not passed on to the app). |
+| **Esc** | Cancel: while you record, or after you let go while the text is still being worked on. Nothing is pasted and nothing is kept (the Esc is not passed on to the app). |
 | **Hold Alt + Win** | Command mode: say what to do with the selected text. |
 | **Alt + Shift + Z** | Paste the last transcript again. |
 

@@ -7,11 +7,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-19
+
+The first stable release. No new features: this release fixes what a full test pass of 0.3.0 found, and makes a
+few things cheaper.
+
+### Changed
+
+- **Esc also cancels after you let go.** While the text of a dictation is still being worked on (most noticeable
+  on a PC without a GPU), Esc throws it away: nothing is pasted and nothing is kept in History. Before, Esc only
+  worked while you were still recording, and the text was pasted into whatever window had the focus by then. Once
+  the paste has begun, Esc is the app's key again. In a dictation that was typed while you spoke, the sentences
+  already typed stay.
+- **A shortcut pressed while dictation is paused says so.** The Flow bar shows "Dictation is paused" for a moment
+  instead of nothing at all (the bar is hidden by default, so a paused VoxFlow looked broken).
+- Esc in a search box (History, Dictionary, Style, Settings) clears the search first. Only Esc in an empty box
+  hides the window.
+- A double-tap for hands-free plays one start sound instead of two.
+- A Flow bar that you moved keeps more distance from the left, right and top screen edges (250 and 110 pixels
+  instead of 140 and 70), so the live-preview caption and long messages are no longer cut off there. A bar placed
+  closer than that moves in by itself.
+- An update that waits for "when I quit" is announced again at every start, and the message says how: quit VoxFlow
+  from its tray menu. It is still never installed when Windows shuts down.
+- An automatic update check that failed (for example no network right after wake-up) is tried again after an
+  hour instead of the next day.
+
 ### Fixed
 
+- **Sync folder: a damaged file on one PC no longer empties the others.** When `dictionary.json`, `snippets.json`,
+  the style settings or `config.json` could not be read, that PC started with an empty list (or default settings)
+  and synced it as if you had deleted everything; the other PCs followed. Such a PC now joins the folder again
+  instead: nothing is deleted anywhere, and it gets its entries back from the folder.
+- **A dictation that finished while you were already holding the hotkey for the next one was not pasted.** It was
+  left on the clipboard without a word. It is now pasted when you release the key, before the next one.
+- History: one start with the system clock far in the past (a flat CMOS battery, a virtual machine) no longer
+  rewrites the time of every transcript to "now", and with *Keep transcripts for* set no longer deletes the
+  history once the clock is right again.
+- Undo is refused while a dictation is still being worked on ("Wait for the dictation to be pasted, then undo").
+  Before, the Ctrl+Z was sent after that dictation's paste and removed the wrong text.
+- Settings > Your data: a long sync folder path no longer widens the page and pushes *Keep history*, *Export…*
+  and *Change…* out of the window. The path is shortened in the middle; hover over it for the whole path. A long
+  search text in History and a long shortcut on the Home page no longer do this either.
+- Keyboard: after *Remove*, *Delete* or *Save* in the Dictionary, Snippets and Style lists the focus stays in the
+  list (on the next row) instead of being lost. In History, deleting a transcript with the Delete key selects the
+  next one. Tab reaches *Share* before *Add*, as on screen. In the tray menu the highlighted row stays where it
+  is after a toggle.
+- First run: the practice box on the Home page no longer disappears the moment your first dictation lands in it.
+- Settings: a microphone test or *Move…* (Flow bar) that is no longer on screen, because you changed group or
+  searched, ends by itself instead of running on without a Stop button. Clicking the highlighted group ends a
+  search. After *Reset all settings* while the Flow bar was being moved, the bar returns to its default place.
+- Command mode: when the selection could not be read because Win, Alt or Shift was still held down, the message
+  says so instead of "the clipboard is busy".
 - Live preview: when a long caption loses its start, the text after the "…" now begins with a whole word. Before,
   it could begin with the full stop or comma of the word that was cut off ("…. uh. move the meeting"), a space or
   half a word.
+- A damaged updates file (a time that is not a number) no longer stops VoxFlow from starting, and an update check
+  time in the future no longer switches the automatic check off.
+- Temporary files that a save left behind when VoxFlow was killed are removed at the next start.
+
+### Performance
+
+- Dictionary suggestions are worked out and saved after the text is pasted, not before (3 to 5 ms sooner).
+- After you edit the dictionary its matchers are rebuilt in the background, not inside the next dictation
+  (6 to 26 ms with 500 to 2000 words).
+- With more than 60 dictionary words, choosing the ones to show the language model takes about a fifth of the
+  time (1.5 ms to 0.3 ms per dictation at 500 words).
+- *Show more* in the Dictionary and Snippets lists adds the next 100 rows instead of building every row again
+  (it took 136 to 474 ms for 200 to 600 words and grew with every click).
+- The Flow bar no longer animates on a status change that changes nothing, and the microphone level meter in
+  Settings no longer redraws 30 times a second while the microphone is silent.
+- Saving a settings file that another program holds open gives up after about 2 seconds instead of 3.6.
+
+### Known issues
+
+- "Last word cut off" reports: the recording may end a few milliseconds before the last syllable has reached
+  VoxFlow. Not measured yet; it needs a test series with a real microphone.
+- Type while you speak is still off by default and has not been tried in every kind of app (chat apps that send
+  on Enter, terminals, input methods for Chinese, Japanese and Korean, windows running as administrator).
+- On a screen less than about 540 pixels high (for example 1920x1080 at 200 % scaling) the *Restore this backup?*
+  and snippet dialogs do not fit and their lines overlap.
+- Automatic updates at a set time: when Setup fails without changing the version, VoxFlow quits and tries again
+  the next night without saying so. "Remind me later" reminds after about two days, not one.
 
 ## [0.3.0] - 2026-11-18
 
@@ -390,6 +466,8 @@ Interface and system
 - **No automatic updates:** install a newer version by running its installer.
 - Features that would need a cloud service, an account or a phone app are out of scope by design.
 
-[Unreleased]: https://github.com/blackknight75/voxflow/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/blackknight75/voxflow/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/blackknight75/voxflow/compare/v0.3.0...v1.0.0
+[0.3.0]: https://github.com/blackknight75/voxflow/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/blackknight75/voxflow/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/blackknight75/voxflow/releases/tag/v0.2.1
