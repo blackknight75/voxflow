@@ -662,6 +662,20 @@ class SyncEngine:
         got = _norm(kind, key, rec.get("v"))
         return None if got is None else (got[0], {"v": got[1], "t": float(t), "d": d})
 
+    def rejoin(self) -> bool:
+        """Forget what this device knew about its folder and join it again, as when the folder was first chosen.
+
+        For a start with a damaged store or settings file: the store is empty (or back to defaults) because it could
+        not be read, not because the user deleted everything. Without this the next round would publish every missing
+        entry as deleted and the default settings as a fresh choice, and the other devices would follow. Joining anew
+        deletes nothing anywhere and lets the folder's copy win. True when there was a folder to rejoin."""
+        with self._lock:
+            if not self.enabled:
+                return False
+            self._state.update(joined=False, settled=False, records={}, written="")
+            self._save()
+            return True
+
     def stamp_local(self) -> bool:
         """Notice what changed on this device since the last look and timestamp it. No folder access.
         Returns True when something was stamped."""

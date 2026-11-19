@@ -88,6 +88,7 @@ class MainWindow(QWidget):
         self.resize(1080 + 2 * self.M, 720 + 2 * self.M)
         self._placed = False
         self._modal: Modal | None = None
+        self._modal_slot = (None, None)         # (page, its focus slot) when the last dialog was opened
 
         self._root = QVBoxLayout(self)
         self._root.setContentsMargins(self.M, self.M, self.M, self.M)
@@ -235,12 +236,16 @@ class MainWindow(QWidget):
         if self._modal is not None:
             self._modal.close_modal()
         self._modal = modal
+        page = self.pages[self.current]
+        self._modal_slot = (page, page.focus_slot())
         modal.closed.connect(self._modal_closed)
         modal.open(focus or getattr(modal, "btn_cancel", None))
         return modal
 
     def _modal_closed(self) -> None:
         self._modal = None
+        page, slot = self._modal_slot       # the row the dialog was opened from may have been built anew meanwhile
+        page.restore_focus(slot)
 
     # ------------------------------------------------------------------ controller events
     def _on_status(self, status: dict) -> None:

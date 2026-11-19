@@ -137,6 +137,10 @@ class CommandMode:
             log.warning("selection grab failed: %s", redacted_exc(exc))
             text = None
         if text is None:
+            held = getattr(self.injector, "modifiers_held", None)
+            if callable(held) and held():           # the usual reason: the shortcut's own keys are not up yet
+                raise CommandError("Couldn't read the selection because Win, Alt or Shift is still held down. "
+                                   "Nothing was changed.")
             raise CommandError("Couldn't read the selection because the clipboard is busy. Nothing was changed.")
         return text
 

@@ -27,6 +27,7 @@ import datetime as _dt
 import hashlib
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -59,6 +60,7 @@ MODES = cfgmod.UPDATE_MODES                  # ("auto", "notify", "off")
 DEFAULT_MODE = cfgmod.DEFAULT_UPDATE_MODE    # "notify" (confirmed by the maintainer)
 
 CHECK_EVERY_S = 24 * 3600                    # at most one automatic check a day
+RETRY_FAILED_S = 3600                        # ... but one that failed (offline at wake-up) is tried again after an hour
 STARTUP_DELAY_S = (90, 600)                  # the first automatic check: a random moment in this window after start
 REMIND_AFTER_S = 24 * 3600                   # "Remind me later" = tomorrow
 TIMEOUT_S = 15.0                             # per connection / read
@@ -719,7 +721,8 @@ class UpdateState:
             elif isinstance(default, bool):
                 ok = isinstance(value, bool)
             elif isinstance(default, float):
-                ok = isinstance(value, (int, float)) and not isinstance(value, bool)
+                # finite only: a NaN in a hand-edited file made the first timer of the start raise (QA UP-08)
+                ok = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
                 value = float(value) if ok else default
             else:
                 ok = isinstance(value, str)
@@ -875,6 +878,17 @@ class Updater(QObject):
         """Arm the daily check (nothing at all when the mode is Off or automatic checks are disabled)."""
         self._arm_check(first=True)
         self._arm_slot()
+        self._remind_quit_install()
+
+    def _remind_quit_install(self) -> None:
+        """An update that waits for "when I quit" is installed only by Quit in the tray menu, never when Windows ends
+        the session. Someone who only ever shuts the PC down was told once and then kept the old version for good
+        (QA UP-01): say it again at every start, with what to do."""
+        rel, st = self.latest(), self.state
+        if (rel is not None and self.mode != "off" and st.install_on_quit == rel.version == st.downloaded
+                and is_newer(rel.version, self.version)):
+            self.notice.emit("info", f"VoxFlow {rel.version} is downloaded and waiting. It is installed when you "
+                                     "quit VoxFlow from its tray menu (not when Windows shuts down).")
 
     def close(self) -> None:
         self._closed = True
@@ -886,7 +900,9 @@ class Updater(QObject):
         self._check_timer.stop()
         if self._closed or not self._automatic or self.mode == "off":
             return
-        due = self.state.last_check + CHECK_EVERY_S - self._clock()
+        every = CHECK_EVERY_S if self.state.last_ok else RETRY_FAILED_S
+        last = min(self.state.last_check, self._clock())    # a time in the future (the clock was wrong once) = now
+        due = last + every - self._clock()
         delay = max(due, 0.0)
         if first:
             delay = max(delay, self._rng.uniform(*STARTUP_DELAY_S))

@@ -98,6 +98,12 @@ def test_grab_selection(mode):
         mode.injector.selection = broken
         with pytest.raises(CommandError, match="clipboard is busy. Nothing was changed."):
             mode.grab_selection()
+    mode.injector.modifiers = True                              # the real reason is named (QA C-07)
+    with pytest.raises(CommandError, match="Win, Alt or Shift is still held down. Nothing was changed."):
+        mode.grab_selection()
+    mode.injector = type("NoKeyboardState", (), {"copy_selection": lambda self: None})()
+    with pytest.raises(CommandError, match="clipboard is busy"):
+        mode.grab_selection()
 
 
 def test_run_rewrites_a_selection(mode):

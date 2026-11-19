@@ -1056,8 +1056,11 @@ class TranscriptList(QWidget):
     # ---- data
     def set_items(self, items: list[dict]) -> None:
         keep = self.items[self._sel].get("id") if 0 <= self._sel < len(self.items) else None
+        was, before = self._sel, len(self.items)
         self.items = [it for it in items if isinstance(it, dict)]
         self._sel = next((i for i, it in enumerate(self.items) if keep is not None and it.get("id") == keep), -1)
+        if self._sel < 0 and keep is not None and len(self.items) == before - 1:
+            self._sel = min(was, len(self.items) - 1)    # the chosen card was deleted: the next one takes its place
         self._hover = (-1, -1)
         self._relayout()
 

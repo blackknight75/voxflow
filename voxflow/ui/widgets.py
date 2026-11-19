@@ -91,6 +91,38 @@ class Label(QLabel):
         self.setPalette(pal)
 
 
+class ElidedLabel(Label):
+    """One line that never asks for more room than it is given: text that does not fit is cut with "…" (at the end,
+    or in the middle for a path). ``text()`` is always the whole text. A plain non-wrapping label instead makes its
+    page as wide as its text, which pushes the controls beside it out of the window."""
+
+    def __init__(self, text: str = "", pt: float = T.F_BODY, role: str = "TEXT", weight=T.W_NORMAL,
+                 mode=Qt.TextElideMode.ElideRight, parent=None, selectable: bool = False):
+        self._full, self._mode = "", mode
+        super().__init__("", pt, role, weight, wrap=False, parent=parent, selectable=selectable)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setText(text)
+
+    def text(self) -> str:
+        return self._full
+
+    def setText(self, text: str) -> None:
+        self._full = str(text or "")
+        self._fit()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._fit()
+
+    def _fit(self) -> None:
+        shown = QFontMetricsF(self.font()).elidedText(self._full, self._mode, max(0.0, self.width() - 2.0))
+        if shown != QLabel.text(self):
+            QLabel.setText(self, shown)
+
+    def shown_text(self) -> str:
+        return QLabel.text(self)
+
+
 class Caption(Label):
     """Small uppercase section caption."""
 
@@ -447,6 +479,7 @@ class Segmented(QWidget):
     """Mutually exclusive options in one track. Left/Right arrows move the selection."""
 
     changed = Signal(object)
+    reselected = Signal(object)        # the segment that is already chosen was clicked again
 
     def __init__(self, options: list[tuple[object, str]], value=None, parent=None, name: str = ""):
         super().__init__(parent)
@@ -535,7 +568,11 @@ class Segmented(QWidget):
 
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton and self.options:
-            self.set_value(self.options[self._seg_at(e.position().x())][0], emit=True)
+            value = self.options[self._seg_at(e.position().x())][0]
+            if value == self.value:
+                self.reselected.emit(value)
+            else:
+                self.set_value(value, emit=True)
 
     def keyPressEvent(self, e):
         step = {Qt.Key.Key_Left: -1, Qt.Key.Key_Up: -1, Qt.Key.Key_Right: 1, Qt.Key.Key_Down: 1}.get(e.key())
@@ -976,10 +1013,15 @@ class PopupMenu(QWidget):
         self._layout()
 
     def set_items(self, items: list[dict]) -> None:
+        # the same menu filled again while it is open (a toggle flipped, the status changed): the highlighted row and
+        # the scroll position stay. Reset, the next arrow key started from the top again and Space hit the wrong
+        # row (QA Q-08).
+        same = self.isVisible() and len(items) == len(self._items)
         self._items = items
-        self._hover = -1
+        if not same:
+            self._hover = -1
+            self._scroll = 0
         self.setAccessibleName("Menu")
-        self._scroll = 0
         self._layout()
 
     def _layout(self) -> None:
@@ -1390,9 +1432,14 @@ class LevelMeter(QWidget):
                 target = max(0.0, min(1.0, float(self.source()) * 2.2))
             except Exception:
                 target = 0.0
-        self._level = T.smooth(self._level, target, dt, 24 if target > self._level else 9)
-        self._peak = max(self._level, self._peak - dt * 0.35)
-        self.update()
+        level = T.smooth(self._level, target, dt, 24 if target > self._level else 9)
+        peak = max(level, self._peak - dt * 0.35)
+        if target < 5e-4 and level < 5e-4 and peak < 5e-4:   # silence: settle at zero, do not creep towards it
+            level = peak = 0.0
+        moved = (level, peak) != (self._level, self._peak)
+        self._level, self._peak = level, peak
+        if moved:                                # nothing to draw while the meter stands still
+            self.update()
 
     def paintEvent(self, _):
         p = painter(self)
@@ -1552,6 +1599,13 @@ class SearchField(LineEdit):
         super()._restyle()
         if self._lead is not None:
             self._lead.setIcon(make_qicon("search", T.TEXT_DIM, 16))
+
+    def keyPressEvent(self, e):
+        """Esc clears a search first; only an empty box lets it through (to the window, which hides)."""
+        if e.key() == Qt.Key.Key_Escape and self.text():
+            self.clear()
+            return
+        super().keyPressEvent(e)
 
 
 class TextArea(QPlainTextEdit, _Styled):

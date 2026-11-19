@@ -1637,7 +1637,9 @@ class History(_JsonStore):
                 app_exe=str(raw.get("app_exe") or ""), app_title=str(raw.get("app_title") or ""),
                 duration_s=_num(raw.get("duration_s")), mode=str(raw.get("mode") or "dictate"),
                 latency_ms=_num(raw.get("latency_ms", raw.get("ms"))),
-                ts=_sane_ts(raw.get("ts"), self._clock()) or self._clock(), rules_only=raw.get("rules_only") is True,
+                # a stored time is kept even when it lies after today's clock (any year up to 2100): whether the
+                # entry or the clock is wrong is decided for the history as a whole, in _prune
+                ts=_sane_ts(raw.get("ts"), _YEAR_2100) or self._clock(), rules_only=raw.get("rules_only") is True,
                 words=_stored_words(raw))
             if isinstance(raw.get("id"), str) and raw["id"]:
                 entry["id"] = raw["id"]
@@ -1655,10 +1657,15 @@ class History(_JsonStore):
     def _prune(self) -> bool:
         before = len(self._items)
         now = self._clock()
-        for e in self._items:                       # a clock that ran ahead once must not pin entries for years
-            if e["ts"] > now + 86_400.0:
+        ahead = [e for e in self._items if e["ts"] > now + 86_400.0]
+        # Most of the history lies "in the future": it is today's clock that is wrong (a dead CMOS battery, a VM), not
+        # the entries. Leave their times alone and delete nothing by age this time: rewriting them to "now" lost every
+        # transcript's own time, and with a retention set the whole history once the clock was right again (QA DL-02).
+        clock_is_off = len(ahead) >= 3 and 2 * len(ahead) > len(self._items)
+        if not clock_is_off:
+            for e in ahead:                         # a clock that ran ahead once must not pin entries for years
                 e["ts"] = now
-        if self.retention_days and self.retention_days > 0:
+        if self.retention_days and self.retention_days > 0 and not clock_is_off:
             cutoff = now - self.retention_days * 86400.0
             self._items = [e for e in self._items if e["ts"] >= cutoff]
         del self._items[max(1, int(self.limit)):]
@@ -1857,6 +1864,9 @@ def _num(value) -> float:
 def _csv_safe(value: str) -> str:
     """Spreadsheets run a cell that starts with = + - @ as a formula: prefix such cells with an apostrophe."""
     return "'" + value if value[:1] in ("=", "+", "-", "@", "\t", "\r") else value
+
+
+_YEAR_2100 = 4_102_444_800.0
 
 
 def _sane_ts(value, now: float) -> float | None:

@@ -41,7 +41,7 @@ def test_a_setting_of_an_unconstrained_type_is_passed_through(monkeypatch):
 
 
 # ---------------------------------------------------------------- _replace / _atomic_write
-def test_replace_gives_up_after_forty_locked_attempts(tmp_path, monkeypatch):
+def test_replace_gives_up_after_about_two_seconds_of_locked_attempts(tmp_path, monkeypatch):
     attempts, sleeps = [], []
 
     def locked(src, dst):
@@ -52,7 +52,8 @@ def test_replace_gives_up_after_forty_locked_attempts(tmp_path, monkeypatch):
     monkeypatch.setattr(cfgmod, "time", fake_time(sleep=sleeps.append))
     with pytest.raises(PermissionError):
         cfgmod._replace("x.tmp", tmp_path / "config.json")
-    assert len(attempts) == 40 and len(sleeps) == 39
+    assert len(attempts) == 24 and len(sleeps) == 23
+    assert 1.9 < sum(sleeps) < 2.2, "about 2 s, as documented (it was 3.6 s: QA R-01)"
     assert sleeps[0] == 0.005 and max(sleeps) == 0.1, "back-off doubles and is capped at 100 ms"
 
 

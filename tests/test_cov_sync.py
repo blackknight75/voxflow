@@ -147,3 +147,21 @@ def test_a_postponed_round_goes_back_to_idle(dev, folder):
     dev.engine.note_idle()
     status = dev.engine.status()
     assert status["state"] == "idle" and status["error"] == ""
+
+
+def test_a_file_written_while_the_folder_was_changed_does_not_count_for_the_new_folder(dev, folder, tmp_path,
+                                                                                       monkeypatch):
+    """Only a timing-dependent test reached the "folder changed meanwhile" branch of ``write_own``; it was missed in
+    one full run of the 1.0 gate."""
+    other = tmp_path / "other"
+    other.mkdir()
+    dev.engine.set_folder(str(folder))
+    real = S.cfgmod._atomic_write
+
+    def write_then_switch(path, text):
+        real(path, text)
+        dev.engine._state["folder"] = str(other)                # the user picked another folder during the write
+    monkeypatch.setattr(S.cfgmod, "_atomic_write", write_then_switch)
+    dev.engine.write_own(("{}", "digest-of-the-old-folder"))
+    monkeypatch.setattr(S.cfgmod, "_atomic_write", real)
+    assert dev.engine._state["written"] == "" and dev.engine.folder == str(other)

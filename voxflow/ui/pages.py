@@ -14,7 +14,8 @@ from . import theme as T
 from .components import (BarChart, Card, EmptyState, Modal, Row, Section, StatCard, TranscriptList, app_label,
                          confirm, fmt_count, fmt_duration)
 from .updates import UpdatesSection, update_dialog
-from .widgets import (Button, Caption, CheckBox, ChoiceButton, HotkeyRecorder, IconButton, KeyCaps, Label, LevelMeter, LineEdit,
+from .widgets import (Button, Caption, CheckBox, ChoiceButton, ElidedLabel, HotkeyRecorder, IconButton, KeyCaps, Label,
+                      LevelMeter, LineEdit,
                       PopupMenu, ProgressBar, ScrollArea, SearchField, Segmented, Slider, TextArea, Toggle, painter)
 
 
@@ -75,9 +76,35 @@ class Page(QWidget):
 
     def invalidate(self, *_a) -> None:
         if self.isVisible() and self.win.current == self.objectName().removeprefix("page_"):
+            slot = self.focus_slot()
             self.refresh()
+            self.restore_focus(slot)
         else:
             self._dirty = True
+
+    # ---- keyboard focus across a rebuild: the rows of a list are built anew on every change, which would leave
+    # the keyboard nowhere after "Remove" or "Save" (QA Q-02)
+    def _named(self, name: str) -> list[QWidget]:
+        return [w for w in self.content.findChildren(QWidget, name) if w.isVisibleTo(self.content)]
+
+    def focus_slot(self) -> tuple | None:
+        """Where the keyboard focus is on this page: (widget name, its place among the widgets of that name, the
+        widget itself)."""
+        w = self.window().focusWidget()
+        if w is None or not w.objectName() or not self.content.isAncestorOf(w):
+            return None
+        peers = self._named(w.objectName())
+        return (w.objectName(), peers.index(w), w) if w in peers else None
+
+    def restore_focus(self, slot: tuple | None) -> None:
+        """Give the focus back to the widget now in that place (the next row after a removal), unless the widget
+        that had it is still there. Qt meanwhile moved the focus to whatever came next in the Tab chain."""
+        if slot is None or (self.window().focusWidget() is slot[2] and slot[2].isVisibleTo(self.content)):
+            return
+        peers = self._named(slot[0])
+        target = peers[min(slot[1], len(peers) - 1)] if peers else getattr(self, "btn_add", None)
+        if target is not None:
+            target.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def refresh(self) -> None:
         """Rebuild from the controller's current data."""
@@ -163,9 +190,8 @@ class HomePage(Page):
         hint.addWidget(Label("Hold", T.F_BODY, "TEXT_DIM", wrap=False))
         self.caps = KeyCaps(ctl.get("hotkey"))
         hint.addWidget(self.caps)
-        hint.addWidget(Label("in any app, speak, and release. VoxFlow types it for you.", T.F_BODY, "TEXT_DIM",
-                             wrap=False))
-        hint.addStretch(1)
+        hint.addWidget(ElidedLabel("in any app, speak, and release. VoxFlow types it for you.", T.F_BODY, "TEXT_DIM"),
+                       1)                           # a long shortcut at the smallest window: cut, not clipped
         self.head_col.addLayout(hint)
 
         stats = QGridLayout()
@@ -299,7 +325,10 @@ class HomePage(Page):
         first_run = not items and sessions == 0
         for w in (self.stats_box, self.mid_box):
             w.setVisible(not first_run)
-        self.hero.setVisible(first_run)
+        # the first dictation lands in the practice box: the box must not vanish under the text it just received
+        practising = not self.hero.isHidden() and (self.practice.hasFocus()
+                                                   or bool(self.practice.toPlainText().strip()))
+        self.hero.setVisible(first_run or practising)
         self.recent_title.setVisible(not first_run or not self.ctl.get("save_history"))
         if first_run:
             self.hero_hint.setText("Say a sentence and let go. The text appears right here.")   # the keys are in the line above
@@ -377,7 +406,7 @@ class HistoryPage(Page):
         self.off_note.body.addWidget(off_row)
         self.off_note.hide()
         self.body.addWidget(self.off_note)
-        self.count = Label("", T.F_SMALL, "TEXT_DIM", wrap=False)
+        self.count = ElidedLabel("", T.F_SMALL, "TEXT_DIM")     # a long search text must not widen the page
         self.count.setObjectName("history_count")
         self.body.addWidget(self.count)
         self.list = TranscriptList()
@@ -827,7 +856,10 @@ class _ImportExport:
         self.btn_share = IconButton("share", f"Share a pack: save your {self.noun}, or some of them, as one file")
         self.btn_share.setObjectName(f"{'dict' if self.pack_kind == 'dictionary' else 'snippets'}_share")
         self.btn_share.clicked.connect(self.share_pack)
-        self.actions.insertWidget(self.actions.indexOf(before), self.btn_share)
+        at = self.actions.indexOf(before)
+        self.actions.insertWidget(at, self.btn_share)
+        QWidget.setTabOrder(self.actions.itemAt(at - 1).widget(), self.btn_share)   # Tab follows what is on screen:
+        QWidget.setTabOrder(self.btn_share, before)                                 # ..., Share, then ``before``
 
 
 class DictionaryPage(Page, _ImportExport):
@@ -895,8 +927,39 @@ class DictionaryPage(Page, _ImportExport):
         self._fill_entries()
 
     def _more(self) -> None:
+        """The next rows are added below the ones that are there. Building all of them again made every further
+        "Show more" slower than the one before (QA U-05: 136, 213, 304, 365, 474 ms for 200 to 600 words)."""
+        start = self._limit
         self._limit += self.PAGE_SIZE
-        self._fill_entries()
+        matching = self._matching()
+        self.entries.add_many([self._entry_row(e) for e in matching[start:self._limit]])
+        self._show_hidden(len(matching) - min(len(matching), self._limit))
+
+    def _matching(self) -> list[dict]:
+        q = self.search.text().strip().lower()
+        return [e for e in self._items if not q or q in e["term"].lower()
+                or any(q in a.lower() for a in e.get("aliases", []))]
+
+    def _show_hidden(self, hidden: int) -> None:
+        self.btn_more.setText(f"Show more words ({hidden:,} not shown)")
+        self.btn_more.setVisible(hidden > 0)
+
+    def _entry_row(self, e: dict) -> Row:
+        box = QWidget()
+        lay = QHBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
+        ed = IconButton("edit", f"Edit {e['term']}")
+        ed.setObjectName("dict_edit")
+        ed.clicked.connect(lambda _c=False, entry=e: self.edit(entry))
+        rm = IconButton("trash", f"Remove {e['term']}", danger=True)
+        rm.setObjectName("dict_remove")
+        rm.clicked.connect(lambda _c=False, entry=e: self._remove(entry))
+        lay.addWidget(ed)
+        lay.addWidget(rm)
+        aliases = e.get("aliases") or []
+        sub = "Heard as: " + ", ".join(aliases) if aliases else "Spelling and capitalisation only"
+        return Row(e["term"], sub, box)
 
     def refresh(self) -> None:
         self._failed = ""
@@ -935,31 +998,11 @@ class DictionaryPage(Page, _ImportExport):
 
     def _fill_entries(self) -> None:
         q = self.search.text().strip().lower()
-        matching = [e for e in self._items if not q or q in e["term"].lower()
-                    or any(q in a.lower() for a in e.get("aliases", []))]
+        matching = self._matching()
         shown = matching[:self._limit]
         self.entries.clear()
-        rows = []
-        for e in shown:
-            box = QWidget()
-            lay = QHBoxLayout(box)
-            lay.setContentsMargins(0, 0, 0, 0)
-            lay.setSpacing(2)
-            ed = IconButton("edit", f"Edit {e['term']}")
-            ed.setObjectName("dict_edit")
-            ed.clicked.connect(lambda _c=False, entry=e: self.edit(entry))
-            rm = IconButton("trash", f"Remove {e['term']}", danger=True)
-            rm.setObjectName("dict_remove")
-            rm.clicked.connect(lambda _c=False, entry=e: self._remove(entry))
-            lay.addWidget(ed)
-            lay.addWidget(rm)
-            aliases = e.get("aliases") or []
-            sub = "Heard as: " + ", ".join(aliases) if aliases else "Spelling and capitalisation only"
-            rows.append(Row(e["term"], sub, box))
-        self.entries.add_many(rows)
-        hidden = len(matching) - len(shown)
-        self.btn_more.setText(f"Show more words ({hidden:,} not shown)")
-        self.btn_more.setVisible(hidden > 0)
+        self.entries.add_many([self._entry_row(e) for e in shown])
+        self._show_hidden(len(matching) - len(shown))
         has_any = bool(self._items)
         self.search.setVisible(len(self._items) > 6 or bool(q))
         self.entries.setVisible(bool(shown))
@@ -1060,8 +1103,35 @@ class SnippetsPage(Page, _ImportExport):
         return self.ctl.snippets
 
     def _more(self) -> None:
+        """Adds the next rows below the ones that are there (see ``DictionaryPage._more``)."""
+        start = self._limit
         self._limit += self.PAGE_SIZE
-        self.refresh()
+        try:
+            items = self.ctl.snippets.list()
+        except Exception:                                # the list could not be read: the full refresh says so
+            return self.refresh()
+        self.rows.add_many([self._snippet_row(s) for s in items[start:self._limit]])
+        self._show_hidden(max(0, len(items) - self._limit))
+
+    def _show_hidden(self, hidden: int) -> None:
+        self.btn_more.setText(f"Show more snippets ({hidden:,} not shown)")
+        self.btn_more.setVisible(hidden > 0)
+
+    def _snippet_row(self, s: dict) -> Row:
+        box = QWidget()
+        lay = QHBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
+        ed = IconButton("edit", f"Edit the snippet {s['trigger']}")
+        ed.setObjectName("snippets_edit")
+        ed.clicked.connect(lambda _c=False, entry=s: self.edit(entry))
+        rm = IconButton("trash", f"Delete the snippet {s['trigger']}", danger=True)
+        rm.setObjectName("snippets_remove")
+        rm.clicked.connect(lambda _c=False, entry=s: self._remove(entry))
+        lay.addWidget(ed)
+        lay.addWidget(rm)
+        flat = " ⏎ ".join(line.strip() for line in str(s.get("text", "")).splitlines() if line.strip())
+        return Row(f"“{s['trigger']}”", flat if len(flat) <= 110 else flat[:107] + "…", box, icon="snippet")
 
     def refresh(self) -> None:
         failed = ""
@@ -1072,26 +1142,8 @@ class SnippetsPage(Page, _ImportExport):
             items = []
         self.rows.clear()
         self.rows.caption.setText(f"YOUR SNIPPETS  ·  {len(items)}")
-        hidden = max(0, len(items) - self._limit)
-        self.btn_more.setText(f"Show more snippets ({hidden:,} not shown)")
-        self.btn_more.setVisible(hidden > 0)
-        rows = []
-        for s in items[:self._limit]:
-            box = QWidget()
-            lay = QHBoxLayout(box)
-            lay.setContentsMargins(0, 0, 0, 0)
-            lay.setSpacing(2)
-            ed = IconButton("edit", f"Edit the snippet {s['trigger']}")
-            ed.setObjectName("snippets_edit")
-            ed.clicked.connect(lambda _c=False, entry=s: self.edit(entry))
-            rm = IconButton("trash", f"Delete the snippet {s['trigger']}", danger=True)
-            rm.setObjectName("snippets_remove")
-            rm.clicked.connect(lambda _c=False, entry=s: self._remove(entry))
-            lay.addWidget(ed)
-            lay.addWidget(rm)
-            flat = " ⏎ ".join(line.strip() for line in str(s.get("text", "")).splitlines() if line.strip())
-            rows.append(Row(f"“{s['trigger']}”", flat if len(flat) <= 110 else flat[:107] + "…", box,
-                            icon="snippet"))
+        self._show_hidden(max(0, len(items) - self._limit))
+        rows = [self._snippet_row(s) for s in items[:self._limit]]
         self.rows.add_many(rows)
         self.rows.setVisible(bool(items))
         self.empty.setVisible(not items)
@@ -1327,6 +1379,7 @@ class StylePage(Page):
         add.setObjectName("style_add_app")
         add.clicked.connect(self._add_app)
         self.new_exe.returnPressed.connect(self._add_app)
+        self.new_exe.textChanged.connect(lambda _t: self.new_exe.set_invalid(False))   # typing answers the red border
         lay.addWidget(self.new_exe, 1)
         lay.addWidget(self.new_cat)
         lay.addWidget(add)
@@ -1700,7 +1753,7 @@ class SettingsPage(Page):
         self.btn_sync_choose.clicked.connect(self.choose_sync_folder)
         for b in (self.btn_sync_off, self.btn_sync_now, self.btn_sync_choose):
             sl2.addWidget(b)
-        self.sync_folder = Label("", T.F_SMALL, "TEXT", wrap=False, selectable=True)
+        self.sync_folder = ElidedLabel("", T.F_SMALL, "TEXT", mode=Qt.TextElideMode.ElideMiddle, selectable=True)
         self.sync_folder.setObjectName("settings_sync_folder")
         self.sync_row = sec.add(Row("Sync folder", "", sync_box, icon="sync", below=self.sync_folder))
         self.sync_row.setObjectName("settings_sync_row")
@@ -1809,6 +1862,7 @@ class SettingsPage(Page):
         self.tabs = Segmented(list(self._TABS), self._TABS[0][0], name="Settings group")
         self.tabs.setObjectName("settings_tabs")
         self.tabs.changed.connect(self.show_tab)
+        self.tabs.reselected.connect(self.show_tab)     # the highlighted group, clicked during a search: ends it
         self.find = SearchField("Search settings")
         self.find.setObjectName("settings_search")
         self.find.setFixedWidth(240)
@@ -1884,6 +1938,11 @@ class SettingsPage(Page):
         self.no_match.setVisible(bool(q) and not any_shown)
         if not q:
             self.updates.refresh()                   # rows that only apply to one update mode hide again
+        # a microphone test or "Move…" whose button is no longer on screen could not be stopped: end it
+        if self._testing and not self.btn_test.isVisibleTo(self):
+            self._set_testing(False)
+        if self._arranging and not self.btn_move.isVisibleTo(self):
+            self._set_arranging(False)
 
     # ---- builders
     def _toggle(self, key: str, title: str, sub: str, icon: str | None = None) -> Row:
@@ -2042,7 +2101,8 @@ class SettingsPage(Page):
     def on_enter(self) -> None:
         self._dirty = True           # cheap, and always right even after external changes
         super().on_enter()
-        self._sync_timer.start()
+        if self.win.isVisible():                     # started in the tray on this page: nothing to keep fresh yet
+            self._sync_timer.start()
 
     # ---- backup, restore, sync folder
     def export_backup(self) -> Modal:

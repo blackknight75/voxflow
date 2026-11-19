@@ -29,6 +29,7 @@ Design
 """
 from __future__ import annotations
 
+import functools
 import glob
 import logging
 import os
@@ -1157,6 +1158,15 @@ phonetic_key = _phon
 _MAX_HINT_TERMS, _MAX_HINT_CHARS = 60, 700
 
 
+@functools.lru_cache(maxsize=8192)
+def _term_sound(term: str) -> tuple[str, str]:
+    """A dictionary term without spaces or punctuation, and how that sounds. Kept between dictations: with more
+    than 60 terms every clean-up ranks all of them, and working these two out again was most of that time
+    (1.5 ms per dictation at 500 terms, 0.3 ms with this: QA P-02)."""
+    squashed = re.sub(r"[\W_]+", "", term.lower())
+    return squashed, (phonetic_key(squashed) if len(squashed) >= 3 else "")
+
+
 def rank_terms(terms, text: str) -> list[str]:
     """The user's terms in the order the prompt should keep them. When they all fit in the hint (at most
     ``_MAX_HINT_TERMS`` / ``_MAX_HINT_CHARS``) nothing is chosen and nothing is computed. Otherwise the terms that
@@ -1178,10 +1188,9 @@ def rank_terms(terms, text: str) -> list[str]:
                 prefixes.add(key[:4])
 
     def tier(term: str) -> int:
-        squashed = re.sub(r"[\W_]+", "", term.lower())
+        squashed, key = _term_sound(term)
         if len(squashed) < 3:
             return 0
-        key = phonetic_key(squashed)
         if squashed in heard or key in heard:
             return 2
         return 1 if key[:4] in prefixes else 0

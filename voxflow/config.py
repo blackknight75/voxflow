@@ -311,18 +311,21 @@ def write_problem(path: Path) -> str:
     return ""
 
 
+_REPLACE_TRIES = 24      # 5, 10, 20, 40, 80 ms, then 100 ms each: about 2 s in all (40 tries were 3.6 s: QA R-01)
+
+
 def _replace(tmp: str, path: Path) -> None:
     """os.replace that waits out a reader. On Windows the rename fails with PermissionError while another
     thread, a sync tool, a backup program or a virus scanner has the target open for reading; that is over
     in milliseconds, so retry for up to ~2 s instead of losing the save. A file that cannot be written at all
     (read-only, permissions) fails at once: waiting for it froze the window for 3.6 s per change (QA R6)."""
     delay = 0.005
-    for attempt in range(40):  # pragma: no branch - the last attempt returns or re-raises
+    for attempt in range(_REPLACE_TRIES):  # pragma: no branch - the last attempt returns or re-raises
         try:
             os.replace(tmp, path)
             return
         except PermissionError as exc:
-            if attempt == 39:
+            if attempt == _REPLACE_TRIES - 1:
                 raise
             if getattr(exc, "winerror", None) not in _SHARING_ERRORS and write_problem(path):
                 raise
@@ -348,6 +351,25 @@ def _atomic_write(path: Path, text: str) -> None:
         except OSError:
             pass
         raise
+
+
+def sweep_tmp(folder: Path, older_than_s: float = 3600.0) -> int:
+    """Remove what ``_atomic_write`` left behind when VoxFlow was killed between writing and renaming (a power cut,
+    Task Manager): ``tmp*.tmp`` files directly in ``folder`` that nobody has touched for an hour. They are never
+    read again and would pile up for good. Returns how many were removed; never raises."""
+    removed, now = 0, time.time()
+    try:
+        candidates = list(Path(folder).glob("tmp*.tmp"))
+    except OSError:
+        return 0
+    for item in candidates:
+        try:
+            if item.is_file() and now - item.stat().st_mtime > older_than_s:
+                item.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed
 
 
 last_load_problem = ""   # human message when the last load_config() fell back to defaults; "" otherwise

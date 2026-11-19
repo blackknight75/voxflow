@@ -334,6 +334,25 @@ def test_release_pastes_only_the_tail_from_the_last_sent_cut(rig):
     assert rig.asr.heard and len(rig.asr.heard) == 1
 
 
+def test_escape_after_the_release_keeps_what_was_typed_and_types_no_more(rig):
+    """QA C-04 for a streamed dictation: the phrases are in the field already, so they stay (and are filed); the
+    tail is not typed."""
+    import threading
+    gen = locked(rig)
+    send(rig, gen, ph("so the plan is simple", cut=1.0))
+    gate, entered, text = threading.Event(), threading.Event(), rig.asr.text
+    rig.asr.text = lambda _audio: (entered.set(), gate.wait(5), text)[2]
+    rig.stop_locked()
+    rig.wait(entered.is_set)
+    rig.c.cancel()
+    assert rig.c.state == "idle"
+    gate.set()
+    finished(rig)
+    rig.settle(60)
+    assert rig.injector.pasted == ["So the plan is simple."] and rig.c.state == "idle"
+    assert rig.last_entry()["text"] == "So the plan is simple."
+
+
 def test_the_tail_never_repeats_a_phrase(rig):
     gen = locked(rig, 8.0)
     send(rig, gen, ph("so the plan is simple", cut=1.234), ph("then we ship it", cut=3.3333))
