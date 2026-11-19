@@ -87,6 +87,21 @@ def active_screen():
     return QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
 
 
+_CUT_LEAD = " .,;:!?…-–—)]}\"'”’"     # never the first thing after the caption's "…"
+
+
+def _from_word_start(full: str, start: int) -> str:
+    """The end of ``full`` from ``start`` on, moved forward to the start of a word: Qt elides at a character, which
+    can leave half a word ("…ould") or the punctuation of the word before ("…. uh"). Only ever shorter, so it still
+    fits; when nothing word-like is left (one very long word, only punctuation), the plain cut is kept."""
+    rest = full[start:]
+    if start > 0 and not full[start - 1].isspace() and rest[:1] and not rest[0].isspace():
+        space = rest.find(" ")
+        if space >= 0 and rest[space:].strip(_CUT_LEAD):
+            rest = rest[space:]
+    return rest.lstrip(_CUT_LEAD) or rest
+
+
 class OverlayPill(QWidget):
     position_changed = Signal(object)        # [x, y] (bottom-centre anchor, global logical px) after a drag
 
@@ -241,6 +256,8 @@ class OverlayPill(QWidget):
             return
         fm = QFontMetricsF(self._pv_font)
         shown = fm.elidedText(full, Qt.TextElideMode.ElideLeft, PREVIEW_MAX_W - 2 * PREVIEW_PAD_X)
+        if shown != full:
+            shown = "…" + _from_word_start(full, len(full) - (len(shown) - 1))
         cut = max(1 if shown != full else 0, len(shown) - len(tail))     # where the tentative words begin
         self._pv_head, self._pv_tail = shown[:cut], shown[cut:]
         self._pv_head_w = fm.horizontalAdvance(self._pv_head)

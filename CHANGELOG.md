@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Live preview: when a long caption loses its start, the text after the "…" now begins with a whole word. Before,
+  it could begin with the full stop or comma of the word that was cut off ("…. uh. move the meeting"), a space or
+  half a word.
+
 ## [0.3.0] - 2026-11-18
 
 ### Added
