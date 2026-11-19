@@ -347,4 +347,7 @@ Everything under `docs/assets/` is referenced by the README or by the GitHub rep
   model, Flow bar and paste, into a note page open in a Microsoft Edge app window. Two parts are stand-ins: the
   microphone is replaced by a recorded clip (a synthetic voice from Windows' offline speech engine), and the Flow
   bar's waveform is driven by that clip's samples. The caption shows the words in the clip; the text in the note
-  is what VoxFlow pasted.
+  is what VoxFlow pasted. It was recorded with 0.2.0, before the live preview, so its Flow bar shows no caption.
+* `live-preview.gif` is rendered by `scripts\caption_gif.py`: the real Flow bar widget, offscreen, at 150 %, with
+  scripted words fed to its live-preview caption and the preview controller twin driving its states (no model,
+  no microphone). It needs ffmpeg on PATH.

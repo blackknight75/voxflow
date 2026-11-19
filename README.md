@@ -18,6 +18,11 @@ VoxFlow is a push-to-talk dictation app for Windows 11. Hold **Ctrl + Win**, tal
 transcribed on your own machine by NVIDIA Parakeet TDT v3, tidied by a small local language model (fillers out,
 punctuation in, self-corrections resolved), and pasted into the focused window.
 
+> **New in 0.3.0:** [live preview](#live-preview-and-type-while-you-speak) shows your words above the Flow bar
+> while you speak; the optional *Type while you speak* pastes each finished sentence in hands-free mode while you
+> keep talking; and [Settings](#configuration) is now grouped into five tabs. All changes are in the
+> [changelog](CHANGELOG.md).
+
 ## Download
 
 ### [Download the latest release](https://github.com/blackknight75/voxflow/releases/latest)
@@ -36,9 +41,9 @@ scoop bucket add voxflow https://github.com/blackknight75/voxflow
 scoop install voxflow/voxflow
 ```
 
-(The winget command works once the package submission has been accepted into the winget community repository;
-the Scoop commands once v0.2.1 is published. Until then, use the installer from the Releases page. Scoop unpacks
-the app into its own folder instead of running the installer: details in
+(The Scoop bucket follows the latest release. The winget command works once the package submission has been
+accepted into the winget community repository; until then, use the installer or Scoop. Scoop unpacks the app into
+its own folder instead of running the installer: details in
 [packaging/scoop/README.md](packaging/scoop/README.md).)
 
 Good to know before you start:
@@ -103,7 +108,7 @@ hotkey to the paste for a clean sentence, **192 ms** when the language model is 
 | | |
 | --- | --- |
 | **Dictation** | Hold the hotkey to talk, release to paste. Double-tap to lock hands-free, tap again to finish. Esc cancels. |
-| **Live preview** | The words recognised so far appear above the Flow bar while you speak. A separate option, off by default, types each finished sentence into the app while you keep talking in hands-free mode (Settings > Dictation > While you speak). |
+| **Live preview** | The words recognised so far appear above the Flow bar while you speak. A separate option, off by default, types each finished sentence into the app while you keep talking in hands-free mode (Settings > Dictation > While you speak). [More below](#live-preview-and-type-while-you-speak). |
 | **Smart cleanup** | Removes "um" and "uh", fixes punctuation and capitals, resolves self-corrections ("at five, no wait, six"), understands "new line", "new paragraph", "bullet point". It never answers or obeys what you dictate. |
 | **Smart formatting** | Spoken numbers, money, percentages, dates, times, e-mail addresses, links, file names and numbered lists are written the way you would type them. |
 | **Command mode** | Hold **Alt + Win** and say what to do with the selected text ("make this more formal", "translate to Spanish", "turn into bullets"); the selection is replaced. With nothing selected it writes new text. |
@@ -116,7 +121,7 @@ hotkey to the paste for a clean sentence, **192 ms** when the language model is 
 | **Whisper mode** | Boosts quiet speech before recognition. |
 | **Sounds and media** | Soft start, stop and error cues (generated locally); optional muting of other apps while you dictate (always restored). |
 | **Flow bar** | A small always-on-top pill with a live waveform. It shows listening, hands-free, processing, done, errors, command mode and model loading. It is click-through, never takes focus, and remembers where you put it. |
-| **Main window** | Home, History, Dictionary, Snippets, Style, Settings; light, dark or system theme; a first-run setup guide. |
+| **Main window** | Home, History, Dictionary, Snippets, Style, Settings (five tabs, one search box across all of them); light, dark or system theme; a first-run setup guide. |
 | **System** | Tray icon with quick toggles, pause, launch at login, start in the tray, single instance, rotating log, crash logs kept on your PC. |
 
 <p align="center">
@@ -136,6 +141,40 @@ hotkey to the paste for a clean sentence, **192 ms** when the language model is 
 
 Team dictionaries and device sync are covered without a cloud: by packs and by the sync folder. Features that
 would need a cloud service, an account or a phone app are out of scope by design.
+
+### Live preview and Type while you speak
+
+<p align="center">
+  <img src="docs/assets/live-preview.gif" alt="The Flow bar's live-preview caption filling in word by word, then Pasted" width="560"><br>
+  <sub>Live preview: the caption fills in as you speak, and the newest word stays dimmed until the next one
+  confirms it. (Rendered from the real Flow bar with scripted words.)</sub>
+</p>
+
+**Live preview** (on by default) shows the words recognised so far in a caption above the Flow bar, so you can see
+that VoxFlow is hearing you before you let go. It is only a preview: what gets pasted is still the transcript of the
+whole recording, tidied up by the cleanup after you release the key. It works for hold-to-talk, hands-free and
+command mode. Switch it off under Settings > Dictation > While you speak. On a PC that is too slow to keep up, the
+preview pauses itself and Settings says so; dictation works as before.
+
+<p align="center">
+  <img src="docs/assets/screenshots/flow-bar-caption-handsfree.png" alt="Hands-free Flow bar with the lock icon, a timer and the live caption" width="420"><br>
+  <sub>Hands-free mode with the caption: the lock means you can let go of the hotkey.</sub>
+</p>
+
+**Type while you speak** (hands-free mode only, **off by default**) goes one step further. Double-tap the hotkey
+and each finished sentence is pasted into the app you are in while you keep talking, about 2 seconds behind your
+voice on a GPU; the last sentence is pasted when you tap the hotkey to stop. Switch it on under Settings >
+Dictation > While you speak. It is new and has had little real-world use so far, so a few things to know:
+
+* Text that is already pasted is not revised. A pause of about 1.5 seconds in the middle of a sentence is typed as
+  a sentence end.
+* The text follows the cursor: if you change windows, the next sentence goes to the new window. Nothing is pasted
+  into VoxFlow's own window; that sentence waits for the next one.
+* Undo removes the last pasted sentence only, and not while you are still dictating. History keeps one entry per
+  dictation. Snippets are not expanded in a dictation that was typed this way; the dictionary still applies.
+* On a slow PC without a GPU the preview can fall behind; typing then stops for that dictation and the rest is
+  pasted when you stop, so no words are lost.
+* Hold-to-talk and command mode are unchanged: they paste once, when you release the key.
 
 ### Languages
 
@@ -176,10 +215,10 @@ All shortcuts can be changed in Settings; an "undo last paste" shortcut is avail
 
 **First run.** The first launch opens a short setup guide (microphone check, model download, hotkey practice) and
 downloads the two models. The hotkey practice opens once the speech model is ready (straight away when it is already
-downloaded). Progress is shown in the Flow bar, in the setup guide and under Settings > On-device models; closing the
+downloaded). Progress is shown in the Flow bar, in the setup guide and under Settings > System > On-device models; closing the
 guide does not stop the download.
 
-**Backup.** Settings > Backup and sync > Export writes one `.voxbackup` file (history optional). Import shows
+**Backup.** Settings > Your data > Backup and sync > Export writes one `.voxbackup` file (history optional). Import shows
 what the file holds first and lets you tick the parts to import; *Merge* only adds what is missing (settings
 are left alone), *Replace* makes the ticked parts equal to the file. Settings that describe a computer
 (microphone, models, launch at login) are only restored on the computer the backup came from.
@@ -196,11 +235,26 @@ for this: it only reads and writes files.
 
 ## Configuration
 
-Everything can be changed on the Settings page.
+Everything can be changed on the Settings page. It is grouped into five tabs, and the search box beside the title
+looks through all of them (it also understands everyday words: "shortcut" finds every hotkey, "gpu" the device
+choices):
+
+| Tab | Sections |
+| --- | --- |
+| **Dictation** | Hotkeys, Language and text (language, smart cleanup, smart formatting, learn new words), While you speak (live preview, type while you speak) |
+| **Audio** | Microphone (input device, level test, whisper mode), Sound (cues, volume, muting other apps) |
+| **Appearance** | Theme and reduced motion, Flow bar (show when idle, position) |
+| **Your data** | History and privacy (keep history, retention, restore clipboard), Backup and sync |
+| **System** | Startup, Updates, On-device models (where each model runs, the speed check), Help and about |
 
 <p align="center">
-  <img src="docs/assets/screenshots/settings.png" alt="Settings page" width="70%">
+  <img src="docs/assets/screenshots/settings.png" alt="Settings, Dictation tab, with the While you speak section" width="70%">
 </p>
+<p align="center">
+  <img src="docs/assets/screenshots/settings-audio.png" alt="Settings, Audio tab" width="49%">
+  <img src="docs/assets/screenshots/settings-data.png" alt="Settings, Your data tab" width="49%">
+</p>
+<p align="center"><sub>The Dictation, Audio and Your data tabs.</sub></p>
 
 The file behind it is `%APPDATA%\VoxFlow\config.json`. Invalid values are replaced by the default when the file
 is loaded, numbers are clamped to the range shown, and an unreadable file is kept as `config.json.bad`.
@@ -253,7 +307,7 @@ VoxFlow is built so that there is nothing to trust: audio and text are processed
 
 * The one-time download of the two models from Hugging Face on first run (and again only if you change the
   model in the advanced settings or delete the cache). Hugging Face usage telemetry is switched off.
-* The update check (Settings > Updates), unless you set it to *Off (never check)*. Once a day, a few minutes
+* The update check (Settings > System > Updates), unless you set it to *Off (never check)*. Once a day, a few minutes
   after VoxFlow starts, and when you press *Check now*, it sends one anonymous HTTPS request to the GitHub API
   for the newest published VoxFlow release. The only identifying header is the generic User-Agent
   `VoxFlow/<version>`: no ID, no cookie, nothing about you or your PC. If you choose to install an update,
@@ -274,7 +328,7 @@ VoxFlow keeps the microphone open while it runs, also when it is paused. That is
 microphone only when you press would lose that, and a little more while the device starts. Until you hold the
 shortcut, the sound goes into a 2-second buffer in memory that is overwritten all the time. It is never written to
 disk, transcribed or sent anywhere. On a Bluetooth headset an open microphone keeps the headset in its call mode,
-which makes music sound worse: choose another microphone in Settings > Microphone (for example the PC's own)
+which makes music sound worse: choose another microphone in Settings > Audio > Microphone (for example the PC's own)
 to avoid that. Quitting VoxFlow closes the microphone.
 
 **What is stored, and where**
@@ -293,7 +347,7 @@ to avoid that. Quitting VoxFlow closes the microphone.
 | A sync folder, only if you choose one | Dictionary, snippets, styles and settings. Never history or statistics. |
 
 Recorded audio is held in memory for the transcription and is not written to disk. You can switch history off
-(Settings > History and privacy > Keep history; VoxFlow then offers to delete what is already saved), set a
+(Settings > Your data > History and privacy > Keep history; VoxFlow then offers to delete what is already saved), set a
 retention period, or clear it at any time (History > Clear all). With history off no transcript is written to disk.
 The log file never contains dictated text: errors while handling your words are logged by type and place only.
 
@@ -319,10 +373,10 @@ These are numbers from one machine, not a benchmark suite. For recognition accur
 ## FAQ and troubleshooting
 
 **Is it really offline?** Yes, after the first run. The models are downloaded once; from then on no network is
-needed. The only other request is the daily update check, which you can turn off in Settings > Updates
+needed. The only other request is the daily update check, which you can turn off in Settings > System > Updates
 (*Off (never check)*; *Check now* still works when you ask); dictation never waits for it.
 
-**How do updates work?** Settings > Updates offers three modes: *Install automatically*, *Notify me, I choose*
+**How do updates work?** Settings > System > Updates offers three modes: *Install automatically*, *Notify me, I choose*
 (the default) and *Off (never check)*. When a new version is out you get a notification and a dialog with its
 release notes and four choices: *Install now* (VoxFlow restarts, after any dictation in progress), *Install when
 I quit*, *Remind me later* (tomorrow) and *Skip this version*. In automatic mode VoxFlow downloads the update in
@@ -334,7 +388,7 @@ the SHA-256 check proves the file is the one published with the release, not who
 **Does it work without an NVIDIA GPU?** Yes. On a separate AMD or Intel graphics card with 4 GB or more, speech
 recognition uses the GPU through WebGPU and the language model through Vulkan (both were run on an NVIDIA card
 only: not yet tested on an AMD or Intel card). On a PC without a suitable card everything runs on the CPU. Plain
-dictation stays fast; on the CPU, sentences that need the language model take about 2 s. Settings > On-device
+dictation stays fast; on the CPU, sentences that need the language model take about 2 s. Settings > System > On-device
 models shows where each model runs. Integrated graphics are not used on the first start (on the one we measured,
 an AMD Radeon, both models were slower than on the CPU), but the speed check below measures them too and switches
 to one that is clearly faster on your PC.
@@ -345,7 +399,7 @@ runs a one-time speed check in the background: each device that works on your PC
 separate process at low priority, and it stops at once when you start dictating. Automatic then uses the fastest
 one, but only if it is at least 15% and 10 ms faster than the fixed choice, so a measurement can never make
 VoxFlow slower. The result is kept for this PC and measured again only after a driver, hardware or VoxFlow update,
-or when you press **Measure again** in Settings > On-device models. There you can also pick a device yourself; the
+or when you press **Measure again** in Settings > System > On-device models. There you can also pick a device yourself; the
 menu shows each measured time and why a device is unavailable. A speech recognition change applies at once; a
 language model change applies when VoxFlow restarts. `VOXFLOW_DEVICE` (see Troubleshooting) overrides all of this.
 
@@ -357,14 +411,14 @@ language model change applies when VoxFlow restarts. `VOXFLOW_DEVICE` (see Troub
 <summary><b>Troubleshooting</b></summary>
 
 * **Flow bar says "Loading / Downloading speech model":** first run downloads the models; progress is under
-  Settings > On-device models. If it failed (no internet), connect once and press **Try again** there.
+  Settings > System > On-device models. If it failed (no internet), connect once and press **Try again** there.
 * **"Speech model unavailable":** see `%APPDATA%\VoxFlow\logs\voxflow.log` (Settings > System > Help and about > Logs), then Try again.
 * **Cleanup is slow or Settings shows the cleanup model as "Limited":** the language model is not loaded and
   only the rule-based cleanup runs (command mode is off). On a source install the llama.cpp libraries are
   usually missing: run `.venv\Scripts\python.exe -m voxflow.cleanup --install-cuda` and
   `.venv\Scripts\python.exe scripts\fetch_llama_backends.py`. The log names the build that was loaded and why.
 * **Recognition is slower than about 0.1 s per 10 s of audio:** it runs on the CPU (expected without a separate
-  graphics card) or fell back to it. Check the backend in Settings > On-device models and make sure the GPU driver
+  graphics card) or fell back to it. Check the backend in Settings > System > On-device models and make sure the GPU driver
   is current; the log line `speech recognition runs on ...` says why a GPU was passed over. On a source install, make sure only
   `onnxruntime-gpu` is installed (`.venv\Scripts\python.exe -m pip list | findstr onnxruntime`).
 * **"Shortcuts unavailable":** the keyboard hook could not be installed; restart VoxFlow.
@@ -375,7 +429,7 @@ language model change applies when VoxFlow restarts. `VOXFLOW_DEVICE` (see Troub
   if it keeps happening VoxFlow shows one notice. Raising `cleanup_timeout_s` gives the model more time.
 * **Text pastes late or the old clipboard shows up in a slow app:** raise `restore_delay_s` (try `1.0`).
 * **"Microphone problem" / nothing is recorded:** choose the microphone in Settings or the tray menu, use
-  Settings > Microphone > Test, and check that Windows Settings > Privacy & security > Microphone allows
+  Settings > Audio > Microphone > Test, and check that Windows Settings > Privacy & security > Microphone allows
   desktop apps. A microphone that is unplugged while you speak ends the recording and uses what was said.
 * **"Heard only silence":** the microphone is muted or the wrong device is selected.
 * **A shortcut is refused:** it is used by another VoxFlow action, by Windows, or would get in the way of typing.
