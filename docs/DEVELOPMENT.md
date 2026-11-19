@@ -343,11 +343,14 @@ Everything under `docs/assets/` is referenced by the README or by the GitHub rep
   shape `packaging\make_icon.py` renders), the wordmark and the tagline were then composited locally with
   Pillow in Segoe UI, using the app's own cyan and violet from `voxflow/ui/theme.py`. No online image service
   was used.
-* `demo.gif` is a screen recording of one real dictation: the real keyboard hook, speech recognition, cleanup
-  model, Flow bar and paste, into a note page open in a Microsoft Edge app window. Two parts are stand-ins: the
-  microphone is replaced by a recorded clip (a synthetic voice from Windows' offline speech engine), and the Flow
-  bar's waveform is driven by that clip's samples. The caption shows the words in the clip; the text in the note
-  is what VoxFlow pasted. It was recorded with 0.2.0, before the live preview, so its Flow bar shows no caption.
+* `demo.gif` is a screen recording of one real dictation, made with `scripts\record_demo.py` (0.3.0, RTX 5080):
+  the real keyboard hook, speech recognition, live preview, cleanup model, Flow bar and paste, into a note page
+  open in a Microsoft Edge app window. The one stand-in is the microphone: a clip from Windows' offline speech
+  engine (voice *Microsoft Zira Desktop*) is fed in real time into the recorder's audio callback, so the level
+  meter, the live-preview caption above the Flow bar and the final transcript all hear it as microphone audio. The
+  line at the top shows the words in the clip; the caption is what the live preview recognised; the text in the
+  note is what VoxFlow pasted. The script takes over the middle of the primary screen for about 30 seconds and
+  sends keys only into its own windows (as `scripts\live_e2e.py` does); it needs ffmpeg on PATH.
 * `live-preview.gif` is rendered by `scripts\caption_gif.py`: the real Flow bar widget, offscreen, at 150 %, with
   scripted words fed to its live-preview caption and the preview controller twin driving its states (no model,
   no microphone). It needs ffmpeg on PATH.
