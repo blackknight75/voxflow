@@ -245,6 +245,8 @@ a PC with both an integrated and a discrete GPU the integrated one is not timed 
 .venv\Scripts\python.exe scripts\coverage.py             # the suite under coverage, per-module table
 .venv\Scripts\python.exe scripts\e2e_selftest.py         # real models on tests\tts_sample.wav, GPU then forced CPU
 .venv\Scripts\python.exe scripts\demo_ui.py              # screenshots of every page and Flow bar state in build\shots\
+.venv\Scripts\python.exe scripts\caption_gif.py          # docs\assets\live-preview.gif (offscreen; needs ffmpeg)
+.venv\Scripts\python.exe scripts\record_demo.py          # docs\assets\demo.gif: a real dictation on the REAL desktop (needs ffmpeg)
 ```
 
 * `set VOXFLOW_SKIP_MODEL_TESTS=1` skips the tests that load the real models.
