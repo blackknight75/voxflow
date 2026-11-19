@@ -150,6 +150,36 @@ def test_the_split_lands_on_a_word_boundary_with_one_space_when_the_start_is_eli
         assert pill._pv_head_w > 0 and pill._pv_tail_w > 0
 
 
+def test_the_elided_start_is_a_whole_word_never_punctuation_or_half_a_word(pill):
+    """Qt elides at a character; seen in the 0.3.0 demo as "…. uh. move the the meeting" (the cut landed just after
+    "should", before its full stop). Every cut position over a sentence full of punctuation must start the caption
+    on a whole word."""
+    spoken = ("Um, so I think we should. uh. move the the meeting to Thursday. no wait, Friday at 3.30. and uh, "
+              "send the report to the engineering team before the end of the day, you know, so they can review it.")
+    for drop in range(0, 110):                # the caption keeps the END, so shortening the end moves the cut
+        full = spoken[:len(spoken) - drop].strip()
+        pill.set_state("idle")
+        pill.set_state("listening")
+        pill.set_preview(full, "")
+        shown = pill._pv_head + pill._pv_tail
+        assert shown.startswith("…"), full
+        rest = shown[1:]
+        assert full.endswith(rest) and rest[0] not in O._CUT_LEAD, (full, shown)
+        assert full[len(full) - len(rest) - 1] in O._CUT_LEAD, f"half a word after the ellipsis: {shown!r}"
+
+
+@pytest.mark.parametrize("text, expect", [
+    ("x" * 400, "x"),                       # one word longer than the bubble: the plain cut is kept
+    ("a" + "." * 400, "."),                 # only punctuation is left: the plain cut is kept
+    ("y" * 400 + " !!!", "y"),              # the word after the cut is punctuation only: no move to it
+])
+def test_an_elided_start_with_no_word_to_move_to_keeps_the_plain_cut(pill, text, expect):
+    pill.set_state("listening")
+    pill.set_preview(text, "")
+    assert pill._pv_head.startswith("…" + expect) and text.endswith(pill._pv_head[1:])
+    assert pill._pv_head_w <= O.PREVIEW_MAX_W - 2 * O.PREVIEW_PAD_X + 1
+
+
 def test_a_tentative_part_longer_than_the_bubble_is_cut_but_still_dimmed(pill, clock):
     pill.set_state("listening")
     pill.set_preview("ok", LONG)
