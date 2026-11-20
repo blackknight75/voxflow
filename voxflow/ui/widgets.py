@@ -6,10 +6,13 @@ LevelMeter / Spinner / ProgressBar / LineEdit / SearchField / TextArea / ScrollA
 """
 from __future__ import annotations
 
+import html
 import math
+import re
 import time
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, QVariantAnimation, Signal
+from PySide6.QtGui import Qt as _GuiQt       # Qt.mightBeRichText lives in QtGui's part of the namespace
 from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QGuiApplication, QLinearGradient, QPainter, QPainterPath,
                            QPalette, QPen)
 from PySide6.QtWidgets import (QAbstractButton, QFrame, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QScrollArea,
@@ -60,6 +63,20 @@ def style_tooltips() -> None:
     QToolTip.setFont(T.font(T.F_SMALL))
 
 
+might_be_rich_text = _GuiQt.mightBeRichText
+
+
+def plain_tip(text: str) -> str:
+    """``text`` as a tooltip that shows exactly these characters. Qt renders a tooltip that looks like HTML as
+    rich text, so a dictionary word such as ``<img src="//host/share/a.png">`` in "Edit ..." was fetched from
+    that address when the pointer rested on the button (security review S-02). Such a text is handed over
+    escaped; any other text is passed on as it is."""
+    text = str(text or "")
+    if not might_be_rich_text(text):
+        return text
+    return f'<p style="white-space: pre-wrap">{html.escape(text)}</p>'
+
+
 # --------------------------------------------------------------------------- text
 class Label(QLabel):
     """Themed text. ``role`` is a colour token name so the label follows theme switches."""
@@ -74,14 +91,33 @@ class Label(QLabel):
         if selectable:
             self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse
                                          | Qt.TextInteractionFlag.TextSelectableByKeyboard)
+        self._stale = False
         self._apply()
-        T.bus().changed.connect(self._apply)
+        T.bus().changed.connect(self._theme_changed)
 
     def set_role(self, role: str) -> None:
         self._role = role
         self._apply()
 
+    def setToolTip(self, text: str) -> None:
+        super().setToolTip(plain_tip(text))             # it may be a path or other text from outside: never HTML
+
+    def _theme_changed(self) -> None:
+        """New colours now when the label is on screen, else when it is next shown. With hundreds of rows built on
+        pages that are not open, giving every label its palette at once was most of what was left of the cost of
+        a theme switch (QA Q-14)."""
+        if self.isVisible():
+            self._apply()
+        else:
+            self._stale = True
+
+    def showEvent(self, e):
+        if self._stale:
+            self._apply()
+        super().showEvent(e)
+
     def _apply(self) -> None:
+        self._stale = False
         pal = self.palette()
         c = T.token(self._role)
         pal.setColor(QPalette.ColorRole.WindowText, c)
@@ -89,6 +125,65 @@ class Label(QLabel):
         pal.setColor(QPalette.ColorRole.Highlight, T.alpha(T.CYAN, 0.32))
         pal.setColor(QPalette.ColorRole.HighlightedText, T.TEXT)
         self.setPalette(pal)
+
+
+class ElidedLabel(Label):
+    """One line that never asks for more room than it is given: text that does not fit is cut with "…" (at the end,
+    or in the middle for a path). ``text()`` is always the whole text. A plain non-wrapping label instead makes its
+    page as wide as its text, which pushes the controls beside it out of the window."""
+
+    def __init__(self, text: str = "", pt: float = T.F_BODY, role: str = "TEXT", weight=T.W_NORMAL,
+                 mode=Qt.TextElideMode.ElideRight, parent=None, selectable: bool = False):
+        self._full, self._mode = "", mode
+        super().__init__("", pt, role, weight, wrap=False, parent=parent, selectable=selectable)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setText(text)
+
+    def text(self) -> str:
+        return self._full
+
+    def setText(self, text: str) -> None:
+        self._full = str(text or "")
+        self._fit()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._fit()
+
+    def _fit(self) -> None:
+        shown = QFontMetricsF(self.font()).elidedText(self._full, self._mode, max(0.0, self.width() - 2.0))
+        if shown != QLabel.text(self):
+            QLabel.setText(self, shown)
+
+    def shown_text(self) -> str:
+        return QLabel.text(self)
+
+
+_LONG_WORD = re.compile(r"(\S{24})(?=\S)")
+
+
+def breakable(text: str) -> str:
+    """``text`` with an invisible place to break the line every 24 characters inside a longer word (a link, a
+    file name, a path). Qt wraps text only between words: one long word made its label, and with the label the
+    whole page, as wide as the word, and painted text ran out of its box."""
+    return _LONG_WORD.sub("\\1\u200b", text)
+
+
+class WrapLabel(Label):
+    """Wrapped text that can also break inside a word too long for the line: for text that comes from the user or
+    from a file. ``text()`` is always the text as given."""
+
+    def __init__(self, text: str = "", pt: float = T.F_BODY, role: str = "TEXT", weight=T.W_NORMAL, parent=None):
+        self._full = ""
+        super().__init__("", pt, role, weight, parent=parent)
+        self.setText(text)
+
+    def text(self) -> str:
+        return self._full
+
+    def setText(self, text: str) -> None:
+        self._full = str(text or "")
+        QLabel.setText(self, breakable(self._full))
 
 
 class Caption(Label):
@@ -117,6 +212,9 @@ class _Hover(QAbstractButton):
     def _set_hover(self, v) -> None:
         self._hover = float(v)
         self.update()
+
+    def setToolTip(self, text: str) -> None:
+        super().setToolTip(plain_tip(text))             # "Edit <the user's word>": shown as typed, never as HTML
 
     def _go(self, target: float) -> None:
         self._anim.stop()
@@ -447,6 +545,7 @@ class Segmented(QWidget):
     """Mutually exclusive options in one track. Left/Right arrows move the selection."""
 
     changed = Signal(object)
+    reselected = Signal(object)        # the segment that is already chosen was clicked again
 
     def __init__(self, options: list[tuple[object, str]], value=None, parent=None, name: str = ""):
         super().__init__(parent)
@@ -535,7 +634,11 @@ class Segmented(QWidget):
 
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton and self.options:
-            self.set_value(self.options[self._seg_at(e.position().x())][0], emit=True)
+            value = self.options[self._seg_at(e.position().x())][0]
+            if value == self.value:
+                self.reselected.emit(value)
+            else:
+                self.set_value(value, emit=True)
 
     def keyPressEvent(self, e):
         step = {Qt.Key.Key_Left: -1, Qt.Key.Key_Up: -1, Qt.Key.Key_Right: 1, Qt.Key.Key_Down: 1}.get(e.key())
@@ -809,7 +912,7 @@ class HotkeyRecorder(QWidget):
         row.addWidget(self.btn)
         row.addWidget(self.btn_clear)            # fixed slot after Change, so the x column is aligned in every row
         col.addLayout(row)
-        self.msg = Label("", T.F_CAPTION, "RED", wrap=False)
+        self.msg = Label("", T.F_CAPTION, "RED")      # wraps: a long reason must not push the row out of the page
         self.msg.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.msg.hide()
         col.addWidget(self.msg)
@@ -931,7 +1034,8 @@ class HotkeyRecorder(QWidget):
 
 # --------------------------------------------------------------------------- popup menu + dropdown
 class PopupMenu(QWidget):
-    """Custom-painted popup list used for the tray menu and dropdowns. Keyboard: arrows, Home/End, Enter, Esc.
+    """Custom-painted popup list used for the tray menu and dropdowns. Keyboard: arrows, Home/End, Page Up/Down,
+    Enter, Esc; typing goes to the next row that starts with what was typed.
 
     items: dicts with ``kind`` in {header, status, action, toggle, choice, separator, info} and optional
     ``text, sub, checked, enabled, on_click, dot (QColor), keep_open, icon``.
@@ -963,6 +1067,8 @@ class PopupMenu(QWidget):
         self._anim.setEndValue(1.0)
         self._anim.valueChanged.connect(self._on_anim)
         self._margin = 14
+        self._typed = ""                 # type-ahead: the letters typed in quick succession, and when the last came
+        self._typed_at = 0.0
 
     def _on_anim(self, v) -> None:
         self._appear = float(v)
@@ -976,10 +1082,16 @@ class PopupMenu(QWidget):
         self._layout()
 
     def set_items(self, items: list[dict]) -> None:
+        # the same menu filled again while it is open (a toggle flipped, the status changed): the highlighted row and
+        # the scroll position stay. Reset, the next arrow key started from the top again and Space hit the wrong
+        # row (QA Q-08).
+        same = self.isVisible() and len(items) == len(self._items)
         self._items = items
-        self._hover = -1
+        if not same:
+            self._hover = -1
+            self._scroll = 0
+            self._typed = ""
         self.setAccessibleName("Menu")
-        self._scroll = 0
         self._layout()
 
     def _layout(self) -> None:
@@ -1069,15 +1181,56 @@ class PopupMenu(QWidget):
         elif r.bottom() - self._scroll > view_h - self._margin:
             self._scroll = min(self._content_h - view_h, r.bottom() - view_h + self._margin)
 
+    def _go(self, i: int) -> None:
+        """Highlight row ``i`` and scroll it into view (its name is what a screen reader then reads)."""
+        self._ensure_visible(i)
+        self._set_hover(i)
+        self.update()
+
     def _move(self, step: int, start: int | None = None) -> None:
         n = len(self._items)
         i = self._hover if start is None else start
         for _ in range(n):
             i = (i + step) % n
             if self._usable(i):
-                self._ensure_visible(i)
-                self._set_hover(i)
-                self.update()
+                self._go(i)
+                return
+
+    def _page(self, step: int) -> None:
+        """Page Up / Page Down: the row one view-height away, or the first / last one when that is nearer."""
+        rows = [i for i in range(len(self._items)) if self._usable(i)]
+        if not rows:
+            return
+        if self._hover < 0:
+            self._go(rows[0] if step > 0 else rows[-1])
+            return
+        span = max(1, self.height() - 2 * self._margin - self._rects[self._hover].height())
+        want = self._rects[self._hover].top() + step * span
+        ahead = [i for i in rows if (i - self._hover) * step > 0]
+        within = [i for i in ahead if (self._rects[i].top() - want) * step <= 0]
+        if within:
+            self._go(within[-1] if step > 0 else within[0])
+        elif ahead:                              # rows taller than the view: at least one row further
+            self._go(ahead[0] if step > 0 else ahead[-1])
+
+    TYPE_AHEAD_S = 0.9                   # a pause this long starts a new word
+
+    def _type(self, char: str) -> None:
+        """Type-ahead, as in a Windows list: letters typed in quick succession find the next row that starts with
+        them; the same letter again goes on to the next row with that letter."""
+        now = time.monotonic()
+        if now - self._typed_at > self.TYPE_AHEAD_S:
+            self._typed = ""
+        self._typed_at = now
+        self._typed += char.casefold()
+        n = len(self._items)
+        again = len(set(self._typed)) == 1                    # "g", "gg": step through the rows with that letter
+        prefix = self._typed[0] if again else self._typed
+        first = self._hover + 1 if again else max(0, self._hover)     # a longer word may still be the row it is on
+        for k in range(n):
+            i = (first + k) % n
+            if self._usable(i) and str(self._items[i].get("text") or "").casefold().startswith(prefix):
+                self._go(i)
                 return
 
     def _activate(self, i: int) -> None:
@@ -1119,10 +1272,15 @@ class PopupMenu(QWidget):
             self._move(1, -1)
         elif k == Qt.Key.Key_End:
             self._move(-1, 0)
+        elif k in (Qt.Key.Key_PageDown, Qt.Key.Key_PageUp):
+            self._page(1 if k == Qt.Key.Key_PageDown else -1)
         elif k in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
             self._activate(self._hover)
         elif k == Qt.Key.Key_Escape:
             self.close()
+        elif e.text().strip() and e.text().isprintable() and not (
+                e.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
+            self._type(e.text())
         else:
             super().keyPressEvent(e)
 
@@ -1349,7 +1507,8 @@ class ChoiceButton(_Hover):
 
 # --------------------------------------------------------------------------- meters + progress
 class LevelMeter(QWidget):
-    """Live input level. ``source`` is a callable returning 0..1; polled only while visible."""
+    """Live input level. ``source`` is a callable returning 0..1. It is polled only while the meter is visible, and
+    the clock stops altogether once there is no source and the bar has come to rest (QA U-09)."""
 
     def __init__(self, source=None, parent=None, height: int = 10):
         super().__init__(parent)
@@ -1367,15 +1526,24 @@ class LevelMeter(QWidget):
 
     def set_source(self, source) -> None:
         self.source = source
+        self._run()
 
     def set_level(self, v: float) -> None:
         self._level = max(0.0, min(1.0, float(v)))
         self._peak = max(self._peak, self._level)
+        self._run()
         self.update()
 
+    def _run(self) -> None:
+        """The clock ticks only while there is something to follow: a source, or a bar still falling back."""
+        if not self.isVisible() or (self.source is None and self._level == 0.0 and self._peak == 0.0):
+            self._timer.stop()
+        elif not self._timer.isActive():
+            self._last = time.perf_counter()
+            self._timer.start()
+
     def showEvent(self, e):
-        self._last = time.perf_counter()
-        self._timer.start()
+        self._run()
 
     def hideEvent(self, e):
         self._timer.stop()
@@ -1390,9 +1558,15 @@ class LevelMeter(QWidget):
                 target = max(0.0, min(1.0, float(self.source()) * 2.2))
             except Exception:
                 target = 0.0
-        self._level = T.smooth(self._level, target, dt, 24 if target > self._level else 9)
-        self._peak = max(self._level, self._peak - dt * 0.35)
-        self.update()
+        level = T.smooth(self._level, target, dt, 24 if target > self._level else 9)
+        peak = max(level, self._peak - dt * 0.35)
+        if target < 5e-4 and level < 5e-4 and peak < 5e-4:   # silence: settle at zero, do not creep towards it
+            level = peak = 0.0
+        moved = (level, peak) != (self._level, self._peak)
+        self._level, self._peak = level, peak
+        if moved:                                # nothing to draw while the meter stands still
+            self.update()
+        self._run()                              # no source and settled at zero: nothing left to tick for
 
     def paintEvent(self, _):
         p = painter(self)
@@ -1521,6 +1695,9 @@ class _Styled:
 
 
 class LineEdit(QLineEdit, _Styled):
+    # The placeholder colour is part of the stylesheet (``placeholder-text-color`` in ``theme.qss``). Set through
+    # the palette it only held until Qt next polished the widget, so a box looked different after a live theme
+    # switch than after a fresh start (QA Q-16).
     def __init__(self, text: str = "", placeholder: str = "", parent=None, name: str = ""):
         super().__init__(text, parent)
         self.setPlaceholderText(placeholder)
@@ -1533,12 +1710,6 @@ class LineEdit(QLineEdit, _Styled):
         if bool(self.property("invalid")) != bool(bad):
             self.setProperty("invalid", bool(bad))
             self._restyle()
-
-    def _restyle(self) -> None:
-        super()._restyle()
-        pal = self.palette()
-        pal.setColor(QPalette.ColorRole.PlaceholderText, T.TEXT_FAINT)
-        self.setPalette(pal)
 
 
 class SearchField(LineEdit):
@@ -1553,6 +1724,13 @@ class SearchField(LineEdit):
         if self._lead is not None:
             self._lead.setIcon(make_qicon("search", T.TEXT_DIM, 16))
 
+    def keyPressEvent(self, e):
+        """Esc clears a search first; only an empty box lets it through (to the window, which hides)."""
+        if e.key() == Qt.Key.Key_Escape and self.text():
+            self.clear()
+            return
+        super().keyPressEvent(e)
+
 
 class TextArea(QPlainTextEdit, _Styled):
     def __init__(self, text: str = "", placeholder: str = "", parent=None, name: str = ""):
@@ -1563,12 +1741,6 @@ class TextArea(QPlainTextEdit, _Styled):
         self.setTabChangesFocus(True)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self._init_style()
-
-    def _restyle(self) -> None:
-        super()._restyle()
-        pal = self.palette()
-        pal.setColor(QPalette.ColorRole.PlaceholderText, T.TEXT_FAINT)
-        self.setPalette(pal)
 
 
 class ScrollArea(QScrollArea, _Styled):
@@ -1590,4 +1762,13 @@ class ScrollArea(QScrollArea, _Styled):
         super().setWidget(w)
 
     def _restyle(self) -> None:
-        self.setStyleSheet(T.qss() + "QScrollArea > QWidget > QWidget { background: transparent; }")
+        """A theme change touches only the two scroll bars and one property. The area's own stylesheet is the same
+        text in every theme and is set once: setting a stylesheet makes Qt polish every widget below it again, so
+        a theme switch took longer the more rows the pages had (QA Q-14: 300 ms with 100 words, 100 snippets and
+        1,200 transcripts loaded)."""
+        self.setProperty("scheme", T.scheme())             # picks the tooltip colours in ``theme.scroll_area_qss``
+        if not self.styleSheet():
+            self.setStyleSheet(T.scroll_area_qss())
+        bars = T.scroll_bar_qss()
+        for bar in (self.verticalScrollBar(), self.horizontalScrollBar()):
+            bar.setStyleSheet(bars)

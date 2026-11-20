@@ -32,13 +32,13 @@ def note(test: str, evidence: str) -> None:
 @pytest.fixture
 def redirects(monkeypatch):
     seen: list[str] = []
-    real = U._CheckedRedirect.redirect_request
+    real = U.checked_redirect().redirect_request
 
     def spy(self, req, fp, code, msg, headers, newurl):
         seen.append(newurl)
         return real(self, req, fp, code, msg, headers, newurl)
 
-    monkeypatch.setattr(U._CheckedRedirect, "redirect_request", spy)
+    monkeypatch.setattr(U.checked_redirect(), "redirect_request", spy)
     return seen
 
 
@@ -60,13 +60,13 @@ def test_b_real_api_json_redirect_tls_and_user_agent(monkeypatch, tmp_path, redi
     monkeypatch.setattr(U, "API_LATEST", f"https://api.github.com/repos/{OTHER_REPO}/releases/latest")
     http = U.Http()
     sent = {}
-    real_open = U.urllib.request.OpenerDirector.open
+    real_open = urllib.request.OpenerDirector.open
 
     def capture(self, req, *a, **k):
         sent.setdefault("headers", dict(req.header_items()))
         return real_open(self, req, *a, **k)
 
-    monkeypatch.setattr(U.urllib.request.OpenerDirector, "open", capture)
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", capture)
     with http.open(U.API_LATEST, "api") as resp:
         assert resp.status == 200
         data = json.loads(U._read_limited(resp, U.API_MAX_BYTES).decode("utf-8"))

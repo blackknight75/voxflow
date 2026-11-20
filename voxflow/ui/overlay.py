@@ -38,6 +38,8 @@ MAX_TEXT_W = 350                # fits the longest controller message ("Window c
 N_PTS = 36
 _TEXT_STATES = ("done", "error", "loading", "arrange")
 HINT_SEP = " · "                # the controller appends secondary hints to a message after this separator
+EDGE_X = CANVAS_W // 2 - 10     # a moved bar keeps this distance from the left and right screen edges ...
+EDGE_TOP = CANVAS_H - BOTTOM_PAD  # ... and this one from the top (room for the caption above the pill)
 _PREVIEW_STATES = ("listening", "locked", "processing")     # the live-preview caption exists only in these
 PREVIEW_MAX_W = CANVAS_W - 40   # widest caption bubble (text plus padding); longer text loses its start
 PREVIEW_PAD_X = 12              # bubble padding left and right of the text
@@ -272,6 +274,8 @@ class OverlayPill(QWidget):
             self.set_state("listening", mode=self.mode)
 
     def set_paused(self, paused: bool) -> None:
+        if bool(paused) == self.paused and self.isVisible() == (self.state != "idle" or self.show_idle):
+            return                               # every status change calls this: no frames when nothing changed
         self.paused = bool(paused)
         self._kick()
 
@@ -348,8 +352,11 @@ class OverlayPill(QWidget):
             for s in QGuiApplication.screens():
                 g = s.availableGeometry()
                 if g.adjusted(-8, -8, 8, 8).contains(self._anchor):
-                    x = min(max(self._anchor.x(), g.left() + 140), g.right() - 140)
-                    y = min(max(self._anchor.y(), g.top() + 70), g.bottom() - 6)
+                    # the whole canvas stays on the screen: the live-preview caption (up to 480 px wide, above the
+                    # pill) and the long messages were cut off at a screen edge with the old 140 / 70 px (QA Q-05)
+                    mx = min(EDGE_X, g.width() // 2)
+                    x = min(max(self._anchor.x(), g.left() + mx), g.right() - mx)
+                    y = min(max(self._anchor.y(), g.top() + min(EDGE_TOP, g.height() // 2)), g.bottom() - 6)
                     return QPoint(x, y)
         g = (active_screen() or QGuiApplication.primaryScreen()).availableGeometry()
         return QPoint(g.center().x(), g.bottom() - SCREEN_GAP)

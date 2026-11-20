@@ -349,6 +349,24 @@ def test_dictionary_terms_reach_the_system_prompt_for_that_call_only():
     assert c._terms is None
 
 
+def test_a_hint_that_changes_with_every_dictation_goes_after_the_examples():
+    """QA D-02: more terms than fit means a different choice per dictation; in the system message that threw away
+    the cached start of the prompt every time. Few terms: the prompt is exactly what it was."""
+    c, llm = with_llm(lambda user, msgs: user)
+    many = [f"Term{i}" for i in range(C._MAX_HINT_TERMS + 5)] + ["Zendesk"]
+    c.clean("the the ticket is in zendesk already", terms=many)
+    msgs = llm.calls[-1]["messages"]
+    assert msgs[0] == {"role": "system", "content": C._SYSTEM}, "the start of the prompt never changes"
+    assert [m["role"] for m in msgs[-2:]] == ["system", "user"]
+    late = msgs[-2]["content"]
+    assert late.startswith("Rules (continued):") and "Preferred spellings" in late and "Zendesk" in late
+    assert len(msgs) == 1 + 2 * len(C._FEWSHOT) + 2
+    c.clean("i pushed the the branch to get hub", terms=["GitHub", "PyTorch", None, "  "])
+    few = llm.calls[-1]["messages"]
+    assert few[0]["content"].startswith(C._SYSTEM) and "GitHub, PyTorch." in few[0]["content"]
+    assert len(few) == 1 + 2 * len(C._FEWSHOT) + 1 and few[-1]["role"] == "user"
+
+
 def test_terms_hint_is_bounded():
     assert C._terms_hint(None) == "" and C._terms_hint([]) == "" and C._terms_hint(["", "  "]) == ""
     many = C._terms_hint([f"Term{i}" for i in range(500)])

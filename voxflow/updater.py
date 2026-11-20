@@ -14,6 +14,10 @@ the network by itself (no check at start, none daily): only a click on "Check no
   silently (``/VERYSILENT /SUPPRESSMSGBOXES /NORESTART``) after VoxFlow has shut down, never while a dictation or
   a command is being recorded or processed. The installer is not code-signed: the checksum proves the file is the
   one published with the release, not who built it.
+* Nothing is started that cannot finish: free disk space is checked before the download and before Setup, and the
+  verified installer is held open from the moment VoxFlow is asked to quit until Setup runs. A Setup run that
+  leaves the version unchanged is reported at the next start and repeated automatically only once; a release
+  that GitHub no longer publishes is dropped, with its download.
 * A copy installed with Scoop or winget, or run from source, never replaces itself: it can only tell the user.
 
 Pure helpers (version compare, URL allow-list, release parsing, checksums, the download, install-kind detection,
@@ -24,22 +28,21 @@ from __future__ import annotations
 
 import ctypes
 import datetime as _dt
+import functools
 import hashlib
 import json
 import logging
+import math
 import os
 import random
 import re
 import shutil
-import ssl
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import NamedTuple
@@ -47,6 +50,9 @@ from typing import NamedTuple
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from . import __version__, config as cfgmod
+
+# urllib.request (with http.client, email and ssl behind it) is imported where a request is made, not here: it cost
+# about a tenth of the controller's import time, at every start, for a check that runs once a day (QA R-A).
 
 log = logging.getLogger("voxflow.updater")
 
@@ -56,9 +62,9 @@ RELEASES_PAGE = f"https://github.com/{REPO}/releases"
 WINGET_ID = "blackknight75.VoxFlow"
 
 MODES = cfgmod.UPDATE_MODES                  # ("auto", "notify", "off")
-DEFAULT_MODE = cfgmod.DEFAULT_UPDATE_MODE    # "notify" (confirmed by the maintainer)
 
 CHECK_EVERY_S = 24 * 3600                    # at most one automatic check a day
+RETRY_FAILED_S = 3600                        # ... but one that failed (offline at wake-up) is tried again after an hour
 STARTUP_DELAY_S = (90, 600)                  # the first automatic check: a random moment in this window after start
 REMIND_AFTER_S = 24 * 3600                   # "Remind me later" = tomorrow
 TIMEOUT_S = 15.0                             # per connection / read
@@ -79,6 +85,12 @@ SUMS_NAME = "SHA256SUMS.txt"
 STATE_FILE = "updates.json"
 INSTALLER_SWITCHES = ("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
 MANAGED_MARKER = "managed-by.txt"            # written by the installer when winget passes /MANAGEDBY=winget
+SETUP_LOG = "install.log"                    # Setup's /LOG, in the download folder
+MAX_AUTO_ATTEMPTS = 2                        # Setup runs that left the version unchanged before automatic mode stops
+DOWNLOAD_SPARE_BYTES = 100 * 1024 ** 2       # left free on the temp drive besides the installer itself
+# Setup unpacks about 2.2 times the installer's size (3.8 GB from 1.8 GB) and keeps the old program files until the
+# new ones are complete (packaging/voxflow.iss), so that much must be free on the install drive.
+UNPACKED_FACTOR = 2.5
 
 
 def user_agent() -> str:
@@ -86,7 +98,16 @@ def user_agent() -> str:
 
 
 class UpdateError(Exception):
-    """A check or a download that did not work; ``str()`` is a sentence for the user."""
+    """A check or a download that did not work; ``str()`` is a sentence for the user. ``status`` is the HTTP status
+    when GitHub answered with an error, else 0."""
+
+    status = 0
+
+
+class NoRelease(UpdateError):
+    """GitHub answered, and there is no final release to offer: none is published (``status`` 404), or the newest
+    one is a draft, a pre-release or has a tag that is not a version. The check itself worked, so it is not tried
+    again an hour later like one that failed."""
 
 
 class Cancelled(UpdateError):
@@ -176,17 +197,24 @@ def release_asset_url(url: str) -> bool:
     return allowed_url(url) and urllib.parse.urlsplit(str(url)).hostname == "github.com"
 
 
-class _CheckedRedirect(urllib.request.HTTPRedirectHandler):
-    """Follow a redirect only to another allowed URL of the same kind."""
+@functools.cache
+def checked_redirect():
+    """The urllib handler class that follows a redirect only to another allowed URL of the same kind. Built on
+    first use, because its base class is in urllib.request."""
+    import urllib.request
 
-    def __init__(self, kind: str):
-        super().__init__()
-        self.kind = kind
+    class CheckedRedirect(urllib.request.HTTPRedirectHandler):
+        def __init__(self, kind: str):
+            super().__init__()
+            self.kind = kind
 
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if not allowed_url(newurl, self.kind):
-            raise UpdateError("The download was redirected to a server VoxFlow does not trust, so it was stopped.")
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            if not allowed_url(newurl, self.kind):
+                raise UpdateError("The download was redirected to a server VoxFlow does not trust, so it was "
+                                  "stopped.")
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+    return CheckedRedirect
 
 
 class Http:
@@ -200,16 +228,21 @@ class Http:
         """A response (``status``, ``headers``, ``read(n)``, context manager). Raises UpdateError."""
         if not allowed_url(url, kind):
             raise UpdateError("VoxFlow refused to contact a server it does not trust.")
+        import ssl
+        import urllib.error
+        import urllib.request
         accept = "application/vnd.github+json" if kind == "api" else "application/octet-stream"
         req = urllib.request.Request(url, headers={"User-Agent": user_agent(), "Accept": accept, **(headers or {})})
         opener = urllib.request.build_opener(
-            urllib.request.HTTPSHandler(context=ssl.create_default_context()), _CheckedRedirect(kind))
+            urllib.request.HTTPSHandler(context=ssl.create_default_context()), checked_redirect()(kind))
         try:
             return opener.open(req, timeout=self.timeout)
         except urllib.error.HTTPError as exc:
             if exc.code == 416:                         # a resumed range past the end: the caller starts over
                 return exc
-            raise UpdateError(_http_problem(exc.code)) from None
+            problem = UpdateError(_http_problem(exc.code))
+            problem.status = exc.code
+            raise problem from None
         except UpdateError:
             raise
         except (urllib.error.URLError, OSError, ValueError) as exc:
@@ -286,7 +319,17 @@ class Release:
                 setattr(rel, name, "")
         if rel.installer and rel.installer != installer_name(rel.version):
             rel.installer = rel.installer_url = ""
+        if not _own_page(rel.page):                           # the "Releases page" button opens this address
+            rel.page = RELEASES_PAGE
         return rel
+
+
+def _own_page(page) -> bool:
+    """True for the page of a release of this repository, the only address the dialog's link may open. Checked for
+    the API answer and for the copy read back from updates.json: a state file edited by another program made the
+    button open any address or local file (security review S-12)."""
+    return isinstance(page, str) and (page == RELEASES_PAGE or bool(
+        re.fullmatch(rf"https://github\.com/{REPO}/releases/tag/[0-9A-Za-z.+-]+", page)))
 
 
 def installer_name(version: str) -> str:
@@ -294,18 +337,19 @@ def installer_name(version: str) -> str:
 
 
 def parse_release(data) -> Release:
-    """A release from the GitHub API answer. Raises UpdateError for drafts, pre-releases and odd answers."""
+    """A release from the GitHub API answer. Raises NoRelease for a draft, a pre-release or a tag that is not a
+    version, UpdateError for an answer that cannot be read."""
     if not isinstance(data, dict):
         raise UpdateError("GitHub sent an answer VoxFlow does not understand.")
     if data.get("draft") or data.get("prerelease"):
-        raise UpdateError("The newest release on GitHub is not a final release.")
+        raise NoRelease("The newest release on GitHub is not a final release.")
     tag = str(data.get("tag_name") or "")
     version = parse_version(tag)
     if version is None or version.pre:
-        raise UpdateError("The newest release on GitHub has no usable version number.")
+        raise NoRelease("The newest release on GitHub has no usable version number.")
     ver = str(version)
     page = str(data.get("html_url") or "")
-    if not re.fullmatch(rf"https://github\.com/{REPO}/releases/tag/[0-9A-Za-z.+-]+", page):
+    if not _own_page(page):
         page = RELEASES_PAGE                            # the link the dialog offers: this repository only
     rel = Release(version=ver, tag=tag, title=str(data.get("name") or f"VoxFlow {ver}")[:120],
                   notes=plain_notes(data.get("body")), page=page, published=str(data.get("published_at") or ""))
@@ -363,7 +407,15 @@ def plain_notes(body) -> str:
 
 
 def fetch_latest(http) -> Release:
-    with http.open(API_LATEST, "api") as resp:
+    try:
+        resp = http.open(API_LATEST, "api")
+    except UpdateError as exc:
+        if exc.status != 404:
+            raise
+        gone = NoRelease(str(exc))                      # no published release (any more): see Updater._withdrawn
+        gone.status = 404
+        raise gone from None
+    with resp:
         body = _read_limited(resp, API_MAX_BYTES)
     try:
         data = json.loads(body.decode("utf-8"))
@@ -432,12 +484,38 @@ def download_folder() -> Path:
     return Path(tempfile.gettempdir()) / "VoxFlow-update"
 
 
+def free_bytes(path: Path) -> int | None:
+    """Free space on the drive that holds ``path`` (asked of the nearest folder that exists); None when it cannot
+    be told."""
+    for folder in (path, *path.parents):
+        try:
+            return shutil.disk_usage(folder).free
+        except OSError:
+            continue
+    return None
+
+
+def _size(n: int) -> str:
+    return f"{n / 1024 ** 3:.1f} GB" if n >= 1000 * 1024 ** 2 else f"{max(1, round(n / 1024 ** 2))} MB"
+
+
+def space_problem(what: str, needed: int, folder: Path, free=free_bytes) -> str:
+    """A sentence when ``folder``'s drive has less than ``needed`` bytes free ("" when there is room, or when the
+    free space cannot be told). ``what``: "download" or "install"."""
+    have = free(folder)
+    if have is None or have >= needed:
+        return ""
+    return (f"There is not enough free disk space to {what} the update: {_size(needed)} is needed in {folder}, "
+            f"{_size(have)} is free.")
+
+
 def download_installer(http, release: Release, folder: Path, progress=None, cancel=None,
-                       _restarted: bool = False) -> tuple[Path, str]:
+                       _restarted: bool = False, free=free_bytes) -> tuple[Path, str]:
     """Download the release's installer into ``folder`` and verify it. Returns ``(path, sha256)``.
 
     An interrupted download is resumed from its ``.part`` file; older installers and stray files in ``folder``
-    are deleted. A file whose SHA-256 differs from ``SHA256SUMS.txt`` is deleted and UpdateError is raised."""
+    are deleted. A file whose SHA-256 differs from ``SHA256SUMS.txt`` is deleted and UpdateError is raised. So is
+    one for which the drive has no room (``free``: see :func:`free_bytes`), before a byte of it is fetched."""
     if not release.installable:
         raise UpdateError("This release has no Windows installer to download.")
     folder.mkdir(parents=True, exist_ok=True)
@@ -445,7 +523,7 @@ def download_installer(http, release: Release, folder: Path, progress=None, canc
     final = folder / release.installer
     part = folder / (release.installer + ".part")
     for stray in folder.iterdir():                     # old versions, a part of another version
-        if stray.name not in (final.name, part.name):
+        if stray.name not in (final.name, part.name, SETUP_LOG):   # (Setup's log: Updater._tidy decides)
             _remove(stray)
     if final.exists():
         if sha256_file(final, cancel) == expected:
@@ -455,12 +533,16 @@ def download_installer(http, release: Release, folder: Path, progress=None, canc
     if release.size and offset >= release.size:
         _remove(part)
         offset = 0
+    if release.size:                                   # about 1.8 GB: say so now, not when the drive is full
+        problem = space_problem("download", release.size - offset + DOWNLOAD_SPARE_BYTES, folder, free)
+        if problem:
+            raise UpdateError(problem)
     resp = http.open(release.installer_url, "asset", {"Range": f"bytes={offset}-"} if offset else None)
     with resp:
         status = _status(resp)
         if status == 416 and offset and not _restarted:   # the part was complete or stale: start over, once
             _remove(part)
-            return download_installer(http, release, folder, progress, cancel, _restarted=True)
+            return download_installer(http, release, folder, progress, cancel, _restarted=True, free=free)
         if status not in (200, 206):
             raise UpdateError(_http_problem(status))
         if status == 200:
@@ -518,8 +600,6 @@ def clean_downloads(folder: Path) -> bool:
 
 
 # =========================================================================== how this copy was installed
-INSTALL_KINDS = ("installer", "scoop", "winget", "allusers", "source", "portable")
-
 
 def install_kind(exe: str | Path | None = None, frozen: bool | None = None) -> str:
     """``installer`` (our Inno Setup install: it may update itself), ``scoop``, ``winget``, ``source`` (python -m
@@ -531,16 +611,19 @@ def install_kind(exe: str | Path | None = None, frozen: bool | None = None) -> s
         app = app.resolve()
     except OSError:
         pass
+    installed = (app / "unins000.exe").exists()        # Inno Setup's uninstaller: our installer put this copy here
     lowered = [p.lower() for p in app.parts]
-    # Scoop: <scoop root>\apps\voxflow\<version or current>\VoxFlow.exe
-    if len(lowered) >= 3 and lowered[-2] == "voxflow" and lowered[-3] == "apps":
+    # Scoop: <scoop root>\apps\voxflow\<version or current>\VoxFlow.exe. Scoop unpacks the installer without running
+    # it, so its copy has no uninstaller; an install by hand into a folder that only looks like Scoop's
+    # (D:\apps\voxflow\app) has one and updates itself (QA UP-11).
+    if not installed and len(lowered) >= 3 and lowered[-2] == "voxflow" and lowered[-3] == "apps":
         return "scoop"
     try:
         if (app / MANAGED_MARKER).read_text(encoding="utf-8", errors="replace").strip().lower() == "winget":
             return "winget"
     except OSError:
         pass
-    if not (app / "unins000.exe").exists():
+    if not installed:
         return "portable"
     return "allusers" if _system_wide(app) else "installer"
 
@@ -556,7 +639,23 @@ def _system_wide(app: Path) -> bool:
                     return True
             except (OSError, ValueError):
                 continue
-    return not os.access(app, os.W_OK)
+    return not _writable(app)
+
+
+def _writable(folder: Path) -> bool:
+    """Whether this user can create a file in ``folder``, found out by doing it: ``os.access(W_OK)`` only looks at
+    the read-only attribute on Windows and says True for a folder whose permissions deny writing (QA UP-07)."""
+    if not os.access(folder, os.W_OK):
+        return False
+    # (not tempfile.mkstemp: on Windows it takes "permission denied" for a name clash and tries the next name, for ever)
+    probe = Path(folder) / f"voxflow-write-test-{os.getpid()}-{random.getrandbits(32):08x}.tmp"
+    try:
+        fd = os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+    except OSError:
+        return False
+    os.close(fd)
+    _remove(probe)
+    return True
 
 
 def managed_text(kind: str) -> str:
@@ -668,21 +767,55 @@ def _child_env() -> dict:
     return env
 
 
+def _spawn(cmd: list[str], cwd: str, flags: int, popen, env: dict | None = None) -> OSError | None:
+    """Start ``cmd`` so that it outlives VoxFlow. None when it started, else the error."""
+    for extra in ((0x01000000,) if sys.platform == "win32" else ()) + (0,):    # CREATE_BREAKAWAY_FROM_JOB first
+        try:
+            popen(cmd, close_fds=True, creationflags=flags | extra, env=env or _child_env(), cwd=cwd,
+                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return None
+        except OSError as exc:
+            last = exc
+    return last
+
+
 def launch_installer(path: Path, relaunch: bool, log_path: Path | None = None, popen=subprocess.Popen) -> bool:
     """Start the installer detached from VoxFlow (it outlives it). True when it started."""
     flags = 0
     if sys.platform == "win32":
         flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-    cmd = installer_command(path, relaunch, log_path)
-    for extra in ((0x01000000,) if sys.platform == "win32" else ()) + (0,):    # CREATE_BREAKAWAY_FROM_JOB first
-        try:
-            popen(cmd, close_fds=True, creationflags=flags | extra, env=_child_env(), cwd=str(path.parent),
-                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            log.info("update: started %s (relaunch=%s)", path.name, relaunch)
-            return True
-        except OSError as exc:
-            last = exc
-    log.warning("update: the installer could not be started: %s", _short(last))
+    failed = _spawn(installer_command(path, relaunch, log_path), str(path.parent), flags, popen)
+    if failed is None:
+        log.info("update: started %s (relaunch=%s)", path.name, relaunch)
+        return True
+    log.warning("update: the installer could not be started: %s", _short(failed))
+    return False
+
+
+RESTART_EXE_VAR, RESTART_PID_VAR = "VOXFLOW_RESTART_EXE", "VOXFLOW_RESTART_PID"
+
+
+def restart_app(tray: bool, popen=subprocess.Popen, exe: str | Path | None = None) -> bool:
+    """Start this installed copy of VoxFlow again once this process has ended (``tray``: without its window, like a
+    start at login). For an update that made VoxFlow quit and then could not start Setup: VoxFlow must not stay
+    closed (QA UP-04). A Windows PowerShell from System32 waits for this process to end first: a second VoxFlow
+    started while the first still runs only brings the first one's window up and exits. False when nothing was
+    started (not Windows, not a frozen build, no PowerShell)."""
+    if sys.platform != "win32" or not (exe or getattr(sys, "frozen", False)):
+        return False
+    root = os.environ.get("SystemRoot") or r"C:\Windows"
+    shell = Path(root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    script = (f"Wait-Process -Id $env:{RESTART_PID_VAR} -Timeout 60 -ErrorAction SilentlyContinue; "
+              f"Start-Process -FilePath $env:{RESTART_EXE_VAR} -WorkingDirectory (Split-Path $env:{RESTART_EXE_VAR})"
+              + (" -ArgumentList '--autostart'" if tray else ""))
+    env = {**_child_env(), RESTART_EXE_VAR: str(exe or sys.executable), RESTART_PID_VAR: str(os.getpid())}
+    failed = _spawn([str(shell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-WindowStyle",
+                     "Hidden", "-Command", script], root,
+                    subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP, popen, env)
+    if failed is None:
+        log.info("update: VoxFlow starts again when this copy has closed")
+        return True
+    log.warning("update: VoxFlow could not be started again: %s", _short(failed))
     return False
 
 
@@ -702,6 +835,12 @@ class UpdateState:
     downloaded: str = ""           # version whose verified installer is in the download folder
     sha256: str = ""               # ...and its checksum
     slot_done: str = ""            # the scheduled slot (day) already used
+    attempted: str = ""            # the version Setup was last started for ("" once that version, or a newer, runs)
+    attempts: int = 0              # ...how many times in a row
+    attempt_time: float = 0.0      # ...when (time.time)
+    attempt_tray: bool = False     # ...for a scheduled install: the VoxFlow Setup starts again stays in the tray
+    attempt_told: bool = False     # the "was not installed" notice about that run was shown
+    exit_error: str = ""           # why an update did not start while VoxFlow was closing: said at the next start
 
     @classmethod
     def load(cls, path: Path) -> "UpdateState":
@@ -718,8 +857,11 @@ class UpdateState:
                 ok = isinstance(value, dict)
             elif isinstance(default, bool):
                 ok = isinstance(value, bool)
+            elif isinstance(default, int):
+                ok = type(value) is int and value >= 0
             elif isinstance(default, float):
-                ok = isinstance(value, (int, float)) and not isinstance(value, bool)
+                # finite only: a NaN in a hand-edited file made the first timer of the start raise (QA UP-08)
+                ok = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
                 value = float(value) if ok else default
             else:
                 ok = isinstance(value, str)
@@ -735,13 +877,24 @@ class UpdateState:
             log.warning("could not save %s: %s", path.name, exc)
 
 
+def relaunch_in_tray(data_dir: Path | None = None) -> bool:
+    """For ``--after-update`` (Setup starting VoxFlow again): True when that update was a scheduled one. It ran
+    while nobody was at the PC, so VoxFlow comes back in the tray, like a start at login, instead of opening its
+    window (QA UP-09)."""
+    folder = Path(data_dir) if data_dir is not None else cfgmod.app_dir_path()
+    return UpdateState.load(folder / STATE_FILE).attempt_tray
+
+
 # =========================================================================== the service
 class Updater(QObject):
     """Checks, downloads and installs, on the UI thread with background threads for the network.
 
     ``get(key)`` reads a setting, ``busy()`` says a dictation or command is under way (or a shortcut is being
     recorded). The controller connects ``changed`` (Settings > Updates), ``available`` (tell the user),
-    ``notice`` and ``restart_requested`` (quit now: the installer runs when VoxFlow has shut down)."""
+    ``notice`` and ``restart_requested`` (quit now: the installer runs when VoxFlow has shut down).
+
+    ``free(path)`` gives the free bytes of a drive, ``app_dir`` is the install folder (where Setup unpacks) and
+    ``restarter(tray)`` starts VoxFlow again after an update that could not start; tests replace them."""
 
     changed = Signal(dict)
     available = Signal(dict)
@@ -751,7 +904,8 @@ class Updater(QObject):
 
     def __init__(self, data_dir: Path, get, busy, *, version: str = __version__, http=None, kind: str | None = None,
                  metered=connection_metered, idle=idle_seconds, clock=time.time, now=None, launcher=launch_installer,
-                 folder: Path | None = None, automatic: bool = True, rng: random.Random | None = None, parent=None):
+                 folder: Path | None = None, automatic: bool = True, rng: random.Random | None = None,
+                 free=free_bytes, app_dir: Path | None = None, restarter=restart_app, parent=None):
         super().__init__(parent)
         self.version = version
         self._path = Path(data_dir) / STATE_FILE
@@ -760,7 +914,8 @@ class Updater(QObject):
         self.kind = kind if kind is not None else install_kind()
         self._metered, self._idle, self._clock = metered, idle, clock
         self._now = now or (lambda: _dt.datetime.now().astimezone())
-        self._launcher = launcher
+        self._launcher, self._restarter, self._free = launcher, restarter, free
+        self._app_dir = Path(app_dir) if app_dir is not None else Path(sys.executable).parent
         self.folder = Path(folder) if folder is not None else download_folder()
         self._automatic = automatic
         self._rng = rng or random.Random()
@@ -771,7 +926,9 @@ class Updater(QObject):
         self._after_download = ""      # "now" | "quit" | "auto": what the download in progress is for
         self._cancel = threading.Event()
         self._thread: threading.Thread | None = None
-        self._pending_launch: tuple[Path, bool] | None = None
+        # "Install now" / the set time, between the restart request and on_exit: (path, the open verified file,
+        # version, tray)
+        self._pending_launch: tuple | None = None
         self._closed = False
         self._check_timer = QTimer(self)
         self._check_timer.setSingleShot(True)
@@ -787,6 +944,9 @@ class Updater(QObject):
         self._tidy_timer.setInterval(TIDY_RETRY_MS)
         self._tidy_timer.timeout.connect(self._tidy_again)
         self._tidy_tries = 0
+        self._remind_timer = QTimer(self)
+        self._remind_timer.setSingleShot(True)
+        self._remind_timer.timeout.connect(self._remind)
         self._sig.connect(self._on_thread)
         self._forget_installed()
 
@@ -817,6 +977,7 @@ class Updater(QObject):
             "skipped": bool(rel and self.state.skipped == rel.version),
             "install_on_quit": bool(rel and self.state.install_on_quit == rel.version),
             "downloaded": bool(rel and self.state.downloaded == rel.version),
+            "auto_stopped": bool(rel and self._gave_up(rel)),
             "releases_page": rel.page if rel else RELEASES_PAGE,
         }
 
@@ -829,6 +990,8 @@ class Updater(QObject):
     def _forget_installed(self) -> None:
         """After an update the old installer (and any reminder about it) is no longer needed."""
         st = self.state
+        if st.attempted and not is_newer(st.attempted, self.version):
+            self._clear_attempt()                      # that version runs now: Setup did its work
         if st.downloaded and not is_newer(st.downloaded, self.version):
             st.downloaded = st.sha256 = ""
         if st.install_on_quit and not is_newer(st.install_on_quit, self.version):
@@ -846,20 +1009,36 @@ class Updater(QObject):
     def _clear_quit(self) -> None:
         self.state.install_on_quit = self.state.quit_by = ""
 
+    def _clear_attempt(self) -> None:
+        st = self.state
+        st.attempted, st.attempts, st.attempt_time, st.attempt_tray, st.attempt_told = "", 0, 0.0, False, False
+
+    def _gave_up(self, rel: Release) -> bool:
+        """Setup was started for this version ``MAX_AUTO_ATTEMPTS`` times and it is still not the one running:
+        nothing automatic tries again (VoxFlow would quit and run Setup every night, QA UP-02). The user still
+        can, with Install now."""
+        return self.state.attempted == rel.version and self.state.attempts >= MAX_AUTO_ATTEMPTS
+
+    def _drop_pending(self) -> None:
+        if self._pending_launch is not None:
+            self._pending_launch[1].close()
+            self._pending_launch = None
+
     def _tidy(self, keep_latest: bool = True) -> bool:
         """Keep the download folder bounded: at most the installer of the newest release (and its ``.part`` while it
-        downloads). Everything else, such as an older installer, Setup's log of an earlier run or a file whose release
-        was skipped, is deleted."""
+        downloads). Everything else, such as an older installer, Setup's log of a run that worked or a file whose
+        release was skipped, is deleted. The log of a Setup run that did not change the version stays: it says why."""
         rel = self.latest()
         keep = set()
         if keep_latest and rel is not None and rel.installer and self.state.skipped != rel.version:
             keep = {rel.installer, rel.installer + ".part"}
         if self.state.downloaded and (rel is None or self.state.downloaded != rel.version or not keep):
             self.state.downloaded = self.state.sha256 = ""
+        kept = keep | {SETUP_LOG} if self.state.attempted else keep
         ok = True
         if self.folder.is_dir():
             for item in self.folder.iterdir():
-                if item.name not in keep:
+                if item.name not in kept:
                     ok = _remove(item) and ok
         return ok
 
@@ -875,10 +1054,53 @@ class Updater(QObject):
         """Arm the daily check (nothing at all when the mode is Off or automatic checks are disabled)."""
         self._arm_check(first=True)
         self._arm_slot()
+        self._arm_remind(startup=True)
+        self._tell_exit_error()
+        self._tell_failed_install()
+        self._remind_quit_install()
+
+    def _tell_exit_error(self) -> None:
+        """An update that could not start while VoxFlow was closing had nobody to tell: say it now, once."""
+        st = self.state
+        if st.exit_error:
+            self.error, st.exit_error = st.exit_error, ""
+            self._save()
+            self.notice.emit("warning", self.error)
+
+    def _tell_failed_install(self) -> None:
+        """Setup was started for a version and this is still the old one (Setup failed, was blocked or was
+        cancelled): say so once per run of Setup, with where its log is (QA UP-02)."""
+        st = self.state
+        if not st.attempted or st.attempt_told:
+            return
+        st.attempt_told = True
+        self._save()
+        log.warning("update %s: Setup was started %d time(s) and VoxFlow is still %s", st.attempted, st.attempts,
+                    self.version)
+        message = f"VoxFlow {st.attempted} was not installed: Setup ran, but this is still VoxFlow {self.version}."
+        if (self.folder / SETUP_LOG).exists():
+            message += f" Setup's log is {self.folder / SETUP_LOG}."
+        if self.mode == "auto" and st.attempts >= MAX_AUTO_ATTEMPTS:
+            message += (" VoxFlow will not try again by itself: use Check now in Settings > Updates to install it, "
+                        "or get it from the releases page.")
+        self.error = message
+        self.notice.emit("warning", message)
+
+    def _remind_quit_install(self) -> None:
+        """An update that waits for "when I quit" is installed only by Quit in the tray menu, never when Windows ends
+        the session. Someone who only ever shuts the PC down was told once and then kept the old version for good
+        (QA UP-01): say it again at every start, with what to do."""
+        rel, st = self.latest(), self.state
+        if (rel is not None and self.mode != "off" and st.install_on_quit == rel.version == st.downloaded
+                and is_newer(rel.version, self.version)):
+            self.notice.emit("info", f"VoxFlow {rel.version} is downloaded and waiting. It is installed when you "
+                                     "quit VoxFlow from its tray menu (not when Windows shuts down).")
 
     def close(self) -> None:
+        """Stop every timer and thread result. An installer held open for a restart stays open: on_exit, which the
+        controller calls after this, starts Setup from it."""
         self._closed = True
-        for t in (self._check_timer, self._install_timer, self._slot_timer, self._tidy_timer):
+        for t in (self._check_timer, self._install_timer, self._slot_timer, self._tidy_timer, self._remind_timer):
             t.stop()
         self._cancel.set()
 
@@ -886,7 +1108,9 @@ class Updater(QObject):
         self._check_timer.stop()
         if self._closed or not self._automatic or self.mode == "off":
             return
-        due = self.state.last_check + CHECK_EVERY_S - self._clock()
+        every = CHECK_EVERY_S if self.state.last_ok else RETRY_FAILED_S
+        last = min(self.state.last_check, self._clock())    # a time in the future (the clock was wrong once) = now
+        due = last + every - self._clock()
         delay = max(due, 0.0)
         if first:
             delay = max(delay, self._rng.uniform(*STARTUP_DELAY_S))
@@ -901,12 +1125,13 @@ class Updater(QObject):
                 if self.phase == "waiting":
                     self.phase = "idle"
                 self._clear_quit()
-                self._pending_launch = None
+                self._drop_pending()
                 self._save()
             elif self.mode != "auto" and self.state.quit_by == "auto":
                 self._clear_quit()                     # automatic mode chose it, not the user: no longer wanted
                 self._save()
             self._arm_check(first=True)
+            self._arm_remind()
         if (key == "update_install_when" and self.mode == "auto" and self._get("update_install_when") == "time"
                 and self.state.quit_by == "auto"):
             self._clear_quit()                         # the set time takes over
@@ -975,13 +1200,33 @@ class Updater(QObject):
 
     def _on_check_failed(self, user: bool, exc: Exception) -> None:
         st = self.state
-        st.last_check, st.last_ok = self._clock(), False
+        # GitHub answered and has nothing to offer: the check worked, so the next one is tomorrow's. Only a check
+        # that did not get through is tried again in an hour (QA D-05).
+        nothing = isinstance(exc, NoRelease)
+        st.last_check, st.last_ok = self._clock(), nothing
         st.last_result = str(exc) if isinstance(exc, UpdateError) else "The update check did not work."
-        log.warning("update check failed: %s", exc if isinstance(exc, UpdateError) else type(exc).__name__)
+        if nothing:
+            log.info("update check: %s", exc)
+            if exc.status == 404:
+                self._withdrawn()
+        else:
+            log.warning("update check failed: %s", exc if isinstance(exc, UpdateError) else type(exc).__name__)
         self.phase = "idle"
         self._save()
         self._arm_check()
         self._emit()
+
+    def _withdrawn(self) -> None:
+        """GitHub has no published release any more, so the one VoxFlow knew was withdrawn (it may have been
+        broken): it is no longer offered, its download is deleted and it is not installed on quit or at the set
+        time (QA UP-10)."""
+        if self.state.latest is not None:
+            log.warning("update: the release VoxFlow knew is no longer published; nothing of it is kept")
+        self.state.latest = None
+        self._drop_download()
+        self._clear_quit()
+        for t in (self._install_timer, self._slot_timer, self._remind_timer):
+            t.stop()
 
     def _announce(self, rel: Release, user: bool) -> None:
         """Tell the user once per version, unless they skipped it or asked to be reminded later. A check the user
@@ -998,7 +1243,32 @@ class Updater(QObject):
         self.state.remind_after = self._clock() + REMIND_AFTER_S
         self.state.notified = ""                       # tell again after the pause
         self._save()
+        self._arm_remind()
         self._emit()
+
+    def _arm_remind(self, startup: bool = False) -> None:
+        """"Remind me later" means tomorrow: a timer for that moment (also armed at start, for a reminder that is
+        still pending or fell due while VoxFlow was closed). Waiting for the first daily check after it made it
+        about two days (QA UP-05)."""
+        self._remind_timer.stop()
+        rel, st = self.latest(), self.state
+        if (self._closed or rel is None or self.mode == "off" or not st.remind_after
+                or rel.version in (st.notified, st.skipped)):
+            return
+        # never longer than the pause itself (a clock that was wrong when the user clicked)
+        wait = min(max(st.remind_after - self._clock(), 0.0), REMIND_AFTER_S)
+        if startup:
+            wait = max(wait, STARTUP_DELAY_S[0])        # not on top of an app that is still starting
+        self._remind_timer.start(int(wait * 1000))
+
+    def _remind(self) -> None:
+        rel, st = self.latest(), self.state
+        st.remind_after = 0.0
+        self._save()
+        if (rel is None or self.mode == "off" or self.phase != "idle" or rel.version in (st.notified, st.skipped)
+                or st.install_on_quit == rel.version):
+            return                                     # told meanwhile, or the user already chose what to do
+        self._announce(rel, user=False)
 
     def skip(self) -> None:
         rel = self.latest()
@@ -1009,6 +1279,7 @@ class Updater(QObject):
         self._clear_quit()
         self._drop_download()
         self._install_timer.stop()
+        self._remind_timer.stop()
         if self.phase == "waiting":
             self.phase = "idle"
         self._arm_slot()                               # a skipped version is never installed at the set time
@@ -1059,7 +1330,7 @@ class Updater(QObject):
             self._sig.emit("progress", (done / total if total else None,))
 
         self._run(lambda: ("download_done", (rel, download_installer(self._http, rel, self.folder, progress,
-                                                                      self._cancel.is_set))),
+                                                                      self._cancel.is_set, free=self._free))),
                   lambda exc: ("download_failed", (rel, exc)))
 
     def _on_progress(self, fraction) -> None:
@@ -1124,7 +1395,7 @@ class Updater(QObject):
         """Install automatically: fetch the installer in the background (not on a metered connection)."""
         rel = self.latest()
         if (rel is None or not self.can_install or not rel.installable or self.state.skipped == rel.version
-                or self.phase != "idle"):
+                or self.phase != "idle" or self._gave_up(rel)):
             return
         if self.state.downloaded == rel.version and self._file(rel).exists():
             self._after_download = "auto"
@@ -1142,7 +1413,8 @@ class Updater(QObject):
     def _arm_slot(self) -> None:
         rel = self.latest()
         armed = (not self._closed and self.mode == "auto" and self._get("update_install_when") == "time"
-                 and rel is not None and self.state.downloaded == rel.version and self.state.skipped != rel.version)
+                 and rel is not None and self.state.downloaded == rel.version and self.state.skipped != rel.version
+                 and not self._gave_up(rel))
         if armed and not self._slot_timer.isActive():
             self._slot_timer.start()
         elif not armed:
@@ -1152,7 +1424,7 @@ class Updater(QObject):
         rel = self.latest()
         st = self.state
         if (rel is None or self.mode != "auto" or self._get("update_install_when") != "time"
-                or st.downloaded != rel.version or st.skipped == rel.version):
+                or st.downloaded != rel.version or st.skipped == rel.version or self._gave_up(rel)):
             self._slot_timer.stop()
             return
         if self.phase != "idle":
@@ -1168,7 +1440,7 @@ class Updater(QObject):
             return                                     # someone is at the PC: wait (the slot lasts an hour)
         self.state.slot_done = slot
         self._save()
-        self._restart(rel)
+        self._restart(rel, tray=True)                  # nobody is at the PC: VoxFlow comes back without its window
 
     # ------------------------------------------------------------------ installing
     def _install_tick(self) -> None:
@@ -1181,23 +1453,52 @@ class Updater(QObject):
         self._install_timer.stop()
         self._restart(rel)
 
-    def _restart(self, rel: Release) -> None:
-        path = self._file(rel)
+    def _room_problem(self, path: Path) -> str:
+        """A sentence when the install drive has no room for Setup to unpack ``path`` ("" when it has)."""
         try:
-            ok = bool(self.state.sha256) and path.exists() and sha256_file(path) == self.state.sha256
+            size = path.stat().st_size
+        except OSError:
+            return ""                                  # gone: _open_checked says so
+        return space_problem("install", int(size * UNPACKED_FACTOR), self._app_dir, self._free)
+
+    def _open_checked(self, path: Path):
+        """The downloaded installer, opened so that nobody can change it and hashed through that handle. The caller
+        keeps it open until Setup has started, so the file that runs is the file that was checked. None when it is
+        gone, cannot be opened (another program has it open for writing) or is not the verified download."""
+        try:
+            fh = open_exclusive(path)
+        except OSError:
+            return None
+        try:
+            ok = bool(self.state.sha256) and sha256_stream(fh) == self.state.sha256
         except OSError:
             ok = False
-        if not ok:                                     # gone or changed: never quit VoxFlow for nothing
-            log.warning("update %s: the downloaded installer is missing or changed; not restarting", rel.version)
-            _remove(path)
-            self.phase, self.error = "idle", "The downloaded installer is gone or changed. Try again."
-            self.state.downloaded = self.state.sha256 = ""
-            self._clear_quit()
+        if ok:
+            return fh
+        fh.close()
+        return None
+
+    def _restart(self, rel: Release, tray: bool = False) -> None:
+        """Ask the controller to quit so that Setup can run. Everything that can still stop Setup (no room, a file
+        that is gone, changed or locked) is checked first, and the verified file stays open from here until Setup
+        starts: VoxFlow never quits for an install that then does not happen (QA UP-04)."""
+        path = self._file(rel)
+        problem = self._room_problem(path)
+        held = None if problem else self._open_checked(path)
+        if held is None:
+            if not problem:
+                log.warning("update %s: the downloaded installer is missing or changed; not restarting", rel.version)
+                _remove(path)
+                self.state.downloaded = self.state.sha256 = ""
+                self._clear_quit()
+                problem = "The downloaded installer is gone or changed. Try again."
+            self.phase, self.error = "idle", problem
             self._arm_slot()
             self._save()
             self._emit()
+            self.notice.emit("warning", problem)
             return
-        self._pending_launch = (path, True)
+        self._pending_launch = (path, held, rel.version, tray)
         self.phase = "restarting"
         self._emit()
         log.info("update %s: restarting VoxFlow to install it", rel.version)
@@ -1205,31 +1506,46 @@ class Updater(QObject):
 
     def on_exit(self, user_quit: bool) -> bool:
         """VoxFlow is shutting down: start the installer if one is due. ``user_quit`` is False when Windows ends the
-        session (no installer then). Verifies the file again right before it runs. True when it was started."""
+        session (no installer then, unless VoxFlow is closing for it). True when Setup was started.
+
+        What goes wrong here has nobody to tell: it is kept for the next start (``exit_error``), and after a restart
+        VoxFlow asked for itself it is started again, so it is not left closed."""
         rel = self.latest()
         st = self.state
         if self._pending_launch is not None:
-            path, relaunch = self._pending_launch
+            (path, held, version, tray), relaunch = self._pending_launch, True
+            self._pending_launch = None
         elif user_quit and rel is not None and st.install_on_quit == rel.version and st.downloaded == rel.version:
-            path, relaunch = self._file(rel), False
+            path, version, tray, relaunch = self._file(rel), rel.version, False, False
+            problem = self._room_problem(path)         # (kept for the next quit: it works once there is room)
+            held = None if problem else self._open_checked(path)
+            if held is None:
+                if not problem:
+                    log.warning("update: the installer changed on disk since it was verified; it is not run")
+                    _remove(path)
+                    st.downloaded = st.sha256 = ""
+                    self._clear_quit()
+                    problem = (f"VoxFlow {version} was not installed when you quit: the downloaded installer was "
+                               "gone or changed.")
+                st.exit_error = problem
+                self._save()
+                return False
         else:
             return False
-        self._pending_launch = None
-        try:
-            fh = open_exclusive(path)                  # nobody can change the file until Setup has started
-        except OSError:
-            fh = None
-        with (fh if fh is not None else open(os.devnull, "rb")) as held:
-            try:
-                ok = fh is not None and bool(st.sha256) and sha256_stream(held) == st.sha256
-            except OSError:
-                ok = False
-            if ok:
-                self._clear_quit()
-                self._save()
-                return bool(self._launcher(path, relaunch, self.folder / "install.log"))
-        log.warning("update: the installer changed on disk since it was verified; it is not run")
-        _remove(path)
-        st.downloaded = st.sha256 = ""
+        with held:                                     # nobody can change the file until Setup has started
+            self._clear_quit()
+            st.attempts = st.attempts + 1 if st.attempted == version else 1
+            st.attempted, st.attempt_time, st.attempt_tray, st.attempt_told = version, self._clock(), tray, False
+            self._save()                               # before Setup starts: it may end this process
+            started = bool(self._launcher(path, relaunch, self.folder / SETUP_LOG))
+        if started:
+            return True
+        st.attempts -= 1                               # Setup never ran: not a run that left the version unchanged
+        if not st.attempts:
+            self._clear_attempt()
+        st.exit_error = (f"VoxFlow {version} was not installed: Windows did not start its installer. Security "
+                         "software may have blocked it.")
         self._save()
+        if relaunch:
+            self._restarter(tray)
         return False

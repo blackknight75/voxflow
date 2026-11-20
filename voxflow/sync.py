@@ -12,6 +12,7 @@ Nothing here talks to the network: files are the only transport. The history is 
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -40,6 +41,14 @@ LOCAL_SETTINGS = frozenset({
     "cleanup_timeout_s", "command_timeout_s", "restore_delay_s", "launch_at_login", "start_minimized",
     "overlay_position", "ui_state", "onboarding_done", "update_mode", "update_install_when", "update_time",
     "phrase_streaming"})
+# Settings that are part of a backup but never go through a sync folder: whoever can write a file into that folder
+# (another device, a shared-folder member, the cloud account) must not be able to switch this PC's history on, cut
+# it down or delete it by a retention period, or move its shortcuts (security review S-01). History itself is never
+# synced, so its settings are this PC's own; shortcuts depend on the keyboard in front of it.
+NOT_SYNCED = frozenset({"save_history", "history_limit", "history_retention_days", "hotkey", "command_hotkey",
+                        "paste_last_hotkey", "undo_hotkey"})
+# Settings a backup never brings back, whoever made it (see import_profile).
+NEVER_FROM_A_FILE = frozenset({"asr_model", "cleanup_model", "update_mode", "update_install_when", "update_time"})
 # Interface state: never written to a backup either.
 _NEVER_EXPORTED = frozenset({"config_version", "ui_state", "overlay_position", "onboarding_done"})
 _MAX_FILE_BYTES = 50 * 1024 * 1024               # packs and sync files
@@ -49,7 +58,10 @@ _MAX_BACKUP_BYTES = 1024 * 1024 * 1024
 _DELETED = object()
 
 BASELINE = 1.0                       # timestamp of entries a device had before it joined a sync folder
-TOMBSTONE_DAYS = 180                 # how long a deletion is remembered
+TOMBSTONE_DAYS = 180                 # how long a deletion is remembered at least
+# ... and for as long as a device in the folder has not written its file since the deletion: it may still hold the
+# entry and would bring it back (QA DL-11). A device that stays away longer than this is no longer waited for.
+ABSENT_DAYS = 730
 _CLOCK_SKEW_S = 86400.0              # records stamped further in the future than this are ignored
 _SYNC_FILE_RE = re.compile(r"^voxflow-sync-.+\.json$", re.I)
 
@@ -90,6 +102,13 @@ def snapshot(ds: DataSet, every_setting: bool = False) -> dict:
     }
 
 
+def _synced(ds: DataSet) -> dict:
+    """``snapshot`` as it goes through a sync folder: without the settings in ``NOT_SYNCED``."""
+    snap = snapshot(ds)
+    snap["settings"] = {k: v for k, v in snap["settings"].items() if k not in NOT_SYNCED}
+    return snap
+
+
 def _dict_key(term: str) -> str:
     return store._match_key(term)
 
@@ -108,15 +127,16 @@ def _norm(kind: str, key, value, every_setting: bool = False):
                 return None
             return key, cfgmod.Config.validate(key, value)
         if kind == "dictionary":
-            term = store.Dictionary._clean_term(value.get("term"))
+            term = store.Dictionary._clean_term(store.foreign_text(value.get("term")) if isinstance(
+                value.get("term"), str) else value.get("term"))
             aliases = store.Dictionary._clean_aliases(term, value.get("aliases"))   # "kube, cube" is two
             return _dict_key(term), {"term": term, "aliases": aliases}
         if kind == "snippets":
             trigger, text = value.get("trigger"), value.get("text")
             if not (isinstance(trigger, str) and isinstance(text, str) and text.strip()):
                 return None
-            trigger = store.Snippets._norm_trigger(trigger)
-            if not _snippet_key(trigger) or len(trigger) > store._MAX_TERM_LEN:
+            trigger, text = store.Snippets._norm_trigger(store.foreign_text(trigger) or ""), store.foreign_text(text)
+            if not _snippet_key(trigger) or len(trigger) > store._MAX_TERM_LEN or not (text and text.strip()):
                 return None
             return _snippet_key(trigger), {"trigger": trigger, "text": text}
         if kind == "styles" and isinstance(key, str):
@@ -185,7 +205,7 @@ def _read_json(path: Path, what: str, limit: int | None = None):
         raise ValueError(f"Couldn't read {path.name}: {exc}") from None
     try:
         return json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):         # RecursionError: brackets nested 100,000 deep
         raise ValueError(f"{path.name} is not a VoxFlow {what} (it is not valid JSON).") from None
 
 
@@ -210,6 +230,18 @@ def device_name() -> str:
 
 def _text(value, limit: int = 120) -> str:
     return " ".join(value.split())[:limit] if isinstance(value, str) else ""
+
+
+def _finite(value) -> float | None:
+    """A number from a file as a float; None for anything else, NaN and Infinity included, and for an integer
+    too large for a float (JSON allows 400 digits; ``math.isfinite`` raises OverflowError on it)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        value = float(value)
+    except OverflowError:
+        return None
+    return value if math.isfinite(value) else None
 
 
 def _norm_list(kind: str, rows) -> tuple[dict, int]:
@@ -281,10 +313,8 @@ def read_profile(path: str) -> dict:
             raise ValueError(f"{src.name} is a shared pack, not a backup. Import it on the Dictionary or Snippets page.")
         raise ValueError(f"{src.name} is not a VoxFlow backup.")
     _check_version(data, src, "backup")
-    created = data.get("created")
     out: dict = {"data": {}, "history": None, "stats": None, "skipped": 0,
-                 "meta": {"created": float(created) if isinstance(created, (int, float)) and not isinstance(
-                              created, bool) and math.isfinite(created) else None,
+                 "meta": {"created": _finite(data.get("created")),
                           "device": _text(data.get("device"), 60), "device_id": _text(data.get("device_id"), 64),
                           "app_version": _text(data.get("app_version"), 20), "version": data["version"]}}
     if isinstance(data.get("settings"), dict):
@@ -363,45 +393,68 @@ def _merge_target(kind: str, current: dict, incoming: dict, mode: str, overwrite
     return target
 
 
+class _NotSaved(Exception):
+    """A store could not write its file during an import (``args[0]``: the store)."""
+
+
 def _import(ds: DataSet, incoming: dict, history, stats, mode: str, overwrite: bool = False) -> dict:
-    """Shared by backups and packs: apply ``incoming`` ({kind: {key: value}}) all or nothing."""
+    """Shared by backups and packs: apply ``incoming`` ({kind: {key: value}}) all or nothing, in memory and on
+    disk: a store that cannot write its file fails the import like any other error (QA DL-04)."""
     if mode not in ("merge", "replace"):
         raise ValueError("Import mode must be “merge” or “replace”.")
     before = snapshot(ds, every_setting=True)
-    history_before = ds.history.snapshot() if history is not None else None
-    stats_before = ds.stats.export_days() if stats is not None and ds.stats is not None else None
+    with_stats = stats is not None and ds.stats is not None
+    # The stores this import changes, in the order their files are written. The history comes last: replacing it
+    # deletes its backup copies, the one step that cannot be undone, so every other file is on disk by then.
+    touched = [st for kind, st in (("dictionary", ds.dictionary), ("snippets", ds.snippets), ("styles", ds.styles))
+               if kind in incoming]
+    touched += [ds.stats] if with_stats else []
+    touched += [ds.history] if history is not None else []
+    saved = [(st, st.checkpoint()) for st in touched]
     details: dict = {}
     counts = dict.fromkeys(PARTS, 0)
     skipped_settings: list[str] = []
     conflicts: list[dict] = []
-    try:
-        changes = {}
-        for kind in KINDS:
-            if kind in incoming:
-                target = _merge_target(kind, before[kind], incoming[kind], mode, overwrite)
-                changes[kind], details[kind] = _diff(before[kind], target)
-                counts[kind] = len(changes[kind])
-        skipped_settings = sorted(_apply(ds, changes, conflicts))
-        if conflicts:                            # spellings were left out: count what really changed
-            details["dictionary"] = _diff(before["dictionary"], snapshot(ds)["dictionary"])[1]
-            counts["dictionary"] = sum(details["dictionary"].values())
-        counts["settings"] = max(0, counts["settings"] - len(skipped_settings))
-        if history is not None:
-            counts["history"] = ds.history.import_entries(history, replace=(mode == "replace"))
-        if stats_before is not None:
-            counts["stats"] = ds.stats.import_days(stats, replace=(mode == "replace"))
-    except Exception as exc:  # noqa: BLE001 - all or nothing: put everything back the way it was
-        log.error("import failed; restoring the previous state\n%s", system.redacted_traceback(exc))
+    with contextlib.ExitStack() as batches:
+        for st in touched:                       # no file is written while the import is half done
+            batches.enter_context(st.batch())
         try:
-            now = snapshot(ds, every_setting=True)
-            _apply(ds, {kind: _diff(now[kind], before[kind])[0] for kind in KINDS})
-            if history_before is not None:
-                ds.history.import_entries(history_before, replace=True)
-            if stats_before is not None:
-                ds.stats.import_days(stats_before, replace=True)
-        except Exception as exc2:  # noqa: BLE001
-            log.error("restoring after a failed import also failed\n%s", system.redacted_traceback(exc2))
-        raise ValueError("The import could not be completed, so nothing was changed.") from None
+            changes = {}
+            for kind in KINDS:
+                if kind in incoming:
+                    target = _merge_target(kind, before[kind], incoming[kind], mode, overwrite)
+                    changes[kind], details[kind] = _diff(before[kind], target)
+                    counts[kind] = len(changes[kind])
+            skipped_settings = sorted(_apply(ds, changes, conflicts))
+            if conflicts:                        # spellings were left out: count what really changed
+                details["dictionary"] = _diff(before["dictionary"], snapshot(ds)["dictionary"])[1]
+                counts["dictionary"] = sum(details["dictionary"].values())
+            counts["settings"] = max(0, counts["settings"] - len(skipped_settings))
+            if history is not None:
+                counts["history"] = ds.history.import_entries(history, replace=(mode == "replace"))
+            if with_stats:
+                counts["stats"] = ds.stats.import_days(stats, replace=(mode == "replace"))
+            for st in touched:
+                if st.save_now():
+                    raise _NotSaved(st)
+        except Exception as exc:  # noqa: BLE001 - all or nothing: put everything back the way it was
+            log.error("import failed; restoring the previous state\n%s", system.redacted_traceback(exc))
+            try:
+                for st, state in saved:          # exactly: ids, suggestions and backup copies stay (QA DL-05)
+                    st.rollback(state)
+                now = snapshot(ds, every_setting=True)["settings"]
+                _apply(ds, {"settings": _diff(now, before["settings"])[0]})
+            except Exception as exc2:  # noqa: BLE001
+                log.error("restoring after a failed import also failed\n%s", system.redacted_traceback(exc2))
+            if isinstance(exc, _NotSaved):
+                st = exc.args[0]
+                why = cfgmod.write_problem(st.path)
+                raise ValueError(
+                    f"{st.label[0].upper()}{st.label[1:]} could not be saved" + (f" ({why})" if why else "")
+                    + ", so the import was undone and nothing was changed."
+                    + ("" if why else " Check that the disk has room and that VoxFlow's data folder can be "
+                                      "written to.")) from None
+            raise ValueError("The import could not be completed, so nothing was changed.") from None
     return {"mode": mode, "counts": counts, "details": details, "settings_skipped": skipped_settings,
             "aliases_skipped": conflicts}
 
@@ -428,6 +481,11 @@ def import_profile(ds: DataSet, path: str, mode: str = "merge", parts=None, devi
     if "settings" in incoming and not (device_id and prof["meta"]["device_id"] == device_id):
         portable = set(portable_settings())
         incoming["settings"] = {k: v for k, v in incoming["settings"].items() if k in portable}
+    if "settings" in incoming:
+        # Not even from this PC's own backup: the device id that marks it as such is in every backup and sync file of
+        # this PC, so it proves nothing. These settings decide which model files are downloaded and loaded and
+        # whether updates are checked for; a file must not be able to set them (security review S-10).
+        incoming["settings"] = {k: v for k, v in incoming["settings"].items() if k not in NEVER_FROM_A_FILE}
     history = prof["history"] if "history" in wanted else None
     stats = prof["stats"] if "stats" in wanted else None
     if not incoming and history is None and stats is None:
@@ -483,11 +541,8 @@ def read_pack(path: str) -> dict:
     entries, skipped = _norm_list(kind, rows)
     if not entries:
         raise ValueError(f"{src.name} does not contain any usable {'terms' if kind == 'dictionary' else 'snippets'}.")
-    created = meta.get("created")
     return {"kind": kind, "name": _text(meta.get("name"), 80) or src.stem,
-            "description": _text(meta.get("description"), 400),
-            "created": float(created) if isinstance(created, (int, float)) and not isinstance(created, bool)
-            and math.isfinite(created) else None,
+            "description": _text(meta.get("description"), 400), "created": _finite(meta.get("created")),
             "entries": entries, "skipped": skipped}
 
 
@@ -537,6 +592,7 @@ class SyncEngine:
         self._path = Path(state_path)
         self._clock = clock
         self._lock = threading.RLock()
+        self.load_problem = ""        # a sentence for the user when the state file could not be read
         self._state = self._load()
         if name:
             self._state["name"] = _text(name, 60) or self._state["name"]
@@ -544,27 +600,39 @@ class SyncEngine:
         self._problem = ""
         self._devices: list[dict] = []
         self._notes = {"unreadable": 0, "newer": 0}
+        self.last_applied: dict = {}             # see merge()
 
     # ---- state file
     def _load(self) -> dict:
         state = {"version": 1, "device": uuid.uuid4().hex[:12], "name": device_name(), "folder": "",
-                 "joined": False, "settled": False, "records": {}, "last_sync": 0.0, "written": ""}
+                 "joined": False, "settled": False, "records": {}, "last_sync": 0.0, "written": "", "lost": False}
         try:
             data = json.loads(self._path.read_text(encoding="utf-8-sig"))
+            if not isinstance(data, dict):
+                raise ValueError("not a JSON object")
         except FileNotFoundError:
             return state
-        except (OSError, ValueError) as exc:
-            log.warning("sync state is unreadable (%s); this device will join its folder again", exc)
-            return state
-        if not isinstance(data, dict):
+        except (OSError, ValueError, RecursionError) as exc:
+            # Without this file the device knows neither its folder nor its own id: sync is off until the folder is
+            # chosen again. That used to happen without a word and without a copy (QA DL-08).
+            log.warning("sync state is unreadable (%s); sync is off until its folder is chosen again", exc)
+            copy_name = store.keep_corrupt_copy(self._path)
+            self.load_problem = ("VoxFlow's sync information on this PC could not be read. If you use a sync "
+                                 "folder, choose it again in Settings: sync is off here until then, and nothing "
+                                 "was deleted." + (f" The old file was kept as {copy_name} in VoxFlow's data "
+                                                   "folder." if copy_name else ""))
+            state["lost"] = True                 # the file this device wrote before is now a stranger's: see set_folder
+            if copy_name:                        # the copy has the old file: start a readable one, so this is said once
+                with contextlib.suppress(OSError):
+                    cfgmod._atomic_write(self._path, json.dumps(state, ensure_ascii=False))
             return state
         for key in ("device", "name", "folder", "written"):
             if isinstance(data.get(key), str) and (data[key] or key in ("folder", "written")):
                 state[key] = data[key]
         state["joined"] = bool(data.get("joined"))
         state["settled"] = bool(data.get("settled"))
-        if isinstance(data.get("last_sync"), (int, float)) and math.isfinite(data["last_sync"]):
-            state["last_sync"] = float(data["last_sync"])
+        state["lost"] = bool(data.get("lost"))
+        state["last_sync"] = _finite(data.get("last_sync")) or 0.0
         records = data.get("records") if isinstance(data.get("records"), dict) else {}
         now = self._clock()
         for kind in KINDS:
@@ -602,9 +670,13 @@ class SyncEngine:
         return self._state["device"]
 
     @property
-    def file_name(self) -> str:
+    def _file_stem(self) -> str:
         slug = re.sub(r"[^A-Za-z0-9]+", "-", self._state["name"]).strip("-")[:30] or "device"
-        return f"voxflow-sync-{slug}-{self._state['device'][:8]}.json"
+        return f"voxflow-sync-{slug}-"
+
+    @property
+    def file_name(self) -> str:
+        return f"{self._file_stem}{self._state['device'][:8]}.json"
 
     def set_folder(self, path: str | None) -> None:
         """Turn sync on (an existing, writable folder) or off (''). Raises ValueError with a human message.
@@ -639,7 +711,35 @@ class SyncEngine:
                 self._state.update(folder=str(folder), joined=False, settled=False, records={}, written="",
                                    last_sync=0.0)
                 self._devices, self._problem = [], ""
+            if self._state["lost"]:
+                self._state["lost"] = False
+                self._drop_former_file(folder)
             self._save()
+
+    def _drop_former_file(self, folder: Path) -> None:
+        """After its state file was lost this device has a new id, so the file it wrote before stays in the folder
+        as a device of the same name that never syncs again (QA DL-08). Delete it: a sync file named for this
+        computer, that says it was written by a device of this name, under another id. Should a second PC have the
+        same name, it loses nothing: every device writes its file again when it is missing from the folder."""
+        own = self.file_name
+        former = re.compile(re.escape(self._file_stem) + r"[0-9a-f]{8}\.json", re.I)
+        try:
+            names = [n for n in os.listdir(folder) if former.fullmatch(n) and n.lower() != own.lower()]
+        except OSError:
+            return
+        for name in names:
+            path = folder / name
+            try:
+                if path.stat().st_size > _MAX_FILE_BYTES:
+                    continue
+                doc = json.loads(path.read_text(encoding="utf-8-sig"))
+                if (isinstance(doc, dict) and doc.get("format") == SYNC_FORMAT
+                        and doc.get("name") == self._state["name"] and isinstance(doc.get("device"), str)
+                        and name.lower().endswith(f"-{doc['device'][:8]}.json".lower())):
+                    path.unlink()
+                    log.info("removed %s: the file this device wrote before its sync state was lost", name)
+            except (OSError, ValueError, RecursionError) as exc:
+                log.info("sync file %s left alone: %s", name, exc)
 
     # ---- records
     @staticmethod
@@ -647,10 +747,11 @@ class SyncEngine:
         """A record read from a file in canonical form ``(key, record)``, or None."""
         if not isinstance(rec, dict) or not isinstance(key, str):
             return None
-        t, d = rec.get("t"), rec.get("d")
-        if (isinstance(t, bool) or not isinstance(t, (int, float)) or not math.isfinite(t) or t <= 0 or t > latest
-                or not isinstance(d, str) or not 0 < len(d) <= 64):
+        t, d = _finite(rec.get("t")), rec.get("d")
+        if t is None or t <= 0 or t > latest or not isinstance(d, str) or not 0 < len(d) <= 64:
             return None
+        if kind == "settings" and key in NOT_SYNCED:
+            return None                                  # never taken from the folder, whoever wrote it
         if rec.get("x"):
             if kind == "styles":
                 key = f"app:{store.normalize_exe(key[4:])}" if key.startswith("app:") else key
@@ -658,9 +759,23 @@ class SyncEngine:
                 key = _snippet_key(key)
             else:
                 key = _dict_key(key)
-            return (key, {"x": 1, "t": float(t), "d": d}) if key and _deletable(kind, key) else None
+            return (key, {"x": 1, "t": t, "d": d}) if key and _deletable(kind, key) else None
         got = _norm(kind, key, rec.get("v"))
-        return None if got is None else (got[0], {"v": got[1], "t": float(t), "d": d})
+        return None if got is None else (got[0], {"v": got[1], "t": t, "d": d})
+
+    def rejoin(self) -> bool:
+        """Forget what this device knew about its folder and join it again, as when the folder was first chosen.
+
+        For a start with a damaged store or settings file: the store is empty (or back to defaults) because it could
+        not be read, not because the user deleted everything. Without this the next round would publish every missing
+        entry as deleted and the default settings as a fresh choice, and the other devices would follow. Joining anew
+        deletes nothing anywhere and lets the folder's copy win. True when there was a folder to rejoin."""
+        with self._lock:
+            if not self.enabled:
+                return False
+            self._state.update(joined=False, settled=False, records={}, written="")
+            self._save()
+            return True
 
     def stamp_local(self) -> bool:
         """Notice what changed on this device since the last look and timestamp it. No folder access.
@@ -668,9 +783,9 @@ class SyncEngine:
         with self._lock:
             if not self.enabled:
                 return False
-            local, now, me = snapshot(self._ds), self._clock(), self._state["device"]
+            local, now, me = _synced(self._ds), self._clock(), self._state["device"]
             joining = not self._state["joined"]
-            changed = False
+            changed = self._restamp_ahead(now)
             for kind in KINDS:
                 recs = self._state["records"].setdefault(kind, {})
                 for key, value in local[kind].items():
@@ -691,6 +806,22 @@ class SyncEngine:
                 self._state["joined"] = True
                 self._save()
             return changed
+
+    def _restamp_ahead(self, now: float) -> bool:
+        """Give this device's own records that are stamped beyond the clock-skew window the time it is now. They
+        were made while this PC's clock ran ahead. Every other device ignores such a record until its time comes,
+        and each later edit of the entry, and its deletion, had to be stamped later still: the entry stopped
+        syncing (QA DL-03). When most of this device's stamps look ahead it is today's clock that is wrong (a dead
+        battery), and nothing is changed: an edit must not be dated back behind another device's older one."""
+        me, late = self._state["device"], now + _CLOCK_SKEW_S
+        own = [rec for recs in self._state["records"].values() for rec in recs.values()
+               if rec["d"] == me and rec["t"] > BASELINE]
+        ahead = [rec for rec in own if rec["t"] > late]
+        if not ahead or (len(ahead) >= 3 and 2 * len(ahead) > len(own)):
+            return False
+        for rec in ahead:
+            rec["t"] = now
+        return True
 
     # ---- one round
     def read_remote(self) -> dict:
@@ -718,7 +849,7 @@ class SyncEngine:
                 version = doc.get("version")
                 if not isinstance(version, int) or isinstance(version, bool) or version < 1:
                     raise ValueError("no version")
-            except (OSError, ValueError) as exc:        # half-copied by the sync tool, or not ours: next round
+            except (OSError, ValueError, RecursionError) as exc:   # half-copied by the sync tool, or not ours
                 log.info("sync file %s skipped: %s", name, exc)
                 out["unreadable"] += 1
                 continue
@@ -746,11 +877,9 @@ class SyncEngine:
             for doc in remote["docs"]:
                 dev = doc.get("device")
                 if isinstance(dev, str) and dev and dev != self._state["device"]:
-                    updated = doc.get("updated")
                     seen = devices.setdefault(dev, {"id": dev, "name": _text(doc.get("name"), 60) or "Another device",
                                                     "updated": 0.0})
-                    if isinstance(updated, (int, float)) and math.isfinite(updated):
-                        seen["updated"] = max(seen["updated"], float(updated))
+                    seen["updated"] = max(seen["updated"], _finite(doc.get("updated")) or 0.0)
                 for kind in KINDS:
                     part = doc["records"].get(kind)
                     recs = records.setdefault(kind, {})
@@ -772,15 +901,21 @@ class SyncEngine:
                             continue
                         recs[key] = rec
                         taken[kind][key] = _DELETED if rec.get("x") else rec["v"]
-            local = snapshot(self._ds)
+            local = _synced(self._ds)
             changes = {kind: {k: v for k, v in part.items()
                               if (v is _DELETED and k in local[kind]) or (v is not _DELETED and local[kind].get(k) != v)}
                        for kind, part in taken.items()}
+            # what this round changed here on another device's word: {kind: number of entries}. The controller tells
+            # the user about snippets, which are typed into other programs.
+            self.last_applied = {kind: len(part) for kind, part in changes.items() if part}
             if any(changes.values()):
                 _apply(self._ds, changes)
                 self.stamp_local()                       # whatever could not be applied counts as a local edit
+            # a deletion is kept while a device of this folder has not written its file since (see ABSENT_DAYS)
+            absent = min((d["updated"] for d in devices.values()), default=now)
+            forget = min(cutoff, max(absent, now - ABSENT_DAYS * 86400.0))
             for recs in records.values():
-                for key in [k for k, r in recs.items() if r.get("x") and r["t"] < cutoff]:
+                for key in [k for k, r in recs.items() if r.get("x") and r["t"] < forget]:
                     del recs[key]
             self._state["settled"] = True
             self._devices = sorted(devices.values(), key=lambda d: d["name"].lower())

@@ -466,3 +466,12 @@ def open_folder(path: str | Path) -> bool:
     except OSError as exc:
         log.warning("could not open %s: %s", path, exc)
     return False
+
+
+def import_roots() -> list[str]:
+    """The folders Python imports from, without the current directory and relative entries. Native libraries are
+    looked for under these (``nvidia/...`` of the CUDA wheels): a folder of that name in whatever directory VoxFlow
+    was started from must never be put on the DLL search path (security review S-17; source runs only, the
+    installed program's path has no such entry)."""
+    here = os.path.normcase(os.path.abspath(os.getcwd()))
+    return [p for p in sys.path if p and os.path.isabs(p) and os.path.normcase(os.path.abspath(p)) != here]

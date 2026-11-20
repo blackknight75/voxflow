@@ -117,6 +117,15 @@ the Hugging Face cache yet. Each script prints its verdict on the last line.
 
 - [ ] **Five minutes of real use.** Start the app (`run.bat`), dictate into two or three programs you use
   every day with your own microphone, try command mode, paste-last and undo, then quit from the tray.
+  No test can stand in for these, so try each once:
+  - end a sentence and let go at the same moment, several times: the last word must be whole (the recording
+    goes on for 80 ms after the release);
+  - on the CPU (`set VOXFLOW_DEVICE=cpu`), dictate a self-correction, let go and press Esc before the text
+    appears: nothing is pasted, nothing is in History, and the Esc does not reach the app;
+  - dictate, let go, and at once hold the hotkey for the next sentence: the first text is pasted when you
+    release, before the second;
+  - pause dictation from the tray and press the hotkey: the Flow bar says "Dictation is paused";
+  - quit from the tray while a dictation is being worked on: window, tray icon and Flow bar disappear at once.
 
 ### The installer (after the release workflow has built it)
 
@@ -136,7 +145,12 @@ the Hugging Face cache yet. Each script prints its verdict on the last line.
   not been run from a frozen build yet either.
 - [ ] Switch on Settings > General > Launch at login, sign out and in again: VoxFlow starts in the tray.
 - [ ] If an older VoxFlow is installed there: run the new installer over it. Settings, history and dictionary
-  are kept.
+  are kept, and no `previous` folder is left in the install folder. The upgrade needs about 3.8 GB free: Setup
+  keeps the old program files in `previous` until the new ones are complete and puts them back if it does not
+  finish. That step was run with a dummy program only (see DEVELOPMENT.md, "Building the installer"), not yet
+  with the real 3.8 GB runtime: to try it, open `_internal\python312.dll` of the installed copy in a program
+  that locks it (or fill the disk), run Setup with `/VERYSILENT /SUPPRESSMSGBOXES /NOCLOSEAPPLICATIONS`, and
+  check that the old version still starts afterwards.
 - [ ] In-app update, once the release is published (it needs a published release newer than the installed one):
   with the previous version installed by its installer, Settings > Updates > *Check now* shows the new version and
   its notes. *Install now* downloads it, VoxFlow quits, Setup runs without any window, and VoxFlow starts again

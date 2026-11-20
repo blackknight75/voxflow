@@ -1,7 +1,8 @@
 """Main window: frameless glass shell with sidebar navigation, six pages, toasts and in-window dialogs.
 
 The window talks only to the controller facade (``voxflow.controller.Controller``). Closing it hides it to the tray.
-Keyboard: Ctrl+1..6 switch pages, Ctrl+F searches history, Esc closes a dialog or hides the window.
+Keyboard: Ctrl+1..6 switch pages, Ctrl+F goes to the search box of the page (History's when the page has none),
+Esc closes a dialog or hides the window.
 """
 from __future__ import annotations
 
@@ -88,6 +89,7 @@ class MainWindow(QWidget):
         self.resize(1080 + 2 * self.M, 720 + 2 * self.M)
         self._placed = False
         self._modal: Modal | None = None
+        self._modal_slot = (None, None)         # (page, its focus slot) when the last dialog was opened
 
         self._root = QVBoxLayout(self)
         self._root.setContentsMargins(self.M, self.M, self.M, self.M)
@@ -225,8 +227,21 @@ class MainWindow(QWidget):
         anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
 
     def _focus_search(self) -> None:
-        self.show_page("history")
-        self.pages["history"].search.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        """Ctrl+F: the search box of the page that is open, with its text selected. A page without one (or whose
+        box is not shown, as on a short Dictionary) leads to History's. Nothing happens under an open dialog."""
+        if self._modal is not None:
+            return
+        page = self.pages[self.current]
+        box = page.search_box()
+        if box is None:
+            self.show_page("history")
+            page = self.pages["history"]
+            box = page.search
+        if page.content.isAncestorOf(box):               # the box on Style is half-way down the page
+            centre = box.mapTo(page.content, box.rect().center())
+            page.scroll.ensureVisible(centre.x(), centre.y(), 0, box.height())
+        box.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        box.selectAll()
 
     def toast(self, level: str, message: str, action: str = "", on_action=None) -> None:
         self.toasts.show_toast(level, message, action, on_action)
@@ -235,12 +250,16 @@ class MainWindow(QWidget):
         if self._modal is not None:
             self._modal.close_modal()
         self._modal = modal
+        page = self.pages[self.current]
+        self._modal_slot = (page, page.focus_slot())
         modal.closed.connect(self._modal_closed)
         modal.open(focus or getattr(modal, "btn_cancel", None))
         return modal
 
     def _modal_closed(self) -> None:
         self._modal = None
+        page, slot = self._modal_slot       # the row the dialog was opened from may have been built anew meanwhile
+        page.restore_focus(slot)
 
     # ------------------------------------------------------------------ controller events
     def _on_status(self, status: dict) -> None:

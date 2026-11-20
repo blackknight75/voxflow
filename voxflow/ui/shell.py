@@ -37,7 +37,7 @@ class Shell(QObject):
         self.overlay.position_changed.connect(self._overlay_moved)
         self.window = MainWindow(c)
         self.window.onboarding_requested.connect(self.open_onboarding)
-        self.window.arrange_overlay_requested.connect(self.overlay.set_arranging)
+        self.window.arrange_overlay_requested.connect(self._arrange_overlay)
         self.tray = Tray(c)
         self.tray.show_window.connect(lambda page: self.window.present(page or None))
         self.tray.quit_requested.connect(self.quit)
@@ -153,6 +153,11 @@ class Shell(QObject):
         if callable(prepare):
             prepare()
         QApplication.instance().quit()
+
+    def _arrange_overlay(self, on: bool) -> None:
+        self.overlay.set_arranging(on)
+        if not on:          # a position that changed meanwhile (Reset, sync) was not applied while it was dragged
+            self.overlay.set_position(self.ctl.get("overlay_position"))
 
     def _overlay_moved(self, pos) -> None:
         try:

@@ -625,6 +625,11 @@ def run_app(demo: bool = False, fake: bool = False, open_settings: bool = False,
     from .ui.shell import build_ui
     show_window = open_settings or demo or not (controller.config.start_minimized or autostart)
     ui = build_ui(controller, show_window=show_window)
+    closer = getattr(ui, "close", None)
+    if callable(closer):
+        # first: the window, the tray icon and the Flow bar go away at once. The shutdown that follows waits for
+        # a dictation still being worked on (up to 3 s); with everything still on screen that looked frozen (QA C-02)
+        app.aboutToQuit.connect(closer)
     app.aboutToQuit.connect(controller.shutdown)
     controller.start()
 
@@ -655,7 +660,6 @@ def run_app(demo: bool = False, fake: bool = False, open_settings: bool = False,
     if demo:
         caption.stop()
     controller.shutdown()
-    closer = getattr(ui, "close", None)
     if callable(closer):
         closer()
     if server is not None:

@@ -161,7 +161,7 @@ def test_only_this_repository_over_https_is_allowed(url, kind, ok):
 
 
 def test_a_redirect_outside_the_allow_list_is_stopped():
-    handler = U._CheckedRedirect("asset")
+    handler = U.checked_redirect()("asset")
     req = urllib.request.Request(f"{REPO}/releases/download/v1.0.0/VoxFlow-Setup-1.0.0.exe",
                                  headers={"Range": "bytes=10-"})
     with pytest.raises(U.UpdateError, match="does not trust"):
@@ -659,7 +659,9 @@ def test_up_to_date_and_failed_checks_are_quiet(tmp_path, qtbot, caplog):
     info = down.info()
     assert info["last_ok"] is False and "could not be reached" in info["last_result"] and info["last_check"]
     assert down.events["notice"] == [] and "update check failed" in caplog.text
-    assert down._check_timer.isActive(), "tried again tomorrow"
+    assert down._check_timer.isActive(), "tried again"
+    assert down._check_timer.interval() == U.RETRY_FAILED_S * 1000, "in an hour, not tomorrow (QA D-05)"
+    assert up._check_timer.interval() == U.CHECK_EVERY_S * 1000, "a check that worked: tomorrow"
 
     def boom(_h):
         raise RuntimeError("bug")
@@ -1294,3 +1296,48 @@ def test_a_still_running_installer_is_deleted_once_windows_releases_it(tmp_path,
     assert not up.info()["downloaded"]
     up.close()
     assert not up._tidy_timer.isActive()
+
+
+# ---------------------------------------------------------------- QA 1.0: UP-01, UP-06, UP-08
+def test_a_waiting_quit_install_is_announced_again_at_every_start(tmp_path, qtbot):
+    """Someone who never uses Quit in the tray (only shuts the PC down) was told once and never got the update."""
+    up = make(tmp_path, qtbot)
+    up.check(user=True)
+    settle(up)
+    up.install("quit")
+    qtbot.waitUntil(lambda: up.info()["downloaded"] and up.info()["install_on_quit"], timeout=3000)
+    up.on_exit(user_quit=False)                                 # Windows ends the session: no Setup
+    assert up.launched == []
+    up.close()
+    for _day in range(3):
+        again = make(tmp_path, qtbot)
+        again.start()
+        assert [m for _lvl, m in again.events["notice"] if "quit VoxFlow from its tray menu" in m], "said at each start"
+        again.close()
+    off = make(tmp_path, qtbot, mode="off")
+    off.start()
+    assert off.events["notice"] == []
+    off.close()
+    fresh = make(tmp_path / "other", qtbot)
+    fresh.start()
+    assert fresh.events["notice"] == [], "nothing waiting: nothing said"
+    fresh.close()
+
+
+def test_a_broken_or_future_last_check_time_neither_stops_the_start_nor_the_checks(tmp_path, qtbot):
+    probe = make(tmp_path, qtbot)
+    probe.check(user=False)
+    settle(probe)
+    probe.close()
+    state, = (tmp_path / "data").iterdir()                      # the updater's state file
+    state.write_text('{"last_check": NaN, "remind_after": Infinity, "last_ok": true}', encoding="utf-8")
+    up = make(tmp_path, qtbot)
+    assert up.state.last_check == 0.0 and up.state.remind_after == 0.0
+    up.start()
+    assert up._check_timer.isActive()
+    up.close()
+    state.write_text(json.dumps({"last_check": Clock().t + 400 * 86400.0, "last_ok": True}), encoding="utf-8")
+    ahead = make(tmp_path, qtbot)
+    ahead._arm_check()
+    assert ahead._check_timer.interval() <= U.CHECK_EVERY_S * 1000, "the next check is a day away at most, not 400"
+    ahead.close()

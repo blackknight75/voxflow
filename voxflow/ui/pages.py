@@ -14,8 +14,10 @@ from . import theme as T
 from .components import (BarChart, Card, EmptyState, Modal, Row, Section, StatCard, TranscriptList, app_label,
                          confirm, fmt_count, fmt_duration)
 from .updates import UpdatesSection, update_dialog
-from .widgets import (Button, Caption, CheckBox, ChoiceButton, HotkeyRecorder, IconButton, KeyCaps, Label, LevelMeter, LineEdit,
-                      PopupMenu, ProgressBar, ScrollArea, SearchField, Segmented, Slider, TextArea, Toggle, painter)
+from .widgets import (Button, Caption, CheckBox, ChoiceButton, ElidedLabel, HotkeyRecorder, IconButton, KeyCaps, Label,
+                      LevelMeter, LineEdit,
+                      PopupMenu, ProgressBar, ScrollArea, SearchField, Segmented, Slider, TextArea, Toggle, WrapLabel,
+                      painter)
 
 
 def field(modal: Modal, caption: str, widget: QWidget, hint: str = "") -> None:
@@ -36,6 +38,7 @@ class Page(QWidget):
         super().__init__(win)
         self.ctl, self.win = ctl, win
         self._dirty = True
+        self._held, self._stale = 0, False      # ``run`` in progress (they can nest), and a refresh owed after it
         outer = QVBoxLayout(self)
         outer.setContentsMargins(28, 0, 8, 0)
         outer.setSpacing(0)
@@ -74,17 +77,54 @@ class Page(QWidget):
         """Called when another page is shown or the window hides."""
 
     def invalidate(self, *_a) -> None:
-        if self.isVisible() and self.win.current == self.objectName().removeprefix("page_"):
+        if self._held:                          # inside ``run``: one refresh when the call is done, however many
+            self._stale = True                  # signals it sends (accepting a suggestion sends two)
+        elif self.isVisible() and self.win.current == self.objectName().removeprefix("page_"):
+            slot = self.focus_slot()
             self.refresh()
+            self.restore_focus(slot)
         else:
             self._dirty = True
+
+    # ---- keyboard focus across a refresh: the row that was removed is gone and the one that was edited is a new
+    # widget, which would leave the keyboard nowhere after "Remove" or "Save" (QA Q-02)
+    def _named(self, name: str) -> list[QWidget]:
+        return [w for w in self.content.findChildren(QWidget, name) if w.isVisibleTo(self.content)]
+
+    def focus_slot(self) -> tuple | None:
+        """Where the keyboard focus is on this page: (widget name, its place among the widgets of that name, the
+        widget itself)."""
+        w = self.window().focusWidget()
+        if w is None or not w.objectName() or not self.content.isAncestorOf(w):
+            return None
+        peers = self._named(w.objectName())
+        return (w.objectName(), peers.index(w), w) if w in peers else None
+
+    def restore_focus(self, slot: tuple | None) -> None:
+        """Give the focus back to the widget now in that place (the next row after a removal), unless the widget
+        that had it is still there. Qt meanwhile moved the focus to whatever came next in the Tab chain."""
+        if slot is None or (self.window().focusWidget() is slot[2] and slot[2].isVisibleTo(self.content)):
+            return
+        peers = self._named(slot[0])
+        target = peers[min(slot[1], len(peers) - 1)] if peers else getattr(self, "btn_add", None)
+        if target is not None:
+            target.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def refresh(self) -> None:
         """Rebuild from the controller's current data."""
 
+    finder: QWidget | None = None           # the page's own search box, if it has one
+
+    def search_box(self) -> QWidget | None:
+        """The page's search box when it is there to type in (Ctrl+F goes to it), else None."""
+        box = self.finder
+        return box if box is not None and box.isVisibleTo(self) and box.isEnabled() else None
+
     # ---- helpers
     def run(self, fn, *args, success: str = "", **kwargs):
-        """Call a store/controller method; show a toast instead of raising. Returns None on failure."""
+        """Call a store/controller method; show a toast instead of raising. Returns None on failure. The page is
+        refreshed once, when the call is done, for all the changes it announced."""
+        self._held += 1
         try:
             res = fn(*args, **kwargs)
         except ValueError as exc:
@@ -93,6 +133,11 @@ class Page(QWidget):
         except Exception as exc:                 # never let a store problem take the window down
             self.win.toast("error", f"That did not work: {exc}")
             return None
+        finally:
+            self._held -= 1
+            if self._stale and not self._held:
+                self._stale = False
+                self.invalidate()
         if success:
             self.win.toast("success", success)
         return True if res is None else res
@@ -163,9 +208,8 @@ class HomePage(Page):
         hint.addWidget(Label("Hold", T.F_BODY, "TEXT_DIM", wrap=False))
         self.caps = KeyCaps(ctl.get("hotkey"))
         hint.addWidget(self.caps)
-        hint.addWidget(Label("in any app, speak, and release. VoxFlow types it for you.", T.F_BODY, "TEXT_DIM",
-                             wrap=False))
-        hint.addStretch(1)
+        hint.addWidget(ElidedLabel("in any app, speak, and release. VoxFlow types it for you.", T.F_BODY, "TEXT_DIM"),
+                       1)                           # a long shortcut at the smallest window: cut, not clipped
         self.head_col.addLayout(hint)
 
         stats = QGridLayout()
@@ -299,7 +343,10 @@ class HomePage(Page):
         first_run = not items and sessions == 0
         for w in (self.stats_box, self.mid_box):
             w.setVisible(not first_run)
-        self.hero.setVisible(first_run)
+        # the first dictation lands in the practice box: the box must not vanish under the text it just received
+        practising = not self.hero.isHidden() and (self.practice.hasFocus()
+                                                   or bool(self.practice.toPlainText().strip()))
+        self.hero.setVisible(first_run or practising)
         self.recent_title.setVisible(not first_run or not self.ctl.get("save_history"))
         if first_run:
             self.hero_hint.setText("Say a sentence and let go. The text appears right here.")   # the keys are in the line above
@@ -337,7 +384,7 @@ class HistoryPage(Page):
     def __init__(self, ctl, win):
         super().__init__(ctl, win, "History", "Everything you have dictated, stored only on this PC.")
         self._limit = self.PAGE_SIZE
-        self.search = SearchField("Search transcripts")
+        self.search = self.finder = SearchField("Search transcripts")
         self.search.setObjectName("history_search")
         self.search.setMinimumWidth(180)
         self.search.setMaximumWidth(340)
@@ -377,7 +424,7 @@ class HistoryPage(Page):
         self.off_note.body.addWidget(off_row)
         self.off_note.hide()
         self.body.addWidget(self.off_note)
-        self.count = Label("", T.F_SMALL, "TEXT_DIM", wrap=False)
+        self.count = ElidedLabel("", T.F_SMALL, "TEXT_DIM")     # a long search text must not widen the page
         self.count.setObjectName("history_count")
         self.body.addWidget(self.count)
         self.list = TranscriptList()
@@ -453,8 +500,12 @@ class HistoryPage(Page):
 
     def _delete(self, entry: dict) -> None:
         if self.run(self.ctl.history.delete, entry.get("id")):
-            self.win.toast("success", "Transcript deleted.", "Undo",
-                           lambda: self.run(self.ctl.history.restore, entry))
+            self.win.toast("success", "Transcript deleted.", "Undo", lambda: self._undelete(entry))
+
+    def _undelete(self, entry: dict) -> None:
+        """Undo: the transcript is back, chosen again, and the keyboard is back in the list (QA Q-02)."""
+        if self.run(self.ctl.history.restore, entry) and self.list.select_id(entry.get("id")):
+            self.list.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _confirm_clear(self) -> None:
         n = self.ctl.history.count()
@@ -528,8 +579,9 @@ def merge_or_replace(win, title: str, facts: list[str], merge_text: str, replace
     chosen."""
     m = Modal(win.panel, title, "", width=480, name=name)
     box = Card(padding=12, spacing=4)
-    for i, line in enumerate(facts):
-        box.body.addWidget(Label(line, T.F_BODY, "TEXT" if i == 0 else "TEXT_DIM", T.W_SEMI if i == 0 else T.W_NORMAL))
+    for i, line in enumerate(facts):                   # a file name, a pack's own description: any length
+        box.body.addWidget(WrapLabel(line, T.F_BODY, "TEXT" if i == 0 else "TEXT_DIM",
+                                     T.W_SEMI if i == 0 else T.W_NORMAL))
     m.body.addWidget(box)
     boxes: dict[str, CheckBox] = {}
     if parts:
@@ -827,7 +879,10 @@ class _ImportExport:
         self.btn_share = IconButton("share", f"Share a pack: save your {self.noun}, or some of them, as one file")
         self.btn_share.setObjectName(f"{'dict' if self.pack_kind == 'dictionary' else 'snippets'}_share")
         self.btn_share.clicked.connect(self.share_pack)
-        self.actions.insertWidget(self.actions.indexOf(before), self.btn_share)
+        at = self.actions.indexOf(before)
+        self.actions.insertWidget(at, self.btn_share)
+        QWidget.setTabOrder(self.actions.itemAt(at - 1).widget(), self.btn_share)   # Tab follows what is on screen:
+        QWidget.setTabOrder(self.btn_share, before)                                 # ..., Share, then ``before``
 
 
 class DictionaryPage(Page, _ImportExport):
@@ -858,7 +913,7 @@ class DictionaryPage(Page, _ImportExport):
         self.inbox = Section("Suggestions")
         self.inbox.setObjectName("dict_suggestions")
         self.body.addWidget(self.inbox)
-        self.search = SearchField("Search dictionary")
+        self.search = self.finder = SearchField("Search dictionary")
         self.search.setObjectName("dict_search")
         self._debounce = QTimer(self)                 # one rebuild per pause in typing, not one per keystroke
         self._debounce.setSingleShot(True)
@@ -895,8 +950,62 @@ class DictionaryPage(Page, _ImportExport):
         self._fill_entries()
 
     def _more(self) -> None:
+        """The next rows are added below the ones that are there. Building all of them again made every further
+        "Show more" slower than the one before (QA U-05: 136, 213, 304, 365, 474 ms for 200 to 600 words)."""
         self._limit += self.PAGE_SIZE
         self._fill_entries()
+
+    def _matching(self) -> list[dict]:
+        q = self.search.text().strip().lower()
+        return [e for e in self._items if not q or q in e["term"].lower()
+                or any(q in a.lower() for a in e.get("aliases", []))]
+
+    def _show_hidden(self, hidden: int) -> None:
+        self.btn_more.setText(f"Show more words ({hidden:,} not shown)")
+        self.btn_more.setVisible(hidden > 0)
+
+    def _entry_row(self, e: dict) -> Row:
+        box = QWidget()
+        lay = QHBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
+        ed = IconButton("edit", f"Edit {e['term']}")
+        ed.setObjectName("dict_edit")
+        ed.clicked.connect(lambda _c=False, entry=e: self.edit(entry))
+        rm = IconButton("trash", f"Remove {e['term']}", danger=True)
+        rm.setObjectName("dict_remove")
+        rm.clicked.connect(lambda _c=False, entry=e: self._remove(entry))
+        lay.addWidget(ed)
+        lay.addWidget(rm)
+        aliases = e.get("aliases") or []
+        sub = "Heard as: " + ", ".join(aliases) if aliases else "Spelling and capitalisation only"
+        return Row(e["term"], sub, box)
+
+    def _suggestion_row(self, s: dict) -> Row:
+        heard = ", ".join(f"“{a}”" for a in s.get("aliases", []))
+        box = QWidget()
+        lay = QHBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        add = Button("Add", "secondary", icon="check", height=30)
+        add.setObjectName("dict_suggestion_accept")
+        add.setAccessibleName(f"Add {s.get('term', '')} to the dictionary")
+        add.clicked.connect(lambda _c=False, sid=s["id"], term=s.get("term", ""): self.run(
+            self.ctl.dictionary.accept_suggestion, sid, success=f"Added “{term}” to your dictionary."))
+        no = IconButton("close", f"Dismiss the suggestion {s.get('term', '')}", size=30)
+        no.setObjectName("dict_suggestion_dismiss")
+        no.clicked.connect(lambda _c=False, sid=s["id"]: self.run(self.ctl.dictionary.dismiss_suggestion, sid))
+        lay.addWidget(add)
+        lay.addWidget(no)
+        term = str(s.get("term", ""))
+        return Row(term, f"VoxFlow heard {heard} and wrote {term}. Add it so it is always spelled this way."
+                   if heard else f"VoxFlow wrote {term} in a recent dictation. Add it so it is always "
+                                 "spelled this way.", box, icon="sparkle")
+
+    @staticmethod
+    def _row_key(e: dict) -> tuple:
+        """What the row of a word or of a suggestion shows: the row is kept for as long as this stays the same."""
+        return e.get("id"), str(e.get("term", "")), tuple(e.get("aliases") or ())
 
     def refresh(self) -> None:
         self._failed = ""
@@ -906,60 +1015,17 @@ class DictionaryPage(Page, _ImportExport):
         except Exception as exc:
             self._failed = str(exc) or type(exc).__name__
             self._items, sugg = [], []
-        self.inbox.clear()
         self.inbox.caption.setText(f"SUGGESTIONS  ·  {len(sugg)}")
-        rows = []
-        for s in sugg:
-            heard = ", ".join(f"“{a}”" for a in s.get("aliases", []))
-            box = QWidget()
-            lay = QHBoxLayout(box)
-            lay.setContentsMargins(0, 0, 0, 0)
-            lay.setSpacing(6)
-            add = Button("Add", "secondary", icon="check", height=30)
-            add.setObjectName("dict_suggestion_accept")
-            add.setAccessibleName(f"Add {s.get('term', '')} to the dictionary")
-            add.clicked.connect(lambda _c=False, sid=s["id"], term=s.get("term", ""): self.run(
-                self.ctl.dictionary.accept_suggestion, sid, success=f"Added “{term}” to your dictionary."))
-            no = IconButton("close", f"Dismiss the suggestion {s.get('term', '')}", size=30)
-            no.setObjectName("dict_suggestion_dismiss")
-            no.clicked.connect(lambda _c=False, sid=s["id"]: self.run(self.ctl.dictionary.dismiss_suggestion, sid))
-            lay.addWidget(add)
-            lay.addWidget(no)
-            term = str(s.get("term", ""))
-            rows.append(Row(term, f"VoxFlow heard {heard} and wrote {term}. Add it so it is always spelled this way."
-                            if heard else f"VoxFlow wrote {term} in a recent dictation. Add it so it is always "
-                                          "spelled this way.", box, icon="sparkle"))
-        self.inbox.add_many(rows)
+        self.inbox.sync(sugg, self._row_key, self._suggestion_row)
         self.inbox.setVisible(bool(sugg))
         self._fill_entries()
 
     def _fill_entries(self) -> None:
         q = self.search.text().strip().lower()
-        matching = [e for e in self._items if not q or q in e["term"].lower()
-                    or any(q in a.lower() for a in e.get("aliases", []))]
+        matching = self._matching()
         shown = matching[:self._limit]
-        self.entries.clear()
-        rows = []
-        for e in shown:
-            box = QWidget()
-            lay = QHBoxLayout(box)
-            lay.setContentsMargins(0, 0, 0, 0)
-            lay.setSpacing(2)
-            ed = IconButton("edit", f"Edit {e['term']}")
-            ed.setObjectName("dict_edit")
-            ed.clicked.connect(lambda _c=False, entry=e: self.edit(entry))
-            rm = IconButton("trash", f"Remove {e['term']}", danger=True)
-            rm.setObjectName("dict_remove")
-            rm.clicked.connect(lambda _c=False, entry=e: self._remove(entry))
-            lay.addWidget(ed)
-            lay.addWidget(rm)
-            aliases = e.get("aliases") or []
-            sub = "Heard as: " + ", ".join(aliases) if aliases else "Spelling and capitalisation only"
-            rows.append(Row(e["term"], sub, box))
-        self.entries.add_many(rows)
-        hidden = len(matching) - len(shown)
-        self.btn_more.setText(f"Show more words ({hidden:,} not shown)")
-        self.btn_more.setVisible(hidden > 0)
+        self.entries.sync(shown, self._row_key, self._entry_row)     # only the rows that changed are touched
+        self._show_hidden(len(matching) - len(shown))
         has_any = bool(self._items)
         self.search.setVisible(len(self._items) > 6 or bool(q))
         self.entries.setVisible(bool(shown))
@@ -1060,8 +1126,29 @@ class SnippetsPage(Page, _ImportExport):
         return self.ctl.snippets
 
     def _more(self) -> None:
+        """Adds the next rows below the ones that are there (see ``DictionaryPage._more``)."""
         self._limit += self.PAGE_SIZE
         self.refresh()
+
+    def _show_hidden(self, hidden: int) -> None:
+        self.btn_more.setText(f"Show more snippets ({hidden:,} not shown)")
+        self.btn_more.setVisible(hidden > 0)
+
+    def _snippet_row(self, s: dict) -> Row:
+        box = QWidget()
+        lay = QHBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
+        ed = IconButton("edit", f"Edit the snippet {s['trigger']}")
+        ed.setObjectName("snippets_edit")
+        ed.clicked.connect(lambda _c=False, entry=s: self.edit(entry))
+        rm = IconButton("trash", f"Delete the snippet {s['trigger']}", danger=True)
+        rm.setObjectName("snippets_remove")
+        rm.clicked.connect(lambda _c=False, entry=s: self._remove(entry))
+        lay.addWidget(ed)
+        lay.addWidget(rm)
+        flat = " ⏎ ".join(line.strip() for line in str(s.get("text", "")).splitlines() if line.strip())
+        return Row(f"“{s['trigger']}”", flat if len(flat) <= 110 else flat[:107] + "…", box, icon="snippet")
 
     def refresh(self) -> None:
         failed = ""
@@ -1070,29 +1157,10 @@ class SnippetsPage(Page, _ImportExport):
         except Exception as exc:
             failed = str(exc) or type(exc).__name__
             items = []
-        self.rows.clear()
         self.rows.caption.setText(f"YOUR SNIPPETS  ·  {len(items)}")
-        hidden = max(0, len(items) - self._limit)
-        self.btn_more.setText(f"Show more snippets ({hidden:,} not shown)")
-        self.btn_more.setVisible(hidden > 0)
-        rows = []
-        for s in items[:self._limit]:
-            box = QWidget()
-            lay = QHBoxLayout(box)
-            lay.setContentsMargins(0, 0, 0, 0)
-            lay.setSpacing(2)
-            ed = IconButton("edit", f"Edit the snippet {s['trigger']}")
-            ed.setObjectName("snippets_edit")
-            ed.clicked.connect(lambda _c=False, entry=s: self.edit(entry))
-            rm = IconButton("trash", f"Delete the snippet {s['trigger']}", danger=True)
-            rm.setObjectName("snippets_remove")
-            rm.clicked.connect(lambda _c=False, entry=s: self._remove(entry))
-            lay.addWidget(ed)
-            lay.addWidget(rm)
-            flat = " ⏎ ".join(line.strip() for line in str(s.get("text", "")).splitlines() if line.strip())
-            rows.append(Row(f"“{s['trigger']}”", flat if len(flat) <= 110 else flat[:107] + "…", box,
-                            icon="snippet"))
-        self.rows.add_many(rows)
+        self._show_hidden(max(0, len(items) - self._limit))
+        self.rows.sync(items[:self._limit], lambda s: (s.get("id"), s.get("trigger"), s.get("text")),
+                       self._snippet_row)                # only the rows that changed are touched
         self.rows.setVisible(bool(items))
         self.empty.setVisible(not items)
         self.btn_export.setEnabled(bool(items))
@@ -1273,14 +1341,22 @@ class StylePage(Page):
         self.note.setContentsMargins(4, 0, 0, 0)
         self.body.addWidget(self.note)
 
-        self.app_search = SearchField("Search apps")
+        self.app_search = self.finder = SearchField("Search apps")
         self.app_search.setObjectName("style_app_search")
         self.app_search.setMaximumWidth(300)
         self.app_search.textChanged.connect(lambda _t: self.refresh())
         self.body.addWidget(self.app_search)
+        self.no_match = WrapLabel("", T.F_BODY, "TEXT_DIM")
+        self.no_match.setObjectName("style_no_match")
+        self.no_match.setContentsMargins(4, 0, 0, 0)
+        self.no_match.hide()
+        self.body.addWidget(self.no_match)
         self.apps = Section("Apps")
         self.apps.setObjectName("style_apps")
         self.body.addWidget(self.apps)
+        self._cats = list(ctl.categories())
+        self._short = {k: v.replace(" messages", "") for k, v in self._cats}
+        self.add_row = self._build_add_row()
         self.body.addStretch(1)
         ctl.styles_changed.connect(self.invalidate)
         ctl.config_changed.connect(lambda key, _v: key == "language" and self.invalidate())
@@ -1308,10 +1384,29 @@ class StylePage(Page):
             tones, rows = {}, []
         for key, card in self.cards.items():
             card.set_tone(tones.get(key, "formal"))
-        cats = list(self.ctl.categories())
-        short = {k: v.replace(" messages", "") for k, v in cats}
-        self.apps.clear()
+        query = self.app_search.text().strip().lower()
+        shown = [r for r in sorted(rows, key=lambda r: not self._own(r))        # your own choices first (stable sort)
+                 if not query or query in str(r.get("exe", "")).lower()
+                 or query in app_label(str(r.get("exe", ""))).lower()]
+        # the "Add an app" row is the same widget throughout: built anew with the list, it lost a half-typed name
+        # whenever anything changed the styles (QA Q-13)
+        self.apps.sync([None] + shown, self._app_key, self._app_row)
+        self.no_match.setText(f"No app in the list matches “{self.app_search.text().strip()}”. To give it a style "
+                              "of its own, add it below.")
+        self.no_match.setVisible(bool(query) and not shown)
 
+    @staticmethod
+    def _own(row: dict) -> bool:
+        """The user's own choice: an app they added, or a built-in app whose category they changed.
+        (The store sets ``overridden`` only for built-in apps; an added app is simply not ``builtin``.)"""
+        return bool(row.get("overridden")) or not row.get("builtin")
+
+    def _app_key(self, r: dict | None) -> tuple:
+        """What the row of an app shows (``None`` stands for the "Add an app" row)."""
+        return ("add",) if r is None else (str(r.get("exe", "")), r.get("category"), self._own(r),
+                                           bool(r.get("builtin")))
+
+    def _build_add_row(self) -> Row:
         add_box = QWidget()
         lay = QHBoxLayout(add_box)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -1321,57 +1416,56 @@ class StylePage(Page):
         self.new_exe.setMaximumWidth(260)
         self.new_cat = ChoiceButton(name="Category for the new app")
         self.new_cat.setObjectName("style_new_category")
-        self.new_cat.set_options([(k, short[k]) for k, _v in cats], cats[1][0] if len(cats) > 1 else None)
+        cats = self._cats
+        self.new_cat.set_options([(k, self._short[k]) for k, _v in cats], cats[1][0] if len(cats) > 1 else None)
         self.new_cat.setFixedWidth(150)
         add = Button("Add app", "secondary", icon="plus")
         add.setObjectName("style_add_app")
         add.clicked.connect(self._add_app)
         self.new_exe.returnPressed.connect(self._add_app)
+        self.new_exe.textChanged.connect(lambda _t: self.new_exe.set_invalid(False))   # typing answers the red border
         lay.addWidget(self.new_exe, 1)
         lay.addWidget(self.new_cat)
         lay.addWidget(add)
         lay.addStretch(1)
-        self.apps.add(Row("Add an app", "Type the program's file name, for example signal.exe, and choose which "
-                                        "style it should use.", None, below=add_box))
-        def own(row: dict) -> bool:
-            """The user's own choice: an app they added, or a built-in app whose category they changed.
-            (The store sets ``overridden`` only for built-in apps; an added app is simply not ``builtin``.)"""
-            return bool(row.get("overridden")) or not row.get("builtin")
+        return Row("Add an app", "Type the program's file name, for example signal.exe, and choose which "
+                                 "style it should use.", None, below=add_box)
 
-        query = self.app_search.text().strip().lower()
-        for r in sorted(rows, key=lambda r: not own(r)):       # your own choices first (stable sort)
-            exe = str(r.get("exe", ""))
-            if query and query not in exe.lower() and query not in app_label(exe).lower():
-                continue
-            box = QWidget()
-            bl = QHBoxLayout(box)
-            bl.setContentsMargins(0, 0, 0, 0)
-            bl.setSpacing(4)
-            pick = ChoiceButton(name=f"Category for {app_label(exe)}")
-            pick.setObjectName("style_app_category")
-            pick.set_options([(k, short[k]) for k, _v in cats], r.get("category"))
-            pick.setFixedWidth(150)
-            pick.chosen.connect(lambda cat, e=exe: self.run(self.ctl.styles.set_app_category, e, cat))
-            if own(r):
-                builtin = bool(r.get("builtin"))
-                undo = IconButton("undo" if builtin else "trash",
-                                  f"Use the built-in category for {app_label(exe)}" if builtin else
-                                  f"Remove {app_label(exe)}", danger=not builtin)
-                undo.setObjectName("style_app_reset")
-                undo.clicked.connect(lambda _c=False, e=exe: self.run(self.ctl.styles.remove_app_category, e))
-                bl.addWidget(undo)
-            bl.addWidget(pick)
-            # only the exceptions are labelled: "built-in" on every row was noise (D-18)
-            self.apps.add(Row(app_label(exe) or exe, f"{exe}  ·  your choice" if own(r) else exe, box))
+    def _app_row(self, r: dict | None) -> Row:
+        if r is None:
+            return self.add_row
+        exe = str(r.get("exe", ""))
+        own = self._own(r)
+        box = QWidget()
+        bl = QHBoxLayout(box)
+        bl.setContentsMargins(0, 0, 0, 0)
+        bl.setSpacing(4)
+        pick = ChoiceButton(name=f"Category for {app_label(exe)}")
+        pick.setObjectName("style_app_category")
+        pick.set_options([(k, self._short[k]) for k, _v in self._cats], r.get("category"))
+        pick.setFixedWidth(150)
+        pick.chosen.connect(lambda cat, e=exe: self.run(self.ctl.styles.set_app_category, e, cat))
+        if own:
+            builtin = bool(r.get("builtin"))
+            undo = IconButton("undo" if builtin else "trash",
+                              f"Use the built-in category for {app_label(exe)}" if builtin else
+                              f"Remove {app_label(exe)}", danger=not builtin)
+            undo.setObjectName("style_app_reset")
+            undo.clicked.connect(lambda _c=False, e=exe: self.run(self.ctl.styles.remove_app_category, e))
+            bl.addWidget(undo)
+        bl.addWidget(pick)
+        # only the exceptions are labelled: "built-in" on every row was noise (D-18)
+        return Row(app_label(exe) or exe, f"{exe}  ·  your choice" if own else exe, box)
 
     def _add_app(self) -> None:
         exe = self.new_exe.text().strip()
         if not exe:
             self.new_exe.set_invalid(True)
             self.win.toast("warning", "Type the app's file name first, for example signal.exe.")
-            return
-        if self.run(self.ctl.styles.set_app_category, exe, self.new_cat.value) is not None:
+        elif self.run(self.ctl.styles.set_app_category, exe, self.new_cat.value) is not None:
             self.win.toast("success", f"{app_label(exe) or exe} added.")
+            self.new_exe.clear()
+        self.new_exe.setFocus(Qt.FocusReason.OtherFocusReason)      # the next name can be typed straight away
 
 
 # =========================================================================== Settings
@@ -1700,7 +1794,7 @@ class SettingsPage(Page):
         self.btn_sync_choose.clicked.connect(self.choose_sync_folder)
         for b in (self.btn_sync_off, self.btn_sync_now, self.btn_sync_choose):
             sl2.addWidget(b)
-        self.sync_folder = Label("", T.F_SMALL, "TEXT", wrap=False, selectable=True)
+        self.sync_folder = ElidedLabel("", T.F_SMALL, "TEXT", mode=Qt.TextElideMode.ElideMiddle, selectable=True)
         self.sync_folder.setObjectName("settings_sync_folder")
         self.sync_row = sec.add(Row("Sync folder", "", sync_box, icon="sync", below=self.sync_folder))
         self.sync_row.setObjectName("settings_sync_row")
@@ -1809,7 +1903,8 @@ class SettingsPage(Page):
         self.tabs = Segmented(list(self._TABS), self._TABS[0][0], name="Settings group")
         self.tabs.setObjectName("settings_tabs")
         self.tabs.changed.connect(self.show_tab)
-        self.find = SearchField("Search settings")
+        self.tabs.reselected.connect(self.show_tab)     # the highlighted group, clicked during a search: ends it
+        self.find = self.finder = SearchField("Search settings")
         self.find.setObjectName("settings_search")
         self.find.setFixedWidth(240)
         self.find.textChanged.connect(self._filter)
@@ -1884,6 +1979,11 @@ class SettingsPage(Page):
         self.no_match.setVisible(bool(q) and not any_shown)
         if not q:
             self.updates.refresh()                   # rows that only apply to one update mode hide again
+        # a microphone test or "Move…" whose button is no longer on screen could not be stopped: end it
+        if self._testing and not self.btn_test.isVisibleTo(self):
+            self._set_testing(False)
+        if self._arranging and not self.btn_move.isVisibleTo(self):
+            self._set_arranging(False)
 
     # ---- builders
     def _toggle(self, key: str, title: str, sub: str, icon: str | None = None) -> Row:
@@ -2042,7 +2142,8 @@ class SettingsPage(Page):
     def on_enter(self) -> None:
         self._dirty = True           # cheap, and always right even after external changes
         super().on_enter()
-        self._sync_timer.start()
+        if self.win.isVisible():                     # started in the tray on this page: nothing to keep fresh yet
+            self._sync_timer.start()
 
     # ---- backup, restore, sync folder
     def export_backup(self) -> Modal:

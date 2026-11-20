@@ -526,6 +526,10 @@ class HotkeyListener:
         self.on_event = on_event
         self.on_captured = on_captured
         self.enabled = True
+        self.on_blocked = None                 # called (hook thread) when a shortcut is pressed while not enabled
+        self.cancel_armed = False              # True while a dictation is being worked on: the next Esc cancels it
+        self._esc_eaten = False                # the key-up of that Esc is swallowed as well
+        self._idle_down: set[int] = set()      # keys seen going down while not enabled
         self._extra: dict[str, list] = {}      # name -> [machine | None, on_event, mode]
         self.guard: MenuGuard | None = None    # set by the hook thread; tests may install their own
         self._thread: threading.Thread | None = None
@@ -572,8 +576,21 @@ class HotkeyListener:
             if res.captured is not None and self.on_captured:
                 self.on_captured(res.captured)
             return res
-        if not self.enabled:
+        if vk == VK_ESC and (self._esc_eaten or (self.cancel_armed and is_down
+                                                 and not any(m.active for m, _ in self._machines()))):
+            # Esc while the released dictation is still being worked on: it cancels the paste and goes no further.
+            # Only then: at any other time Esc is the focused app's key.
+            if is_down and not self._esc_eaten:
+                self.cancel_armed, self._esc_eaten = False, True
+                self.on_event("cancel")
+            elif not is_down:
+                self._esc_eaten = False
+            total.swallow = True
             return total
+        if not self.enabled:
+            self._watch_blocked(vk, is_down, probe)
+            return total
+        self._idle_down.clear()
         pairs = self._machines()
         guard = self.guard
         if (guard is not None and is_down and not self.machine.down
@@ -591,6 +608,26 @@ class HotkeyListener:
         if guard is not None and not is_down and vk in _MOD_GROUPS["alt"]:
             guard.alt_released()
         return total
+
+    def _watch_blocked(self, vk: int, is_down: bool, probe) -> None:
+        """Not enabled (dictation is paused): every key passes through untouched, but a shortcut that would have
+        done something is reported once per press through ``on_blocked``, so the user can be told why nothing
+        happens. Same rule as the bindings: the exact chord, no other key held."""
+        down = self._idle_down
+        if not is_down:
+            down.discard(vk)
+            return
+        if vk in down:                           # auto-repeat
+            return
+        if probe is not None:                    # a key-up that never arrived (Win+L, secure desktop)
+            down.intersection_update({k for k in down if probe(k)})
+        down.add(vk)
+        if self.on_blocked is None:
+            return
+        for m, _cb in self._machines():
+            if vk in m._trigger_vks and down <= m._trigger_vks and all(g & down for g in m.groups):
+                self.on_blocked()
+                return
 
     def settle(self, timeout: float = 0.6) -> bool:
         """Wait until the focus check that follows a shortcut with Alt is over (see ``MenuGuard``).

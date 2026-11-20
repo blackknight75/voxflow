@@ -652,7 +652,8 @@ def test_nothing_private_or_per_computer_is_written_to_the_folder(tmp_path, cloc
         assert secret not in text
     doc = json.loads(text)
     assert not set(doc["records"]["settings"]) & set(S.LOCAL_SETTINGS)
-    assert set(doc["records"]["settings"]) == set(S.portable_settings())
+    assert set(doc["records"]["settings"]) == set(S.portable_settings()) - S.NOT_SYNCED
+    assert {"hotkey", "save_history", "history_limit", "history_retention_days"} <= S.NOT_SYNCED
     assert "phrase_streaming" in S.LOCAL_SETTINGS and "phrase_streaming" not in doc["records"]["settings"]
 
 
@@ -1192,12 +1193,12 @@ def test_the_state_file_cannot_be_saved_is_not_fatal(tmp_path, clock, folder, mo
 def test_a_setting_that_cannot_be_applied_here_keeps_its_local_value_for_everyone(tmp_path, clock, folder):
     a, b = pair(tmp_path, folder, clock)
     rounds(a, b)
-    b.refuse = {"hotkey"}                                       # e.g. clashes with something on this computer
+    b.refuse = {"language"}                                     # e.g. not available on this computer
     clock.tick(5)
-    a.settings["hotkey"] = "ctrl+alt+f9"
+    a.settings["language"] = "de"
     rounds(a, b, a, b)
-    assert b.settings["hotkey"] == cfgmod.defaults()["hotkey"]
-    assert a.settings["hotkey"] == cfgmod.defaults()["hotkey"], "the value that works everywhere wins"
+    assert b.settings["language"] == cfgmod.defaults()["language"]
+    assert a.settings["language"] == cfgmod.defaults()["language"], "the value that works everywhere wins"
 
 
 # =========================================================================== sync folder: convergence

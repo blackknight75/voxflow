@@ -614,7 +614,8 @@ def test_pause_ignores_shortcuts_aborts_a_recording_and_resumes(rig):
     assert rig.c.status()["level"] == "paused" and rig.spy.of("status_changed")[-1][0]["level"] == "paused"
     rig.release()                                               # released while paused: the hook ignores it
     results = [rig.c.listener.feed(vk, down) for vk, down in ((CTRL, True), (WIN, True), (WIN, False), (CTRL, False))]
-    assert rig.c.state == "idle" and rig.rec.starts == 1
+    assert rig.rec.starts == 1, "no new recording"
+    assert (rig.c.state, rig.c.message) == ("error", "Dictation is paused"), "the bar says why nothing happened (QA U-04)"
     assert not any(r.swallow or r.mask for r in results), "while paused every key passes through untouched"
     rig.c.set_paused(True)                                      # no-op
     rig.c.set_paused(False)

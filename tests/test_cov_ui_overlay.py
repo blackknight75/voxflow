@@ -454,7 +454,12 @@ def test_a_remembered_position_is_used_while_its_screen_exists(pill, clock):
     assert p._target_anchor() == QPoint(area.left() + 300, area.top() + 200)
     assert p.pos() == QPoint(area.left() + 300 - O.CANVAS_W // 2, area.top() + 200 - (O.CANVAS_H - O.BOTTOM_PAD))
     p.set_position([area.left() + 1, area.top() + 1])          # too close to the corner: pulled into the work area
-    assert p._target_anchor() == QPoint(area.left() + 140, area.top() + 70)
+    assert p._target_anchor() == QPoint(area.left() + O.EDGE_X, area.top() + O.EDGE_TOP)
+    assert (O.EDGE_X, O.EDGE_TOP) == (250, 110)
+    p.set_preview("so the plan for tomorrow is simple and", "then we ship it")
+    for corner in ([area.left() + 1, area.top() + 1], [area.right() - 1, area.top() + 1]):
+        p.set_position(corner)                                 # the caption canvas is on the screen at every edge
+        assert area.contains(QRect(p.pos(), p.size()).adjusted(10, 0, -10, -O.BOTTOM_PAD)), corner
     p.set_position([10 ** 6, 10 ** 6])                         # that monitor is gone
     assert p._target_anchor() == default
     for junk in ("x", [1], ["a", "b"], 5, None):

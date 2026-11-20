@@ -30,7 +30,7 @@ from . import sync as syncmod
 from . import updater as updatermod
 from .command import CommandError, CommandMode
 from .context import AppContext, foreground_app, foreground_hwnd, foreground_is_own
-from .hotkey import HotkeyListener, hotkey_problem, normalize_hotkey, pretty_hotkey
+from .hotkey import DOUBLE_GAP_S, HotkeyListener, hotkey_problem, normalize_hotkey, pretty_hotkey
 from .sounds import MediaMuter, SoundPlayer
 
 log = logging.getLogger("voxflow.controller")
@@ -38,6 +38,10 @@ log = logging.getLogger("voxflow.controller")
 STATES = ("idle", "listening", "locked", "processing", "done", "error")
 MODES = ("dictate", "command")
 DONE_MS, ERROR_MS = 1100, 2200
+DICT_PREP_MS = 400
+LATE_START_S = 0.05                           # a start handled this long after the key-down is backdated
+HELD_PASTE_WAIT_S = 60.0                      # longest a finished paste waits for the next dictation's keys to come up
+PAUSED_HINT = "Dictation is paused"           # flow bar, when a shortcut is pressed while paused
 _MODEL_KEYS = ("asr_model", "asr_device", "cleanup_model")
 _KEPT_ON_RESET = ("config_version", "onboarding_done", "ui_state", "overlay_position")
 SYNC_INTERVAL_MS, SYNC_DEBOUNCE_MS = 30_000, 2_000
@@ -90,7 +94,7 @@ class Controller(QObject):
     restart_requested = Signal()                    # quit now: the update installer runs once VoxFlow has shut down
 
     # ---- private cross-thread plumbing
-    _sig_hotkey = Signal(str, str)                  # binding, event
+    _sig_hotkey = Signal(str, str, float)           # binding, event, when the key event happened (perf_counter)
     _sig_captured = Signal(str)
     _sig_store = Signal(str)
     _sig_suggestion = Signal(dict)
@@ -165,6 +169,15 @@ class Controller(QObject):
         self._portable = syncmod.DataSet(self.dictionary, self.snippets, self.styles, self.history,
                                          lambda: self.config.to_dict(), self._apply_settings, self.stats)
         self.sync = syncmod.SyncEngine(self._portable, self.data_dir / "sync_state.json")
+        if self.sync.load_problem:                     # the sync state file could not be read (QA DL-08)
+            self._startup_notices.append(("warning", self.sync.load_problem, "open_data_folder", "Open data folder"))
+        damaged = [st.label for st in (self.dictionary, self.snippets, self.styles) if st.load_problem]
+        if getattr(cfgmod, "last_load_problem", ""):
+            damaged.append("settings")
+        if damaged and self.sync.rejoin():
+            # what is missing here was not deleted by the user: it must not be deleted on the other PCs (QA DL-01)
+            log.warning("%s could not be read in full: joining the sync folder again instead of syncing the loss",
+                        ", ".join(damaged))
         self._sync_busy = False
         self._sync_applying = False
         self._sync_again = False
@@ -259,6 +272,10 @@ class Controller(QObject):
         self._warnings: dict[str, str] = {}
         self._gen = 0
         self._active = False
+        self._cancel_lock = threading.Lock()            # Esc after the release: UI thread against the worker
+        self._cancelled: set[int] = set()               # recordings cancelled while their text was being worked on
+        self._claimed = 0                               # the newest recording whose paste has begun (too late for Esc)
+        self._tap_t: float | None = None                # when the last recording ended as a mere tap (monotonic)
         self._t_start = 0.0
         self._context = AppContext()
         self._last_paste: dict | None = None
@@ -274,13 +291,15 @@ class Controller(QObject):
 
         # ---- hotkeys
         self._install_hook = bool(install_hook) and not demo
-        self.listener = HotkeyListener(cfg.hotkey, lambda ev: self._sig_hotkey.emit("dictate", ev),
+        # the time is taken here, on the hook thread: the UI thread may get to the event late (QA F-03)
+        self.listener = HotkeyListener(cfg.hotkey, lambda ev: self._sig_hotkey.emit("dictate", ev, time.perf_counter()),
                                        lambda combo: self._sig_captured.emit(combo), cfg.double_tap_lock)
-        self.listener.add_binding("command", cfg.command_hotkey, lambda ev: self._sig_hotkey.emit("command", ev))
+        self.listener.add_binding("command", cfg.command_hotkey, lambda ev: self._sig_hotkey.emit("command", ev, time.perf_counter()))
         self.listener.add_binding("paste_last", cfg.paste_last_hotkey,
-                                  lambda ev: self._sig_hotkey.emit("paste_last", ev), mode="press")
-        self.listener.add_binding("undo", cfg.undo_hotkey, lambda ev: self._sig_hotkey.emit("undo", ev),
+                                  lambda ev: self._sig_hotkey.emit("paste_last", ev, 0.0), mode="press")
+        self.listener.add_binding("undo", cfg.undo_hotkey, lambda ev: self._sig_hotkey.emit("undo", ev, 0.0),
                                   mode="press")
+        self.listener.on_blocked = lambda: self._sig_hotkey.emit("dictate", "blocked", 0.0)
         self._apply_hold_limits()
         self.injector.settle = self.listener.settle     # never paste while a menu-focus check is outstanding
 
@@ -325,6 +344,11 @@ class Controller(QObject):
         self._unpause_timer = QTimer(self)             # ends a timed pause ("Pause for 1 hour")
         self._unpause_timer.setSingleShot(True)
         self._unpause_timer.timeout.connect(lambda: self.set_paused(False))
+        self._dict_prep = QTimer(self)                 # after dictionary edits: rebuild its matchers off the paste path
+        self._dict_prep.setSingleShot(True)
+        self._dict_prep.setInterval(DICT_PREP_MS)
+        self._dict_prep.timeout.connect(
+            lambda: threading.Thread(target=self._prepare_dictionary, name="voxflow-dict", daemon=True).start())
 
         self._sig_hotkey.connect(self._on_hotkey)
         self._sig_speed.connect(self._on_speed)
@@ -413,6 +437,8 @@ class Controller(QObject):
         if self._started:
             return
         self._started = True
+        if cfgmod.sweep_tmp(self.data_dir):
+            log.info("removed temporary files an interrupted save left in the profile folder")
         self._worker.start()
         self.muter.recover()
         if self._install_hook:
@@ -452,7 +478,7 @@ class Controller(QObject):
             return
         self._closed = True
         for timer in (self._idle_timer, self._level_timer, self._cap_timer, self._health_timer,
-                      self._sync_timer, self._sync_soon, self._speed_timer):
+                      self._sync_timer, self._sync_soon, self._speed_timer, self._dict_prep):
             timer.stop()
         self.updates.close()
         self._speed.cancel()
@@ -909,6 +935,12 @@ class Controller(QObject):
                     payload = None
                 finally:
                     self._sync_applying = False
+                changed = int(getattr(self.sync, "last_applied", {}).get("snippets", 0))
+                if changed:
+                    # a snippet is text that VoxFlow types into other programs: a change that came in through the
+                    # sync folder is never silent (security review S-01)
+                    self.notice.emit("info", f"Sync changed {changed} snippet{'s' if changed != 1 else ''} from "
+                                             "another PC. Have a look under Snippets if you did not expect that.")
                 if payload is not None:
                     self._sync_thread("written", lambda: self.sync.write_own(payload))
                     return
@@ -1012,6 +1044,16 @@ class Controller(QObject):
             self._build_preview()
         self._load_models(names)
 
+    def _report_model(self, name: str, status: dict) -> None:
+        """From a loading thread. VoxFlow may have been quit meanwhile (a model takes seconds to load): then there
+        is nobody to tell, and the Qt object behind the signal may already be gone."""
+        if self._closed:
+            return
+        try:
+            self._sig_model.emit(name, status)
+        except RuntimeError:                           # "Signal source has been deleted"
+            pass
+
     def _load_models(self, names=("asr", "cleanup")) -> None:
         """Load ``names`` on background threads. Loading only one model is for when the other one is settled:
         a newer load generation drops the reports of a load still under way."""
@@ -1022,8 +1064,8 @@ class Controller(QObject):
 
         def report(name: str, state: str, detail: str, progress=None, backend: str = "") -> None:
             if generation == self._load_generation:
-                self._sig_model.emit(name, {"state": state, "detail": detail, "progress": progress,
-                                            "backend": backend})
+                self._report_model(name, {"state": state, "detail": detail, "progress": progress,
+                                          "backend": backend})
 
         def load_asr() -> None:
             try:
@@ -1444,6 +1486,8 @@ class Controller(QObject):
         if mode is not None:
             self.mode = mode
         self.state, self.message = state, message
+        if state != "processing":
+            self.listener.cancel_armed = False         # Esc belongs to the focused app again
         self._idle_timer.stop()
         if state == "done":
             self._idle_timer.start(DONE_MS)
@@ -1571,8 +1615,15 @@ class Controller(QObject):
         return dict(entry)
 
     # ================================================================== hotkey events (UI thread)
-    def _on_hotkey(self, binding: str, ev: str) -> None:
+    def _on_hotkey(self, binding: str, ev: str, when: float = 0.0) -> None:
+        """``when``: the moment the key event happened (0 = now). A busy UI thread handles the event late; the hold
+        time and the start of the recording must not depend on that."""
         if self._closed:
+            return
+        if ev == "blocked":
+            # a shortcut pressed while paused did nothing at all (the bar is hidden by default): say why
+            if self.paused and self.state == "idle":
+                self._set_state("error", PAUSED_HINT)
             return
         if binding == "paste_last":
             self.paste_last()
@@ -1581,7 +1632,7 @@ class Controller(QObject):
             self.undo_last_paste()
             return
         if ev == "start":
-            self._start_recording(binding)
+            self._start_recording(binding, when)
         elif ev == "lock":
             if self._active:
                 self._set_state("locked")
@@ -1589,9 +1640,9 @@ class Controller(QObject):
         elif ev == "cancel":
             self.cancel()
         elif ev == "stop":
-            self._stop_recording()
+            self._stop_recording(when)
 
-    def _start_recording(self, mode: str) -> None:
+    def _start_recording(self, mode: str, when: float = 0.0) -> None:
         if self._active or self.paused:
             return
         if self._speed.running:
@@ -1623,7 +1674,13 @@ class Controller(QObject):
             self._problems.pop("mic")
             self._emit_status()
         self._gen += 1
-        self._t_start = time.perf_counter()
+        now = time.perf_counter()
+        self._t_start = when if 0.0 < when <= now else now
+        late = now - self._t_start
+        if late > LATE_START_S:
+            # the key went down a while ago (the UI thread was busy): take what was said since then from the
+            # microphone's ring buffer, or the dictation would begin in the middle of the sentence
+            getattr(self._recorder, "backdate", lambda _s: None)(late)
         self._active = True
         self._stream = None
         if self._preview_on(mode):
@@ -1631,7 +1688,12 @@ class Controller(QObject):
             if self._streaming_wanted(mode):
                 self._stream = _StreamSession(self._gen)
                 self._phrase_stream.begin(self._gen)
-        self.sounds.play("command" if mode == "command" else "start")
+        # the second tap of a double-tap starts the real recording: the first tap already played the cue (QA C-05)
+        second_tap = (mode == "dictate" and self.config.double_tap_lock and self._tap_t is not None
+                      and self._mono() - self._tap_t < DOUBLE_GAP_S)
+        self._tap_t = None
+        if not second_tap:
+            self.sounds.play("command" if mode == "command" else "start")
         if self.config.mute_media:
             self.muter.mute()
         self._set_state("listening", "", mode)
@@ -1645,10 +1707,29 @@ class Controller(QObject):
             return AppContext()
 
     def cancel(self) -> None:
-        """Abort the current recording (same as pressing Esc while dictating)."""
-        if not self._active:
+        """Esc: abort the recording, or throw away a released dictation that is still being worked on. Nothing is
+        pasted and nothing is kept, unless its paste has already begun."""
+        if self._active:
+            self._abort_recording()
             return
-        self._abort_recording()
+        if self.state != "processing":
+            return
+        with self._cancel_lock:
+            if self._claimed == self._gen:              # the paste is on its way: the result is shown as usual
+                return
+            self._cancelled = {g for g in self._cancelled if g > self._gen - 8} | {self._gen}
+        self._set_state("idle")
+
+    def _claim_paste(self, gen: int) -> bool:
+        """Worker thread, just before a dictation's text is used: False when it was cancelled meanwhile. From here on
+        Esc no longer cancels it (and is no longer taken from the focused app)."""
+        with self._cancel_lock:
+            if gen in self._cancelled:
+                return False
+            self._claimed = max(self._claimed, gen)
+            if gen == self._gen:
+                self.listener.cancel_armed = False
+            return True
 
     def _abort_recording(self) -> None:
         if not self._active:
@@ -1660,17 +1741,18 @@ class Controller(QObject):
         self.listener.force_idle()
         try:
             if self._recorder.is_recording:
-                self._recorder.stop()
+                getattr(self._recorder, "discard", self._recorder.stop)()   # no release tail for audio thrown away
         except Exception as exc:  # noqa: BLE001
             log.warning("recorder stop failed while cancelling: %s", exc)
         self.muter.unmute()
         self._set_state("idle")
 
-    def _stop_recording(self) -> None:
+    def _stop_recording(self, when: float = 0.0) -> None:
         if not self._active:
             return
         self._active = False
-        t_release = time.perf_counter()
+        now = time.perf_counter()
+        t_release = when if self._t_start <= when <= now else now
         self._preview.stop()                           # before the recorder: no new preview call after the release
         self._phrase_stream.end()
         self._note_preview()
@@ -1688,6 +1770,8 @@ class Controller(QObject):
         from . import app as appmod
         if appmod.too_short(audio, self._recorder, t_release - self._t_start, self.config.min_record_s):
             self._end_stream(session)
+            if self.mode == "dictate":
+                self._tap_t = self._mono()
             self._set_state("idle")
             return
         self.sounds.play("stop")
@@ -1695,6 +1779,7 @@ class Controller(QObject):
         if not isinstance(speech_s, (int, float)) or isinstance(speech_s, bool):
             speech_s = len(audio) / audiomod.SAMPLE_RATE
         self._set_state("processing")
+        self.listener.cancel_armed = True              # until the paste begins, Esc throws this dictation away
         self._work.put({"kind": self.mode, "audio": audio, "t_release": t_release, "gen": self._gen,
                         "context": self._context, "speech_s": float(speech_s), "stream": session})
 
@@ -1774,6 +1859,11 @@ class Controller(QObject):
             # phrases are still being typed: the undo would queue behind them and remove one that is not on screen yet
             self.notice.emit("info", "Stop dictating first, then undo.")
             return False
+        if self.state == "processing" or not self._work.empty():
+            # the same for a dictation still being worked on: the Ctrl+Z would follow its paste and remove that one,
+            # and the paste would become the undo target again (QA F-02)
+            self.notice.emit("info", "Wait for the dictation to be pasted, then undo.")
+            return False
         last = self._last_paste
         if not last:
             self.notice.emit("info", "There is no paste to undo.")
@@ -1791,13 +1881,26 @@ class Controller(QObject):
         return True
 
     def copy_text(self, text: str) -> bool:
+        """Copy from the window (UI thread). While a dictation is being pasted the paste path holds the clipboard
+        (for up to 1.5 s when it waits for a held key): the copy then goes to the worker, behind that paste, instead
+        of freezing the window until it is over."""
+        if text and (self.state == "processing" or not self._work.empty()):
+            self._work.put({"kind": "copy", "text": text})
+            return True
+        return self._copy(text, self.notice)
+
+    def _copy_instead(self, text: str) -> bool:
+        """A copy made in place of a paste: kept out of the clipboard history, as the paste would have been."""
+        return getattr(self.injector, "copy_private", self.injector.copy_text)(text)
+
+    def _copy(self, text: str, notice) -> bool:
         try:
             ok = bool(text) and bool(self.injector.copy_text(text))
         except Exception as exc:  # noqa: BLE001
             log.warning("copy failed: %s", exc)
             ok = False
         if not ok:
-            self.notice.emit("error", "Couldn't copy: the clipboard is in use by another app. Try again.")
+            notice.emit("error", "Couldn't copy: the clipboard is in use by another app. Try again.")
         return ok
 
     def open_data_folder(self) -> None:
@@ -1826,6 +1929,8 @@ class Controller(QObject):
                     self._job_command(job)
                 elif kind == "paste":
                     self._job_paste(job)
+                elif kind == "copy":
+                    self._copy(job["text"], self._sig_notice)
                 elif kind == "undo":
                     if not self.injector.undo():
                         self._sig_notice.emit("warning", "Couldn't send the undo because a modifier key is "
@@ -1878,6 +1983,7 @@ class Controller(QObject):
 
     def _paste(self, text: str) -> tuple[bool, str]:
         """Paste on the worker thread. Returns (text reached the app or the clipboard, flow-bar message)."""
+        self._wait_for_hotkey_release()
         self.injector.begin(text)
         self._last_paste_t = self._mono()
         self.injector.finish_later()
@@ -1889,6 +1995,17 @@ class Controller(QObject):
         if outcome == "copied":
             return True, "Copied. Press Ctrl+V"
         return False, "Couldn't paste"
+
+    def _wait_for_hotkey_release(self) -> None:
+        """The user is already holding the hotkey for the next dictation (Win or Alt is down): a paste now could only
+        wait 1.5 s for the key and then be left on the clipboard, unseen, because the new recording owns the bar
+        (QA F-01). Wait for the release instead; the next dictation's job is queued behind this one anyway."""
+        held = getattr(self.injector, "modifiers_held", None)
+        if not callable(held):
+            return
+        end = time.monotonic() + HELD_PASTE_WAIT_S
+        while self._active and not self._closed and held() and time.monotonic() < end:
+            time.sleep(0.01)
 
     # ---- phrase streaming, worker side (design sections 5.4-5.8)
     def _clean_phrase(self, session: "_StreamSession", raw: str, ctx: AppContext) -> str:
@@ -1947,10 +2064,7 @@ class Controller(QObject):
             return                                      # not sent: its words are in the audio the release re-reads
         cfg = self.config
         raw = phrase.text
-        cleaned = self._clean_phrase(session, raw, ctx)
-        if cfg.auto_learn and cfg.save_history and cleaned and cleaned != raw:
-            for suggestion in self.dictionary.learn(raw, cleaned):
-                self._sig_suggestion.emit(suggestion)
+        cleaned = model_text = self._clean_phrase(session, raw, ctx)
         if cleaned:
             cleaned = self.dictionary.apply(cleaned)
         prev = "".join(session.sent) + "".join(piece for piece, _raw in session.held)
@@ -1977,6 +2091,10 @@ class Controller(QObject):
         session.raws.extend(raws)
         session.sent_cut_s = phrase.cut_s
         self._last_paste = {"hwnd": hwnd, "text": chunk, "t": time.time()}
+        # after the phrase is in the field: a suggestion is written to disk, which must not hold the typing back
+        if cfg.auto_learn and cfg.save_history and model_text and model_text != raw:
+            for suggestion in self.dictionary.learn(raw, model_text):
+                self._sig_suggestion.emit(suggestion)
 
     def _stream_entry(self, text: str, raw: str, ctx: AppContext, duration_s: float, latency_ms: float,
                       rules_only: bool = False) -> dict:
@@ -2029,6 +2147,11 @@ class Controller(QObject):
                 return
             finally:
                 self._check_asr_fallback()
+        if not self._claim_paste(gen):                  # Esc after the release: what was typed stays, no more is
+            entry = self._stream_entry(sent_text, " ".join(session.raws), ctx, job["speech_s"], 0.0)
+            self._finish(entry, dataclasses.replace(ctx, hwnd=self._foreground()), gen, "Pasted", None,
+                         pasted=True, track_paste=False, quiet=True)
+            return
         text = res["text"]
         if text.strip():
             cleaned = text
@@ -2042,7 +2165,7 @@ class Controller(QObject):
         if piece:
             self._pace()
             if self._own_focus_fn():
-                ok = bool(self.injector.copy_text(piece))   # never type into VoxFlow's own window: copy it instead
+                ok = bool(self._copy_instead(piece))        # never type into VoxFlow's own window: copy it instead
                 message, track = "Copied. Press Ctrl+V", False
             else:
                 hwnd = self._foreground()
@@ -2085,13 +2208,12 @@ class Controller(QObject):
                 msg = "Nothing to paste" if res["dropped"] else "Didn't catch that"
             self._sig_failed.emit(msg, gen)
             return
+        if not self._claim_paste(gen):
+            return                                      # cancelled with Esc after the release: nothing is kept
         spoken_words = store.count_words(text)       # what was said: a snippet types more words than that
+        cleaned = text
         if text.strip():
-            cleaned = text
             text = self._personalise(text, res["raw"], ctx)
-            if cfg.auto_learn and cfg.save_history and res["cleaned"]:     # history off: learn nothing from it
-                for suggestion in self.dictionary.learn(res["raw"], cleaned):
-                    self._sig_suggestion.emit(suggestion)
         ok, message = self._paste(text)
         latency = time.perf_counter() - job["t_release"]
         rules_only = bool(res.get("rules_only"))
@@ -2101,6 +2223,10 @@ class Controller(QObject):
         if ok and rules_only:
             message += RULES_ONLY_SUFFIX                 # "Pasted · basic clean-up": the quiet hint on the bar
         self._finish(entry, ctx, gen, message, res, pasted=ok)
+        # last: a suggestion is written to disk (fsync), which must not hold back the paste or the bar (QA D-03)
+        if cleaned.strip() and cfg.auto_learn and cfg.save_history and res["cleaned"]:   # history off: learn nothing
+            for suggestion in self.dictionary.learn(res["raw"], cleaned):
+                self._sig_suggestion.emit(suggestion)
 
     def _job_command(self, job: dict) -> None:
         ctx, gen, cfg = job["context"], job["gen"], self.config
@@ -2123,6 +2249,8 @@ class Controller(QObject):
             self._sig_failed.emit(str(exc), gen)
             return
         result = self.dictionary.apply(result)
+        if not self._claim_paste(gen):
+            return
         if ctx.hwnd:
             try:
                 moved = int(self._hwnd_fn() or 0) != ctx.hwnd
@@ -2130,7 +2258,7 @@ class Controller(QObject):
                 moved = False
             if moved:
                 # the user switched windows while the model was working: never paste into the wrong place
-                copied = bool(self.injector.copy_text(result))
+                copied = bool(self._copy_instead(result))
                 self._sig_failed.emit("Window changed. Result copied: press Ctrl+V" if copied
                                       else "Window changed, so nothing was pasted", gen)
                 return
@@ -2176,9 +2304,10 @@ class Controller(QObject):
             message = ("Couldn't paste. The text is saved in your History." if self.config.save_history
                        else "Couldn't paste. Use Paste last transcript to try again.")
         if res is not None:
-            log.info("asr %.0f ms + cleanup %.0f ms, release->paste %d ms, %d words (%s)",
-                     res["t_asr"] * 1000, res["t_clean"] * 1000, entry["latency_ms"], entry["words"],
-                     ctx.exe or "unknown app")
+            # timings only: which program was dictated into is history (the user can switch that off), not log
+            # material (security review S-14)
+            log.info("asr %.0f ms + cleanup %.0f ms, release->paste %d ms, %d words",
+                     res["t_asr"] * 1000, res["t_clean"] * 1000, entry["latency_ms"], entry["words"])
         # the bar says "Pasted" first; the (slower) file writes follow and can never turn a paste into an error
         # "slow": the model itself ran too long; a skip behind an earlier stuck generation is not counted again
         self._sig_done.emit({"entry": entry, "gen": gen, "message": message, "pasted": pasted,
@@ -2220,9 +2349,13 @@ class Controller(QObject):
             self._on_failed(payload["message"], payload["gen"])
         elif self._owns_bar(payload["gen"]):
             self._set_state("done", payload["message"])
+        elif payload["message"].startswith("Copied"):
+            # a newer recording has the bar, so its "Copied. Press Ctrl+V" would never be seen
+            self.notice.emit("info", "An earlier dictation could not be pasted while keys were held. It is on the "
+                                     "clipboard: press Ctrl+V to paste it.")
 
     def _on_failed(self, message: str, gen: int) -> None:
-        if not self._owns_bar(gen):
+        if not self._owns_bar(gen) or gen in self._cancelled:   # a cancelled dictation fails silently
             return
         # the flow bar has room for one short sentence; anything longer also goes out as a notice
         first = message.split(". ")[0].rstrip(".")
@@ -2251,6 +2384,16 @@ class Controller(QObject):
             signal.emit()
         if topic in ("dictionary", "snippets", "styles"):
             self._sync_touch()
+        if topic == "dictionary" and not self._closed:
+            self._dict_prep.start()                    # restarts on every edit: one rebuild after the last one
+
+    def _prepare_dictionary(self) -> None:
+        """An edit threw the dictionary's matchers away; build them again now (16 ms with 500 terms) instead of
+        inside the next dictation, between the clean-up and the paste."""
+        try:
+            self.dictionary.prepare()
+        except Exception as exc:  # noqa: BLE001 - they are built on first use instead
+            log.error("dictionary matchers could not be prepared\n%s", system.redacted_traceback(exc))
 
 
 # =========================================================================== helpers

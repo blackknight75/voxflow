@@ -363,20 +363,21 @@ def glass_panel(p: QPainter, r: QRectF, radius: float, accent: QColor | None = N
     p.drawPath(path)
 
 
-def qss() -> str:
-    """Stylesheet for the few stock widgets we use (text inputs, scroll bars, tooltips)."""
-    sel = css(alpha(CYAN, 0.32))
+def scheme() -> str:
+    """The palette in use, as a word a stylesheet selector can test: ``dark``, ``light`` or ``contrast``."""
+    return "contrast" if HIGH_CONTRAST else RESOLVED
+
+
+_TIP_BOX = "padding: 5px 8px; border-radius: 6px;"
+
+
+def _tooltip_css(panel: QColor, text: QColor, stroke: QColor) -> str:
+    return f"background: {css(panel)}; color: {css(text)}; border: 1px solid {css(stroke)}; {_TIP_BOX}"
+
+
+def scroll_bar_qss() -> str:
+    """Stylesheet of a scroll bar, in the current theme."""
     return f"""
-QToolTip {{ background: {css(PANEL_HI)}; color: {css(TEXT)}; border: 1px solid {css(STROKE_STRONG)};
-           padding: 5px 8px; border-radius: 6px; }}
-QLineEdit, QPlainTextEdit {{ background: {css(SUNK)}; color: {css(TEXT)}; border: 1px solid {css(STROKE)};
-    border-radius: {R_MD}px; padding: 7px 11px; selection-background-color: {sel};
-    selection-color: {css(TEXT)}; }}
-QLineEdit:hover, QPlainTextEdit:hover {{ border-color: {css(STROKE_STRONG)}; }}
-QLineEdit:focus, QPlainTextEdit:focus {{ border: 1.5px solid {css(CYAN)}; }}
-QLineEdit:disabled, QPlainTextEdit:disabled {{ color: {css(TEXT_FAINT)}; }}
-QLineEdit[invalid="true"] {{ border: 1.5px solid {css(RED)}; }}
-QScrollArea {{ background: transparent; border: none; }}
 QScrollBar:vertical {{ background: transparent; width: 12px; margin: 4px 3px 4px 3px; }}
 QScrollBar::handle:vertical {{ background: {css(alpha(TEXT_DIM, 0.35))}; border-radius: 3px; min-height: 36px; }}
 QScrollBar::handle:vertical:hover {{ background: {css(alpha(CYAN, 0.75))}; }}
@@ -385,6 +386,36 @@ QScrollBar::handle:horizontal {{ background: {css(alpha(TEXT_DIM, 0.35))}; borde
 QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::sub-page {{
     background: none; width: 0; height: 0; }}
 """
+
+
+def scroll_area_qss() -> str:
+    """Stylesheet of a scrolling area (``widgets.ScrollArea``): the same text whatever the theme, so it is set
+    once and a theme switch does not make Qt polish every row below the area again.
+
+    The tooltips of the widgets inside take their colours from the rule for the area's ``scheme`` property; Qt
+    works a tooltip's style out anew each time one is shown, so they follow a live switch. The contrast rule names
+    palette roles because those colours come from Windows (see ``_contrast_palette``)."""
+    tips = "".join(f'QScrollArea[scheme="{pal.name}"] QToolTip '
+                   f'{{ {_tooltip_css(pal.PANEL_HI, pal.TEXT, pal.STROKE_STRONG)} }}\n' for pal in (DARK, LIGHT))
+    return (tips + 'QScrollArea[scheme="contrast"] QToolTip { background: palette(window); '
+                   f'color: palette(window-text); border: 1px solid palette(window-text); {_TIP_BOX} }}\n'
+                   "QScrollArea { background: transparent; border: none; }\n"
+                   "QScrollArea > QWidget > QWidget { background: transparent; }\n")
+
+
+def qss() -> str:
+    """Stylesheet for the stock text inputs (with their own scroll bars and tooltips), in the current theme."""
+    sel = css(alpha(CYAN, 0.32))
+    return f"""
+QToolTip {{ {_tooltip_css(PANEL_HI, TEXT, STROKE_STRONG)} }}
+QLineEdit, QPlainTextEdit {{ background: {css(SUNK)}; color: {css(TEXT)}; border: 1px solid {css(STROKE)};
+    border-radius: {R_MD}px; padding: 7px 11px; selection-background-color: {sel};
+    selection-color: {css(TEXT)}; placeholder-text-color: {css(TEXT_FAINT)}; }}
+QLineEdit:hover, QPlainTextEdit:hover {{ border-color: {css(STROKE_STRONG)}; }}
+QLineEdit:focus, QPlainTextEdit:focus {{ border: 1.5px solid {css(CYAN)}; }}
+QLineEdit:disabled, QPlainTextEdit:disabled {{ color: {css(TEXT_FAINT)}; }}
+QLineEdit[invalid="true"] {{ border: 1.5px solid {css(RED)}; }}
+""" + scroll_bar_qss()
 
 
 apply_theme("dark")

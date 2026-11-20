@@ -18,10 +18,11 @@ VoxFlow is a push-to-talk dictation app for Windows 11. Hold **Ctrl + Win**, tal
 transcribed on your own machine by NVIDIA Parakeet TDT v3, tidied by a small local language model (fillers out,
 punctuation in, self-corrections resolved), and pasted into the focused window.
 
-> **New in 0.3.0:** [live preview](#live-preview-and-type-while-you-speak) shows your words above the Flow bar
-> while you speak; the optional *Type while you speak* pastes each finished sentence in hands-free mode while you
-> keep talking; and [Settings](#configuration) is now grouped into five tabs. All changes are in the
-> [changelog](CHANGELOG.md).
+> **1.0.0** is the first stable release. It adds no features: it fixes what a full test pass and a security
+> review of 0.3.0 found (among them a sync-folder bug that could empty your dictionary on other PCs), Esc now
+> also cancels a dictation after you let go, and the end of the last word is no longer cut off. 0.3.0 brought the
+> [live preview](#live-preview-and-type-while-you-speak), the optional *Type while you speak* and
+> [Settings](#configuration) in five tabs. All changes are in the [changelog](CHANGELOG.md).
 
 ## Download
 
@@ -192,7 +193,7 @@ Polish, Portuguese, Romanian, Russian, Slovak, Slovenian, Spanish, Swedish and U
 | --- | --- |
 | **Hold Ctrl + Win** | Dictate. Release to paste. |
 | **Double-tap Ctrl + Win** | Lock hands-free. Tap again to stop. |
-| **Esc** | Cancel the recording (the Esc is not passed on to the app). |
+| **Esc** | Cancel: while you record, or after you let go while the text is still being worked on. Nothing is pasted and nothing is kept (the Esc is not passed on to the app). |
 | **Hold Alt + Win** | Command mode: say what to do with the selected text. |
 | **Alt + Shift + Z** | Paste the last transcript again. |
 
@@ -318,8 +319,10 @@ VoxFlow is built so that there is nothing to trust: audio and text are processed
   cancels any pending install. A copy installed with Scoop or winget, installed for all users (Program Files), or
   run from source never updates itself: it only tells you that a new version exists. If you start VoxFlow while
   an update is being installed, it says "Finishing the update…" and does not start until Setup is done.
+* If you choose another model in the advanced settings: its download from Hugging Face, and, after such a model
+  failed to load, one request for its file list to check your copy.
 * Nothing else. No account, no analytics, no crash upload. Audio, transcripts, dictionary and settings are
-  never sent anywhere.
+  never sent anywhere. The usage events that the speech runtime (onnxruntime) can hand to Windows are switched off.
 
 **Why Windows shows "VoxFlow is using your microphone"**
 
@@ -344,12 +347,28 @@ to avoid that. Quitting VoxFlow closes the microphone.
 | `%APPDATA%\VoxFlow\updates.json` | The last update check: when, its result, the newest version seen and your choices (skip, remind later) |
 | `%TEMP%\VoxFlow-update\` | At most one downloaded update installer, while it waits to be installed. Deleted after the update, when you skip that version or switch updates off |
 | `%USERPROFILE%\.cache\huggingface\hub\` | The downloaded models (the standard Hugging Face cache) |
-| A sync folder, only if you choose one | Dictionary, snippets, styles and settings. Never history or statistics. |
+| A sync folder, only if you choose one | Dictionary, snippets, styles and settings (not your shortcuts and not the history settings: those stay per PC). Never history or statistics. The file also holds this PC's name. Everything in that folder is trusted: see [SECURITY.md](SECURITY.md) |
 
 Recorded audio is held in memory for the transcription and is not written to disk. You can switch history off
 (Settings > Your data > History and privacy > Keep history; VoxFlow then offers to delete what is already saved), set a
 retention period, or clear it at any time (History > Clear all). With history off no transcript is written to disk.
 The log file never contains dictated text: errors while handling your words are logged by type and place only.
+It does record that a dictation happened, when, how many words it had and how long each step took.
+
+A few things that are stored and easy to overlook:
+
+* With history off, `stats.json` still counts words per day and per program (the program's file name, such as
+  `slack.exe`), because the Home page shows them.
+* A saved transcript also holds the name and window title of the program you dictated into. Exports and backups
+  contain them too.
+* When a data file is damaged, VoxFlow keeps a copy beside it (`history.corrupt-*.json` and the like) so nothing
+  is lost. Such a copy is not covered by the retention period or by deleting single transcripts; *Clear all*
+  removes the history's copies.
+* Backups and the sync file carry your PC's name.
+* VoxFlow does not know whether the field you dictate into is a password field.
+* A copy that VoxFlow makes by itself instead of a paste (the window changed, keys were held) is kept out of
+  the Windows clipboard history (Win+V) and the cloud clipboard, like a paste. Text you copy with a Copy button
+  is an ordinary copy.
 
 ## Speed and accuracy
 

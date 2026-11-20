@@ -31,11 +31,11 @@ jobs:
     env:
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
         with:
           ref: ${{ env.TAG }}
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: "3.12"
 
@@ -62,7 +62,11 @@ jobs:
       - name: Submit with wingetcreate
         env:
           WINGET_PAT: ${{ secrets.WINGET_PAT }}
+          WINGETCREATE_URL: https://github.com/microsoft/winget-create/releases/download/v1.28.1.0/wingetcreate.exe
+          WINGETCREATE_SHA256: 63d980ba79e97042395bd6eb5992c2db9e01e9e7a8a22958a95c288f27310413
         run: |
           if [ -z "$WINGET_PAT" ]; then echo "::error::The WINGET_PAT secret is not set."; exit 1; fi
-          curl --fail --silent --show-error --location --output wingetcreate.exe https://aka.ms/wingetcreate/latest/self-contained
+          # a fixed, checked version: this program is handed the token (it was "latest", unverified)
+          curl --fail --silent --show-error --location --output wingetcreate.exe "$WINGETCREATE_URL"
+          echo "$WINGETCREATE_SHA256  wingetcreate.exe" | sha256sum --check --strict
           ./wingetcreate.exe submit --token "$WINGET_PAT" "${{ steps.manifest.outputs.dir }}"

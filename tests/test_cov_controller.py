@@ -364,6 +364,17 @@ def test_an_unexpected_sync_error_is_logged_and_shown_as_a_status(rig, slow_sync
     assert events[-1]["state"] == "error" and not rig.c._sync_busy
 
 
+def test_a_change_made_while_a_round_is_running_is_noted_for_the_next_round(rig, slow_sync, folder):
+    """Until now only a timing-dependent test in test_controller_sync reached this line (QA R-19)."""
+    rig.c.set_sync_folder(str(folder))
+    rig.wait(lambda: sync_idle(rig))
+    rig.c._sync_soon.stop()
+    rig.c._sync_busy, rig.c._sync_again = True, False
+    rig.c._sync_touch()
+    assert rig.c._sync_again and not rig.c._sync_soon.isActive(), "noted, and no second round started beside it"
+    rig.c._sync_busy = False
+
+
 def test_remote_data_read_during_a_recording_is_merged_on_the_next_round(rig, slow_sync, folder, monkeypatch):
     rig.c.set_sync_folder(str(folder))
     rig.wait(lambda: sync_idle(rig))

@@ -377,3 +377,35 @@ def test_language_support_levels():
     for code in ("pl", "sv", "uk", "fi"):
         assert C.language_support(code) == "basic"
     assert C.language_support("en") in ("full", "auto", "basic")
+
+
+# =========================================================================== a damaged file must not sync as a deletion
+def test_a_damaged_dictionary_or_settings_file_on_one_device_does_not_empty_the_others(rigs, folder, caplog):
+    """QA DL-01: a store that could not be read starts empty. Synced as it is, every entry would count as deleted by
+    the user (and the default settings as a fresh choice), and the other devices would apply that."""
+    a, b = rigs("alpha"), rigs("beta")
+    for term in ("Kubernetes", "Grafana", "Parakeet"):
+        a.c.dictionary.add(term)
+    a.c.snippets.add("my email", "ada@example.com")
+    a.c.set_sync_folder(str(folder))
+    b.c.set_sync_folder(str(folder))
+    everything = {"Grafana", "Kubernetes", "Parakeet"}
+    b.wait(lambda: set(terms(b)) == everything and synced(a) and synced(b), timeout=8000)
+    b.c.set("language", "de")
+    a.wait(lambda: a.c.get("language") == "de" and synced(a) and synced(b), timeout=8000)
+
+    a.close()                                                   # alpha is closed and two of its files get damaged
+    for name in ("dictionary.json", "config.json"):
+        path = a.data_dir / name
+        path.write_bytes(path.read_bytes()[:40])
+    with caplog.at_level("WARNING", logger="voxflow.controller"):
+        a2 = rigs("alpha")
+    assert "could not be read" in a2.c.dictionary.load_problem and "joining the sync folder again" in caplog.text
+    a2.wait(lambda: set(terms(a2)) == everything and synced(a2) and synced(b), timeout=8000)
+    assert set(terms(b)) == everything, "beta keeps its words, and alpha has them back from the folder"
+    assert set(snips(a2)) == set(snips(b)) and len(snips(b)) == 1
+    assert b.c.get("language") == "de" and a2.c.get("language") == "de", "the folder's setting wins"
+
+
+def test_rejoining_without_a_sync_folder_does_nothing(rig):
+    assert rig.c.sync.rejoin() is False and not rig.c.sync.enabled

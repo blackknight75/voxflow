@@ -55,10 +55,6 @@ def config_path() -> Path:
     return app_dir() / "config.json"
 
 
-def history_path() -> Path:
-    return app_dir() / "history.json"
-
-
 @dataclass
 class Config:
     # ---- hotkeys
@@ -311,18 +307,21 @@ def write_problem(path: Path) -> str:
     return ""
 
 
+_REPLACE_TRIES = 24      # 5, 10, 20, 40, 80 ms, then 100 ms each: about 2 s in all (40 tries were 3.6 s: QA R-01)
+
+
 def _replace(tmp: str, path: Path) -> None:
     """os.replace that waits out a reader. On Windows the rename fails with PermissionError while another
     thread, a sync tool, a backup program or a virus scanner has the target open for reading; that is over
     in milliseconds, so retry for up to ~2 s instead of losing the save. A file that cannot be written at all
     (read-only, permissions) fails at once: waiting for it froze the window for 3.6 s per change (QA R6)."""
     delay = 0.005
-    for attempt in range(40):  # pragma: no branch - the last attempt returns or re-raises
+    for attempt in range(_REPLACE_TRIES):  # pragma: no branch - the last attempt returns or re-raises
         try:
             os.replace(tmp, path)
             return
         except PermissionError as exc:
-            if attempt == 39:
+            if attempt == _REPLACE_TRIES - 1:
                 raise
             if getattr(exc, "winerror", None) not in _SHARING_ERRORS and write_problem(path):
                 raise
@@ -350,7 +349,47 @@ def _atomic_write(path: Path, text: str) -> None:
         raise
 
 
+def sweep_tmp(folder: Path, older_than_s: float = 3600.0) -> int:
+    """Remove what ``_atomic_write`` left behind when VoxFlow was killed between writing and renaming (a power cut,
+    Task Manager): ``tmp*.tmp`` files directly in ``folder`` that nobody has touched for an hour. They are never
+    read again and would pile up for good. Returns how many were removed; never raises."""
+    removed, now = 0, time.time()
+    try:
+        candidates = list(Path(folder).glob("tmp*.tmp"))
+    except OSError:
+        return 0
+    for item in candidates:
+        try:
+            if item.is_file() and now - item.stat().st_mtime > older_than_s:
+                item.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 last_load_problem = ""   # human message when the last load_config() fell back to defaults; "" otherwise
+_BAD_COPIES = 5          # config.json.bad, config.json.bad.2 ... config.json.bad.5
+
+
+def _keep_bad_copy(path: Path) -> str:
+    """Copy an unreadable settings file aside; returns the copy's name ('' when that failed). The first copy,
+    ``config.json.bad``, is never overwritten: it is the one most likely to hold the user's own settings, and the
+    next unreadable file used to replace it (QA D-09). Later ones are numbered up to ``.bad.5``, then the last
+    one is replaced. A file that already has an identical copy gets no second one."""
+    names = [f"{path.name}.bad"] + [f"{path.name}.bad.{n}" for n in range(2, _BAD_COPIES + 1)]
+    try:
+        data = path.read_bytes()
+        for name in names:
+            target = path.with_name(name)
+            if not target.exists():
+                break
+            if target.read_bytes() == data:
+                return name
+        target.write_bytes(data)                 # under a free name, or the last one when all are taken
+    except OSError:
+        return ""
+    return target.name
 
 
 def load_config(path: Path | None = None) -> Config:
@@ -361,7 +400,7 @@ def load_config(path: Path | None = None) -> Config:
         data = json.loads(path.read_text(encoding="utf-8-sig"))     # tolerate a BOM added by an editor
         if not isinstance(data, dict):
             raise ValueError("not a JSON object")
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RecursionError) as exc:        # RecursionError: brackets nested 100,000 deep
         cfg = Config()
         if not path.exists():
             try:
@@ -370,14 +409,11 @@ def load_config(path: Path | None = None) -> Config:
                 pass
         else:
             # keep the unreadable file: the next save would otherwise overwrite the user's settings for good
-            log.warning("config file %s is unreadable (%s); using defaults, copy kept as %s.bad",
-                        path, exc, path.name)
-            try:
-                path.with_name(path.name + ".bad").write_bytes(path.read_bytes())
-            except OSError:
-                pass
-            last_load_problem = ("Your settings file could not be read, so defaults are in use. "
-                                 f"The old file was kept as {path.name}.bad.")
+            kept = _keep_bad_copy(path)
+            log.warning("config file %s is unreadable (%s); using defaults, copy kept as %s",
+                        path, exc, kept or "nothing: it could not be copied")
+            last_load_problem = ("Your settings file could not be read, so defaults are in use."
+                                 + (f" The old file was kept as {kept}." if kept else ""))
         return cfg
     rejected: list[str] = []
     cfg = Config.from_dict(data, rejected)

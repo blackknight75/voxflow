@@ -635,13 +635,16 @@ def test_tag_gives_way_on_a_narrow_window_instead_of_overlapping(make_ui):
 def test_a_real_dictation_cleaned_by_rules_gets_flag_hint_and_tag(ui):
     """The whole chain on the real Controller: cleaner reports rules-only -> entry flag -> bar message -> tag."""
     ui.rig.cleaner.last_info = {"rules_only": True}
-    seen = []
+    seen, bar = [], []
     ui.c.state_changed.connect(lambda s, m, msg: seen.append((s, msg)))
+    # what the bar shows at that moment: "done" lasts 40 ms in this rig, so reading the bar after the dictation
+    # raced the timer that takes it back to idle (it lost once on a CI runner)
+    ui.c.state_changed.connect(lambda s, m, msg: bar.append(ui.shell.overlay.text) if s == "done" else None)
     ui.rig.dictate("the model was too slow for this one")
     assert ("done", "Pasted" + ctl_mod.RULES_ONLY_SUFFIX) in seen
     entry = ui.rig.last_entry()
     assert entry.get("rules_only") is True and ui.c.rules_only_count == 1
-    assert ui.shell.overlay.text == "Pasted · basic clean-up"
+    assert bar == ["Pasted · basic clean-up"]
     ui.rig.cleaner.last_info = {"rules_only": False}
     ui.wait(lambda: ui.c.state == "idle")
     ui.rig.dictate("and this one was fine")

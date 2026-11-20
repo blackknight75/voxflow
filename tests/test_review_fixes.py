@@ -208,6 +208,28 @@ def test_t11_future_entries_do_not_outlive_the_retention(tmp_path):
     assert h.count() == 0, [e["text"] for e in h.snapshot()]
 
 
+def test_a_start_with_the_clock_far_in_the_past_keeps_every_transcript_and_its_time(tmp_path):
+    """QA DL-02: one start with a wrong system clock rewrote every timestamp to "now"; with a retention set the whole
+    history was deleted once the clock was right again."""
+    real = 1_800_000_000.0
+    now = [real]
+    h = store.History(tmp_path / "h.json", retention_days=30, clock=lambda: now[0])
+    for i in range(200):
+        h.add_entry(store.make_entry(f"transcript {i}", ts=real - i * 3600))
+    h.flush()
+    times = sorted(e["ts"] for e in h.snapshot())
+    now[0] = real - 5 * 365 * 86400                              # the PC starts with its clock five years back
+    again = store.History(tmp_path / "h.json", retention_days=30, clock=lambda: now[0])
+    again.prune()
+    again.add_entry(store.make_entry("dictated under the wrong clock", ts=now[0]))
+    again.flush()
+    now[0] = real + 60                                           # the clock is right again
+    later = store.History(tmp_path / "h.json", retention_days=30, clock=lambda: now[0])
+    later.prune()
+    kept = sorted(e["ts"] for e in later.snapshot() if e["text"].startswith("transcript"))
+    assert kept == times, "all 200, each with its own time"
+
+
 def test_t12_control_characters_never_reach_the_dictionary(tmp_path):
     d = store.Dictionary(tmp_path / "d.json")
     try:

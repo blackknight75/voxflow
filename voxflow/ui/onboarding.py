@@ -19,7 +19,7 @@ from . import theme as T
 from .components import WindowButton
 from .icons import paint_icon
 from .widgets import (Button, ChoiceButton, HotkeyRecorder, KeyCaps, Label, LevelMeter, ProgressBar, ScrollArea,
-                      TextArea, paint_logo, painter)
+                      TextArea, WrapLabel, paint_logo, painter)
 
 STEPS = ("welcome", "mic", "models", "hotkey", "done")
 SLOW_LOAD_MS = 20_000          # after this long on the model step without a ready speech model, say why
@@ -87,7 +87,7 @@ class _ModelLine(QWidget):
         lay.addLayout(top)
         self.bar = ProgressBar()
         lay.addWidget(self.bar)
-        self.detail = Label("", T.F_SMALL, "TEXT_DIM")
+        self.detail = WrapLabel("", T.F_SMALL, "TEXT_DIM")       # an error here can name a file with its path
         lay.addWidget(self.detail)
 
     def set_status(self, st: dict) -> None:
@@ -235,7 +235,7 @@ class Onboarding(QWidget):
         self.meter = LevelMeter(None, height=16)
         self.meter.setObjectName("onboarding_meter")
         lay.addWidget(self.meter)
-        self.mic_status = Label("Listening… say something.", T.F_BODY_LG, "TEXT_DIM")
+        self.mic_status = WrapLabel("Listening… say something.", T.F_BODY_LG, "TEXT_DIM")
         self.mic_status.setObjectName("onboarding_mic_status")
         lay.addWidget(self.mic_status)
         self.mic_help = Label("No movement? Choose another microphone above, and check that microphone access is on "
@@ -285,7 +285,7 @@ class Onboarding(QWidget):
             line.setObjectName(f"onboarding_model_{name}")
             lay.addWidget(line)
             lay.addSpacing(T.S2)
-        self.models_note = Label("", T.F_SMALL, "TEXT_DIM")
+        self.models_note = WrapLabel("", T.F_SMALL, "TEXT_DIM")
         self.models_note.setObjectName("onboarding_models_note")
         lay.addWidget(self.models_note)
         self.btn_retry = Button("Try again", "secondary", height=30)
