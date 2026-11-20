@@ -92,6 +92,16 @@ What the installer does:
 * `VoxFlow-Setup-<version>.exe` (about 1.8 GB) installs for the current user only: no administrator rights,
   default folder `%LOCALAPPDATA%\Programs\VoxFlow`, a Start menu entry, an optional desktop shortcut and a
   "Launch VoxFlow" box on the last page. Running a newer installer updates the old copy in place.
+* An upgrade keeps the old program files until the new ones are complete: Setup moves `_internal` to
+  `{app}\previous` (and copies the two exe files there) before it copies anything, deletes `previous` when every
+  file is in place, and puts the old files back when it ends without having finished (a full disk, a locked
+  file, a cancelled Setup). After `/RELAUNCH=1` the old version is then started again and says that the update
+  was not installed. The upgrade therefore needs room for the new runtime while the old one still exists (about
+  3.8 GB). This was run for real with a copy of the script under another application id and a dummy program:
+  install, upgrade, an upgrade that failed on a locked file (exit code 5, everything of the old version back),
+  the next upgrade, uninstall.
+* The uninstaller also removes the in-app updater's download folder (`%TEMP%\VoxFlow-update`) and a leftover
+  `{app}\previous`.
 * The GPU runtime (CUDA 13 for speech recognition, CUDA 12 and, for RTX 50xx, CUDA 13 for the language model; the
   CUDA 13 llama.cpp build adds about 150 MB unpacked) is inside the installer, so no
   CUDA toolkit is needed. So are the Vulkan and CPU builds of llama.cpp: without an NVIDIA card the language model
@@ -326,7 +336,7 @@ avoids that wait, but then the raw transcript is pasted with no cleanup at all.
 | `voxflow/langs.py` | language packs (es, fr, de, it, pt, nl) and the neutral fallback: rules, prompts, guardrails, number formatting |
 | `voxflow/command.py` | command mode: prompt, token budget, guardrails |
 | `voxflow/sync.py` | backups, shareable packs, sync folder (one file per device, last writer wins per entry, tombstones); no network code |
-| `voxflow/updater.py` | app updates: the daily GitHub Releases check, version compare, URL allow-list, resumable and SHA-256-verified installer download, Scoop / winget / source detection, the silent Inno Setup run after VoxFlow quits (`Updater`, owned by the controller); `VOXFLOW_UPDATES=0` turns the automatic check off |
+| `voxflow/updater.py` | app updates: the daily GitHub Releases check, version compare, URL allow-list, resumable and SHA-256-verified installer download, Scoop / winget / source detection, free-space checks before the download and before Setup, the silent Inno Setup run after VoxFlow quits, and the record of each Setup run: a run that left the version unchanged is reported at the next start and automatic mode stops after two (`Updater`, owned by the controller); `VOXFLOW_UPDATES=0` turns the automatic check off |
 | `voxflow/inject.py` | clipboard snapshot -> set text -> `SendInput` Ctrl+V -> restore; typed fallback; selection grab |
 | `voxflow/store.py` | dictionary, snippets, history, stats, styles (JSON, atomic writes) |
 | `voxflow/sounds.py`, `system.py`, `context.py`, `modelhub.py` | cues + media mute, autostart / logging / crash handler, foreground app, model cache |
