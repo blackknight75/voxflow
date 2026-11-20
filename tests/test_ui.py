@@ -1247,7 +1247,7 @@ def test_tray_toggles_and_actions(ui):
 
     quits = []
     tray.quit_requested.connect(lambda: quits.append(True))
-    tray.quit_requested.disconnect(QApplication.instance().quit)
+    tray.quit_requested.disconnect(ui.shell.quit)               # the shell would quit the test process
     by_text()["Quit VoxFlow"]["on_click"]()
     assert quits == [True]
 

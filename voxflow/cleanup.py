@@ -77,7 +77,7 @@ def _setup_dll_paths() -> None:
     except Exception:  # noqa: BLE001
         pass
     roots = []
-    for p in sys.path:
+    for p in system.import_roots():
         cand = os.path.join(p, "nvidia")
         if os.path.isdir(cand):
             roots.append(cand)
@@ -301,6 +301,15 @@ def _gpu_offload_supported() -> bool:
         return True
 
 
+# The CUDA 12 runtime wheels (Windows, x64) whose DLLs go next to llama.dll: name, version, SHA-256 of the file on
+# PyPI. The release build installs everything else with --require-hashes; this download had only a version pin
+# (security review S-03).
+_CUDA12_WHEELS = (
+    ("nvidia-cuda-runtime-cu12", "12.9.79", "8e018af8fa02363876860388bd10ccb89eb9ab8fb0aa749aaf58430a9f7c4891"),
+    ("nvidia-cublas-cu12", "12.9.2.10", "623f43027d40d44ceadf0043f002bd25cf353e8f13ce90b9a87057019f560661"),
+)
+
+
 def install_cuda12_runtime() -> None:
     """One-time setup (needs internet): copy CUDA 12 runtime DLLs next to llama.dll.
 
@@ -317,8 +326,16 @@ def install_cuda12_runtime() -> None:
                  "(see requirements.txt and the README), then re-run --install-cuda.")
     dst = os.path.join(list(spec.submodule_search_locations)[0], "lib")
     with tempfile.TemporaryDirectory() as td:
-        subprocess.check_call([sys.executable, "-m", "pip", "download", "--no-deps", "-d", td,
-                               "nvidia-cuda-runtime-cu12==12.9.79", "nvidia-cublas-cu12==12.9.2.10"])
+        subprocess.check_call([sys.executable, "-m", "pip", "download", "--no-deps", "--only-binary=:all:", "-d", td,
+                               *(f"{n}=={v}" for n, v, _h in _CUDA12_WHEELS)])
+        import hashlib
+        known = {digest for _n, _v, digest in _CUDA12_WHEELS}
+        for name in os.listdir(td):                     # every file first: nothing is copied from a doubtful set
+            with open(os.path.join(td, name), "rb") as fh:
+                digest = hashlib.file_digest(fh, "sha256").hexdigest()
+            if digest not in known:
+                # these DLLs are shipped inside the installer: a wheel replaced on the index must stop the build
+                sys.exit(f"{name} is not the reviewed file (SHA-256 {digest}). Nothing was installed.")
         for name in os.listdir(td):
             with zipfile.ZipFile(os.path.join(td, name)) as z:
                 for n in z.namelist():
@@ -1174,7 +1191,7 @@ def rank_terms(terms, text: str) -> list[str]:
     "Zendesk" is in the prompt when "zen desk" was said, however many terms come before it alphabetically; the
     rest keep their order (the caller passes the newest first)."""
     terms = [t for t in terms or [] if isinstance(t, str) and t.strip()]
-    if len(terms) <= _MAX_HINT_TERMS and sum(len(t) + 2 for t in terms) <= _MAX_HINT_CHARS:
+    if _all_fit(terms):
         return terms
     words = re.findall(r"[^\W_]+", text.lower())
     heard, prefixes = set(), set()
@@ -1196,6 +1213,11 @@ def rank_terms(terms, text: str) -> list[str]:
         return 1 if key[:4] in prefixes else 0
 
     return sorted(terms, key=lambda t: -tier(t))      # stable: the newest first within a tier
+
+
+def _all_fit(terms) -> bool:
+    """True when every term fits in the hint: it then reads the same for every dictation."""
+    return len(terms) <= _MAX_HINT_TERMS and sum(len(t) + 2 for t in terms) <= _MAX_HINT_CHARS
 
 
 def _terms_hint(terms) -> str:
@@ -1892,10 +1914,21 @@ class Cleaner:
 
     # ------------------------------------------------------------------ LLM call
     def _messages(self, text: str, terms=None) -> list[dict]:
-        msgs = [{"role": "system", "content": _SYSTEM + _terms_hint(terms)}]
+        """The prompt. The preferred spellings normally end the system message. With more terms than fit, the ones
+        chosen differ from dictation to dictation, and a changed system message makes llama.cpp work through the
+        whole prompt again (the examples follow it): such a hint goes after the examples instead, as a continuation
+        of the rules, so the long common start stays cached. Measured on the real model (RTX 5080, 93 evaluation
+        sentences with a dictionary): a changing hint cost about 600 ms per dictation in the system message and
+        about 420 ms after the examples, with the same sentences cleaned correctly (93/93) and one more reply
+        rejected by the guard (10 against 9). A hint that never changes stays where it was: nothing to gain there."""
+        hint = _terms_hint(terms)
+        late = bool(hint) and not _all_fit([t for t in terms if isinstance(t, str) and t.strip()])
+        msgs = [{"role": "system", "content": _SYSTEM if late else _SYSTEM + hint}]
         for a, b in _FEWSHOT:
             msgs.append({"role": "user", "content": a})
             msgs.append({"role": "assistant", "content": b})
+        if late:
+            msgs.append({"role": "system", "content": "Rules (continued):" + hint})
         msgs.append({"role": "user", "content": text})
         return msgs
 

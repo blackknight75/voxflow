@@ -271,6 +271,7 @@ class Win32Clipboard:
 
 
 PASTED, TYPED, COPIED, FAILED = "pasted", "typed", "copied", "failed"
+RESTORE_RETRIES, RESTORE_RETRY_S = 3, 0.25      # a clipboard that was locked when the restore ran
 
 
 class Injector:
@@ -304,6 +305,7 @@ class Injector:
         self._sleep, self._clock = sleep, clock
         self._lock = threading.RLock()
         self._pending = None                 # (snapshot, sequence) awaiting restore
+        self._restore_retries = RESTORE_RETRIES
         self.settle = None                   # optional callable: wait until the target window is ready for keys
         self._timer: threading.Timer | None = None
 
@@ -391,10 +393,29 @@ class Injector:
         if pending is not None:
             snap, seq = pending
             try:
-                if self.clipboard.sequence() == seq:
-                    self.clipboard.restore(snap)
+                if self.clipboard.sequence() == seq and self.clipboard.restore(snap) is False:
+                    self._restore_failed(pending)
+                    return
             except Exception:  # noqa: BLE001 - a locked clipboard must not break dictation
                 log.warning("clipboard restore failed", exc_info=True)
+        self._restore_retries = RESTORE_RETRIES
+
+    def _restore_failed(self, pending) -> None:
+        """Another program had the clipboard open at that moment. The snapshot was dropped and the dictated text
+        stayed on the user's clipboard for good, without a word in the log (QA F-05): try again shortly, a few times."""
+        with self._lock:
+            again = self._restore_retries > 0 and self._pending is None and self._timer is None
+            if again:
+                self._restore_retries -= 1
+                self._pending = pending
+                self._timer = threading.Timer(RESTORE_RETRY_S, self.finish)
+                self._timer.daemon = True
+                self._timer.name = "voxflow-clipboard-restore"
+                self._timer.start()
+        if not again:
+            self._restore_retries = RESTORE_RETRIES
+            log.warning("the clipboard was in use by another program: your previous clipboard content could not be "
+                        "put back after the paste")
 
     def finish_later(self) -> None:
         """Schedule ``finish`` after ``restore_delay`` without blocking the caller."""
@@ -449,11 +470,19 @@ class Injector:
                 return False
             return bool(self.keys.undo())
 
-    def copy_text(self, text: str) -> bool:
-        """Put ``text`` on the clipboard for the user (visible in the clipboard history)."""
+    def copy_text(self, text: str, private: bool = False) -> bool:
+        """Put ``text`` on the clipboard for the user. A copy the user asked for (a Copy button) is visible in the
+        clipboard history; ``private`` keeps one that VoxFlow made by itself out of the history and the cloud
+        clipboard, like a paste."""
         with self._lock:
             self.finish()
             try:
-                return self.clipboard.set_text(text, private=False) is not None
+                return self.clipboard.set_text(text, private=private) is not None
             except TypeError:                # clipboard backend without the ``private`` switch
                 return self.clipboard.set_text(text) is not None
+
+    def copy_private(self, text: str) -> bool:
+        """A fallback copy VoxFlow makes instead of a paste (the window changed, its own window has the focus): the
+        dictated or rewritten text must not land in Win+V history or sync to the Microsoft account (security review
+        S-05). It was the one path that did."""
+        return self.copy_text(text, private=True)

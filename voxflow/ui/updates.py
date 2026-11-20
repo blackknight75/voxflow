@@ -58,6 +58,8 @@ def status_text(info: dict) -> tuple[str, str]:
             line += " You skipped this version."
         elif info.get("install_on_quit"):
             line += " It will be installed when you quit VoxFlow."
+        elif info.get("mode") == "auto" and info.get("auto_stopped"):
+            line += " Installing it did not work, so VoxFlow will not try again by itself."
         elif info.get("mode") == "auto" and info.get("when") == "time" and info.get("downloaded"):
             line += f" It will be installed at {info.get('time')} when VoxFlow and the PC are idle."
         parts.append(line)
@@ -189,7 +191,6 @@ def update_dialog(win, ctl, info: dict) -> Modal:
     lead = Label(hint, T.F_SMALL, "TEXT_DIM")
     lead.setObjectName("update_hint")
     m.body.addWidget(lead)
-    m.body.addWidget(m.error)
 
     def done(fn, message: str):
         def go():
@@ -236,8 +237,7 @@ def update_dialog(win, ctl, info: dict) -> Modal:
     # the browser). Esc / a click outside is "Remind me later" too (Modal.cancel), so the reminder comes back
     # instead of this version going quiet for good.
     m.btn_default = later
-    m.body.addSpacing(T.S1)
-    m.body.addLayout(row)
+    m.add_footer(row)                      # below the scrolling part: the buttons stay in view in a low window
     # four buttons need about 540 px; with some fonts / scale factors a little more: widen the card rather than
     # squeeze a button below its text (each button's minimum is its size hint)
     margins = m.body.contentsMargins()

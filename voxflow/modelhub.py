@@ -269,9 +269,29 @@ def _fetch(repo_id: str, files: dict[str, tuple[int, str]], pattern: bool) -> Pa
     revision = PINNED[repo_id][0]
     check_space(repo_id, sum(size for size, _ in files.values()))
     if pattern:
-        return Path(snapshot_download(repo_id, revision=revision, allow_patterns=sorted(files)))
-    (name,) = files
-    return Path(hf_hub_download(repo_id, name, revision=revision))
+        got = Path(snapshot_download(repo_id, revision=revision, allow_patterns=sorted(files)))
+    else:
+        (name,) = files
+        got = Path(hf_hub_download(repo_id, name, revision=revision))
+    _verify_fetched(repo_id, files)
+    return got
+
+
+class ChecksumMismatch(OSError):
+    """A file that was just downloaded is not the reviewed one. It has been deleted again."""
+
+
+def _verify_fetched(repo_id: str, files: dict[str, tuple[int, str]]) -> None:
+    """Check what was just downloaded against the pinned SHA-256, once, before it is ever loaded. Until now the
+    hash was only looked at after a model had failed to load, so a file of the right size and the wrong content
+    was loaded unchecked (security review S-13). Reads every byte: about two seconds per gigabyte, once."""
+    folder = snapshot_dir(repo_id)
+    bad = sorted(name for name, (size, digest) in files.items() if not _matches(folder / name, size, digest))
+    if bad:
+        remove_files(repo_id, bad)
+        raise ChecksumMismatch(f"{', '.join(bad)} of {repo_id} did not arrive as published and was deleted again. "
+                               "Try again; if it keeps happening, something between this PC and Hugging Face "
+                               "changes the download.")
 
 
 def model_folder(name: str) -> str | None:

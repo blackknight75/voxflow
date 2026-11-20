@@ -45,6 +45,11 @@ _PLACEHOLDER_LINE_RE = re.compile(rf"^[ \t]*{_PLACEHOLDER}[ \t]*$\n?", re.M)
 # "Dear [Landlord's Name],": a greeting to a name the model did not know
 _PLACEHOLDER_GREETING_RE = re.compile(rf"^([ \t]*)(?:dear|hi|hello|hey)[ \t]+{_PLACEHOLDER}[ \t]*([,!:]?)[ \t]*$",
                                       re.M | re.I)
+# Characters that have no place in pasted text: control characters other than tab and line break (ESC starts a
+# terminal escape sequence, BEL rings) and the invisible direction overrides that make text read differently from
+# what it is. The selection is text someone else may have written (a web page, an e-mail), and the model can be
+# talked into repeating such characters.
+_CONTROL_RE = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069\u061c]")
 _OUTPUT_RESERVE = 96          # tokens kept free for the answer on top of the computed budget
 _PROMPT_OVERHEAD = 260        # system prompt + chat template + labels, in tokens (measured, rounded up)
 
@@ -90,7 +95,9 @@ def build_messages(instruction: str, selection: str, *, tone: str | None = None,
 
 def tidy_output(output: str, selection: str = "") -> str:
     """Strip what a chat model adds around the answer: preambles, code fences, wrapping quotes, labels."""
-    out = (output or "").strip()
+    out = (output or "").replace("\r\n", "\n").replace("\r", "\n")
+    keep = set(_CONTROL_RE.findall(selection))          # e.g. direction marks of a right-to-left text being edited
+    out = _CONTROL_RE.sub(lambda m: m.group(0) if m.group(0) in keep else "", out).strip()
     fenced = _FENCE_RE.match(out)
     if fenced:
         out = fenced.group(1).strip()

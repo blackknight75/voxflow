@@ -195,7 +195,7 @@ def test_two_actions_never_share_a_shortcut_after_loading(stored, expected):
 # ---------------------------------------------------------------- load / save
 def test_first_run_creates_the_file_in_the_isolated_profile(data_dir):
     assert C.app_dir() == data_dir and C.config_path() == data_dir / "config.json"
-    assert C.history_path() == data_dir / "history.json"
+    assert not hasattr(C, "history_path"), "nothing used it: the history file belongs to voxflow.store (QA R-B)"
     cfg = load_config()
     assert cfg.to_dict() == DOCUMENTED_DEFAULTS
     assert json.loads((data_dir / "config.json").read_text(encoding="utf-8")) == DOCUMENTED_DEFAULTS

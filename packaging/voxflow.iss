@@ -73,6 +73,8 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 ; An upgrade starts from an empty runtime folder: DLLs, .pyd files and *.dist-info folders of packages that an older
 ; version had and this one does not would otherwise pile up (and two dist-info folders of one package confuse
 ; importlib.metadata). VoxFlow is closed by then (PrepareToInstall, Restart Manager). Nothing of the user's is in it.
+; Normally the folder is already gone here: KeepOldCopy (Code section) has moved it to {app}\previous, from where it
+; is put back if Setup does not finish. This entry empties it when it could not be moved.
 Type: filesandordirs; Name: "{app}\_internal"
 
 [Files]
@@ -95,6 +97,10 @@ Type: files; Name: "{app}\managed-by.txt"
 ; compiled GPU kernels (voxflow/modelhub.py): a cache of this PC's driver, not the user's data
 Type: filesandordirs; Name: "{localappdata}\VoxFlow\cuda-cache"
 Type: dirifempty; Name: "{localappdata}\VoxFlow"
+; the in-app updater's download folder (voxflow/updater.py, download_folder): an installer of up to 1.8 GB and Setup's log
+Type: filesandordirs; Name: "{%TEMP|{localappdata}\Temp}\VoxFlow-update"
+; the old program files an interrupted upgrade set aside (KeepOldCopy below)
+Type: filesandordirs; Name: "{app}\previous"
 
 ; The uninstaller removes what the installer put in {app}, plus the app's "Launch at login" entry (below). The user's
 ; profile (%APPDATA%\VoxFlow: settings, history, dictionary, logs) and downloaded models (the Hugging Face cache) are
@@ -123,10 +129,74 @@ begin
     '[StringComparison]::OrdinalIgnoreCase) } | Stop-Process -Force"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
+// An upgrade that does not finish (the disk fills up, a file is locked, Setup is cancelled) must not leave a VoxFlow
+// that cannot start: Setup deletes the files it had copied but does not bring back the ones it replaced, and the
+// runtime folder is emptied before the first file is copied (InstallDelete). So the old program files are set aside
+// first: _internal is moved (same drive: no copying, no extra space until the new files arrive) and the two small
+// exe files are copied to {app}\previous. RestoreOldCopy puts them back when Setup ends without having finished;
+// RemoveOldCopy deletes them when it has. A {app}\previous that is already there is what an interrupted earlier run
+// left: it is the complete copy and is kept. A folder that cannot be moved (a file in it is open) is not kept;
+// Setup then goes on as it did before this existed.
+var
+  Prepared, Installed: Boolean;
+
+procedure KeepOldCopy;
+var
+  App, Prev: String;
+  Tries: Integer;
+begin
+  App := ExpandConstant('{app}');
+  Prev := App + '\previous';
+  if DirExists(Prev + '\_internal') or not DirExists(App + '\_internal') then
+    Exit;
+  if not ForceDirectories(Prev) then
+    Exit;
+  FileCopy(App + '\VoxFlow.exe', Prev + '\VoxFlow.exe', False);
+  FileCopy(App + '\VoxFlow-console.exe', Prev + '\VoxFlow-console.exe', False);
+  for Tries := 1 to 10 do
+  begin
+    if RenameFile(App + '\_internal', Prev + '\_internal') then
+    begin
+      Log('VoxFlow: the old program files are kept in ' + Prev + ' until the new ones are complete');
+      Exit;
+    end;
+    Sleep(500);                                    // a virus scanner still reading a DLL of the copy that just quit
+  end;
+  Log('VoxFlow: the old program files could not be set aside');
+  DelTree(Prev, True, True, True);
+end;
+
+procedure RestoreOldCopy;
+var
+  App, Prev: String;
+begin
+  App := ExpandConstant('{app}');
+  Prev := App + '\previous';
+  if not DirExists(Prev + '\_internal') then
+    Exit;
+  DelTree(App + '\_internal', True, True, True);   // what was copied of the new version
+  if not RenameFile(Prev + '\_internal', App + '\_internal') then
+  begin
+    Log('VoxFlow: the old program files could not be put back; they stay in ' + Prev);
+    Exit;
+  end;
+  FileCopy(Prev + '\VoxFlow.exe', App + '\VoxFlow.exe', False);
+  FileCopy(Prev + '\VoxFlow-console.exe', App + '\VoxFlow-console.exe', False);
+  DelTree(Prev, True, True, True);
+  Log('VoxFlow: Setup did not finish, the old program files were put back');
+end;
+
+procedure RemoveOldCopy;
+begin
+  DelTree(ExpandConstant('{app}\previous'), True, True, True);
+end;
+
 // An upgrade by hand: VoxFlow is asked to quit before Restart Manager would end it by force (CloseApplications).
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   StopRunningCopy;
+  KeepOldCopy;
+  Prepared := True;
   Result := '';
 end;
 
@@ -142,10 +212,27 @@ procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep <> ssPostInstall then
     Exit;
+  Installed := True;                               // every file is in place: the old copy is no longer needed
+  RemoveOldCopy;
   if Lowercase(ExpandConstant('{param:MANAGEDBY|}')) = 'winget' then
     SaveStringToFile(ExpandConstant('{app}\managed-by.txt'), 'winget', False)
   else
     DeleteFile(ExpandConstant('{app}\managed-by.txt'));   // installed by hand over a winget install: ours now
+end;
+
+// Setup ends. If it had started to install and did not finish, the old program files come back (KeepOldCopy), and a
+// VoxFlow that quit for this update (the in-app updater's /RELAUNCH=1) is started again: the old version, which then
+// says that the update was not installed (voxflow/updater.py). Not after a Setup that stopped before it prepared
+// anything: {app} is not known then.
+procedure DeinitializeSetup;
+var
+  ResultCode: Integer;
+begin
+  if Installed or not Prepared then
+    Exit;
+  RestoreOldCopy;
+  if RelaunchAfterUpdate and FileExists(ExpandConstant('{app}\VoxFlow.exe')) then
+    Exec(ExpandConstant('{app}\VoxFlow.exe'), '--after-update', '', SW_SHOWNORMAL, ewNoWait, ResultCode);
 end;
 
 // "Launch at login" is written by the app, so the uninstall log knows nothing about it: without this, an entry

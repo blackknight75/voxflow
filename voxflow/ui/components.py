@@ -12,7 +12,8 @@ from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 from . import a11y
 from . import theme as T
 from .icons import paint_icon
-from .widgets import Button, Caption, IconButton, Label, Spinner, _Hover, _KBD_REASONS, painter, wrap_lines
+from .widgets import (Button, Caption, IconButton, Label, ScrollArea, Spinner, WrapLabel, _Hover, _KBD_REASONS,
+                      breakable, painter, plain_tip, wrap_lines)
 
 
 # --------------------------------------------------------------------------- formatting helpers
@@ -104,9 +105,9 @@ class Row(QWidget):
         lay.setSpacing(T.S4)
         col = QVBoxLayout()
         col.setSpacing(2)
-        self.title = Label(title, T.F_BODY, "TEXT", T.W_SEMI)
-        col.addWidget(self.title)
-        self.sub = Label(sub, T.F_SMALL - 0.2, "TEXT_DIM")
+        self.title = WrapLabel(title, T.F_BODY, "TEXT", T.W_SEMI)         # a word, a phrase, an app's file name:
+        col.addWidget(self.title)                                          # a long one must not widen the page
+        self.sub = WrapLabel(sub, T.F_SMALL - 0.2, "TEXT_DIM")
         self.sub.setVisible(bool(sub))
         col.addWidget(self.sub)
         lay.addLayout(col, 1)
@@ -160,6 +161,7 @@ class Section(QWidget):
         self.card.body.setContentsMargins(0, 2, 0, 2)
         lay.addWidget(self.card)
         self._rows: list[Row] = []
+        self._keyed: dict = {}                  # (key, occurrence) -> row, for ``sync``
         self._indent = False
 
     def add(self, row: Row) -> Row:
@@ -189,11 +191,95 @@ class Section(QWidget):
 
     def clear(self) -> None:
         for r in self._rows:
-            self.card.body.removeWidget(r)
-            r.hide()
-            r.deleteLater()
+            self._drop(r)
         self._rows = []
+        self._keyed = {}
         self._indent = False
+
+    def _drop(self, row: Row) -> None:
+        self.card.body.removeWidget(row)
+        row.hide()
+        row.deleteLater()
+
+    def sync(self, items: list, key, build) -> None:
+        """Show one row per item, in this order: ``key(item)`` names a row and what it shows, ``build(item)`` makes
+        the row. A row whose key is still there is kept as it is; only rows that are new, gone or out of place are
+        touched. Building every row anew on every change cost 96 ms per change with 100 words on the page and
+        470 ms with 600 (QA U-05).
+
+        Used for a whole section: do not mix it with ``add``."""
+        body, old = self.card.body, self._keyed
+        keys, seen = [], {}
+        for it in items:
+            k = key(it)
+            seen[k] = seen.get(k, 0) + 1
+            keys.append((k, seen[k]))                   # the same key twice is two rows
+        many = sum(k not in old for k in keys) > 1
+        bulk = many and not self.card.isHidden()
+        if bulk:
+            self.card.hide()                            # many new rows: one layout pass, as in ``add_many``
+        try:
+            for k in set(old) - set(keys):
+                self._drop(old[k])
+            rows, placed = [], []
+            for i, (it, k) in enumerate(zip(items, keys)):
+                row = old.get(k)
+                if row is None:
+                    row = self._adopt(build(it))
+                at = body.itemAt(i)
+                if at is None or at.widget() is not row:
+                    body.removeWidget(row)
+                    body.insertWidget(i, row)
+                    if not many:                        # (many: the card shows them when it is shown again)
+                        row.show()                      # now, not when Qt gets round to it: the page may be about
+                    after = body.itemAt(i + 1)          # to give the keyboard focus to one of the row's buttons
+                    if after is not None:               # the child order follows the layout: it is the order in
+                        row.stackUnder(after.widget())  # which ``findChildren`` lists the rows' buttons
+                    else:
+                        row.raise_()
+                    placed.append(i)
+                rows.append(row)
+        finally:
+            if bulk:
+                self.card.show()
+        self._rows, self._keyed = rows, dict(zip(keys, rows))
+        indent = any(r.icon_name for r in rows)
+        for i, row in enumerate(rows):
+            last = i == len(rows) - 1
+            if row.divider == last:                     # every row but the last has the line below it
+                row.divider = not last
+                row.update()
+            row.set_indent(indent)
+        self._indent = indent
+        for i in placed:
+            self._chain(i)
+
+    def _adopt(self, row: Row) -> Row:
+        if not self.icons:
+            row.icon_hint, row.icon_name = row.icon_name, None
+        return row
+
+    @staticmethod
+    def _stops(row: Row) -> list[QWidget]:
+        return [w for w in row.findChildren(QWidget) if w.focusPolicy() != Qt.FocusPolicy.NoFocus]
+
+    def _chain(self, index: int) -> None:
+        """Tab reaches the controls of row ``index`` after those of the row above it and before those of the row
+        below (a widget made later would otherwise come last in the Tab order, wherever it is on screen)."""
+        row = self._rows[index]
+        stops = self._stops(row)
+        above = self._stops(self._rows[index - 1]) if index else []
+        below = self._stops(self._rows[index + 1]) if index + 1 < len(self._rows) else []
+        if not stops or not (above or below):
+            return
+        if above:
+            anchor = above[-1]
+        else:                                           # the first row: after whatever comes before the next row
+            anchor = below[0].previousInFocusChain()
+            while anchor.focusPolicy() == Qt.FocusPolicy.NoFocus or row.isAncestorOf(anchor):
+                anchor = anchor.previousInFocusChain()
+        for a, b in zip([anchor] + stops, stops):
+            QWidget.setTabOrder(a, b)
 
 
 # --------------------------------------------------------------------------- stats
@@ -411,7 +497,7 @@ class EmptyState(QWidget):
         lay.setSpacing(6)
         self.title = Label("", T.F_TITLE, "TEXT", T.W_SEMI)
         self.title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        self.sub = Label("", T.F_BODY, "TEXT_DIM")
+        self.sub = WrapLabel("", T.F_BODY, "TEXT_DIM")           # it can quote a search text of any length
         self.sub.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
         lay.addWidget(self.title)
         lay.addWidget(self.sub, 0, Qt.AlignmentFlag.AlignHCenter)
@@ -500,7 +586,7 @@ class StatusChip(QWidget):
         self.detail = str(status.get("detail", ""))
         self.setAccessibleName(f"Status: {self.title}")
         self.setAccessibleDescription(self.detail)
-        self.setToolTip(self.detail)
+        self.setToolTip(plain_tip(self.detail))         # the detail can name a device or a file: never HTML
         self.spinner.setVisible(self.level == "loading")
         self._fit()
         self.update()
@@ -574,6 +660,7 @@ class _Toast(QWidget):
     def __init__(self, level: str, message: str, action: str, on_action, parent):
         super().__init__(parent)
         self.level, self.message = level if level in self.ICONS else "info", message
+        self._shown = breakable(message)       # what is painted: a long word in it (a file name) wraps too
         self._on_action = on_action
         self._font = T.font(T.F_BODY, T.W_MEDIUM)
         self._appear = 1.0 if T.REDUCED_MOTION else 0.0
@@ -602,7 +689,7 @@ class _Toast(QWidget):
         fm = QFontMetricsF(self._font)
         bw = (self.btn.sizeHint().width() + 8) if self.btn else 0
         text_w = min(max_w - 62 - bw, fm.horizontalAdvance(self.message) + 4)
-        br = fm.boundingRect(QRectF(0, 0, text_w, 1000), int(Qt.TextFlag.TextWordWrap), self.message)
+        br = fm.boundingRect(QRectF(0, 0, text_w, 1000), int(Qt.TextFlag.TextWordWrap), self._shown)
         h = max(44, int(br.height()) + 24) + 2 * self.PAD
         size = QSize(int(text_w + 62 + bw) + 2 * self.PAD, h)
         self.resize(size)
@@ -676,7 +763,7 @@ class _Toast(QWidget):
         p.setFont(self._font)
         bw = (self.btn.width() + 8) if self.btn else 0
         p.drawText(QRectF(r.left() + 42, r.top(), r.width() - 56 - bw - (14 if self._hover and not self.btn else 0),
-                          r.height()), int(Qt.AlignmentFlag.AlignVCenter | Qt.TextFlag.TextWordWrap), self.message)
+                          r.height()), int(Qt.AlignmentFlag.AlignVCenter | Qt.TextFlag.TextWordWrap), self._shown)
         if self._hover and not self.btn:               # dismiss affordance, only while the pointer is on it
             paint_icon(p, "close", QRectF(r.right() - 26, r.center().y() - 6, 12, 12), T.TEXT_DIM, 1.8)
 
@@ -764,11 +851,18 @@ class ToastHost(QWidget):
 class Modal(QWidget):
     """Scrim + centred card inside the main window. Esc / click outside cancels; focus stays inside.
 
-    Build the content by adding widgets to ``modal.body``; ``add_buttons`` adds the footer. Enter clicks
-    ``btn_default`` when set, else ``btn_primary``; Esc and a click outside click ``btn_cancel`` when there is one.
+    Build the content by adding widgets to ``modal.body``; ``add_buttons`` adds the footer (``add_footer`` for a
+    dialog with its own row of buttons). Enter clicks ``btn_default`` when set, else ``btn_primary``; Esc and a
+    click outside click ``btn_cancel`` when there is one.
+
+    The title and the footer always stay on screen. When the window is too low for the whole dialog the body
+    between them scrolls (QA Q-04: squeezed into a card that was too short, its lines were printed on top of each
+    other).
     """
 
     closed = Signal()
+
+    MIN_BODY = 96             # the least the scrolling body is ever given, however low the window
 
     def __init__(self, host: QWidget, title: str, sub: str = "", width: int = 440, name: str = "modal"):
         super().__init__(host)
@@ -780,18 +874,33 @@ class Modal(QWidget):
         self._appear = 1.0 if T.REDUCED_MOTION else 0.0
         self.card = QWidget(self)
         self.card.setFixedWidth(width)
-        self.body = QVBoxLayout(self.card)
-        self.body.setContentsMargins(T.S6, T.S5, T.S6, T.S5)
-        self.body.setSpacing(T.S3)
+        outer = QVBoxLayout(self.card)                  # title | scrolling body | footer
+        outer.setContentsMargins(0, T.S5, 0, T.S5)
+        outer.setSpacing(T.S3)
+        head = QVBoxLayout()
+        head.setContentsMargins(T.S6, 0, T.S6, 0)
         self.title = Label(title, T.F_H2, "TEXT", T.W_BOLD)
-        self.body.addWidget(self.title)
+        head.addWidget(self.title)
+        outer.addLayout(head)
+        self._inner = QWidget()
+        self.body = QVBoxLayout(self._inner)
+        self.body.setContentsMargins(T.S6, 0, T.S6, 0)
+        self.body.setSpacing(T.S3)
+        self.scroll = ScrollArea(self._inner)
+        self.scroll.setObjectName(f"{name}_body")
+        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        outer.addWidget(self.scroll)
+        self.footer = QVBoxLayout()
+        self.footer.setContentsMargins(T.S6, 0, T.S6, 0)
+        self.footer.setSpacing(T.S3)
+        outer.addLayout(self.footer)
         if sub:
             lead = Label(sub, T.F_BODY, "TEXT_DIM")
             lead.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
             lead.setFixedHeight(lead.heightForWidth(width - 2 * T.S6))    # exact: wrapped labels over-ask in layouts
             self.body.addWidget(lead)
             self.body.addSpacing(T.S1)
-        self.error = Label("", T.F_SMALL, "RED")
+        self.error = WrapLabel("", T.F_SMALL, "RED")             # it can quote what was typed
         self.error.hide()
         self._anim = QVariantAnimation(self)
         self._anim.setEasingCurve(T.EASE)
@@ -805,9 +914,14 @@ class Modal(QWidget):
         self._appear = float(v)
         self.update()
 
+    def add_footer(self, row) -> None:
+        """Put ``row`` (a layout of buttons) below the body, under the error line. It does not scroll."""
+        self.footer.addWidget(self.error)
+        self.footer.addSpacing(T.S1)
+        self.footer.addLayout(row)
+
     def add_buttons(self, primary: str, on_primary, cancel: str = "Cancel", danger: bool = False,
                     extra: QWidget | None = None) -> Button:
-        self.body.addWidget(self.error)
         row = QHBoxLayout()
         row.setSpacing(T.S2)
         if extra is not None:
@@ -821,8 +935,7 @@ class Modal(QWidget):
         self.btn_primary.clicked.connect(on_primary)
         row.addWidget(self.btn_cancel)
         row.addWidget(self.btn_primary)
-        self.body.addSpacing(T.S1)
-        self.body.addLayout(row)
+        self.add_footer(row)
         return self.btn_primary
 
     def show_error(self, message: str) -> None:
@@ -835,6 +948,7 @@ class Modal(QWidget):
         self.show()
         self.raise_()
         (focus or self).setFocus(Qt.FocusReason.OtherFocusReason)
+        self._reveal(focus)
         if not T.REDUCED_MOTION:
             self._anim.setDuration(170)
             self._anim.start()
@@ -852,11 +966,50 @@ class Modal(QWidget):
         self.deleteLater()
 
     def _fit(self) -> None:
+        """Size the card to its content, or to the window when that is lower; the body then scrolls.
+
+        The heights are the ones for the card's real width. (A size hint is for a width of the layout's own
+        choosing, at which wrapped text has other line breaks: it was up to 36 px off, and changed once the
+        dialog was on screen.)"""
         self.setGeometry(self._host.rect())
-        self.card.adjustSize()
-        h = min(self.card.sizeHint().height(), self.height() - 40)
-        self.card.setGeometry((self.width() - self.card.width()) // 2, max(20, (self.height() - h) // 2 - 10),
-                              self.card.width(), h)
+        inner, card, room = self._inner, self.card, self.height() - 40
+        width = card.width()
+        self._set_scrolling(False)
+        for lay in (self.body, card.layout()):          # the sizes asked for below are cached per layout; a change
+            lay.activate()                              # in a nested one (the footer) does not reach its parent
+        # what the body needs: given less, its lines overlap (wrapped text makes the height depend on the width)
+        need = inner.heightForWidth(width) if inner.hasHeightForWidth() else inner.sizeHint().height()
+        self.scroll.setVisible(need > 0)
+        self.scroll.setFixedHeight(need)
+        over = card.heightForWidth(width) - room
+        if over > 0:
+            given = max(min(self.MIN_BODY, need), need - over)
+            self.scroll.setFixedHeight(given)
+            self._set_scrolling(given < need)
+        h = card.heightForWidth(width)
+        card.setGeometry((self.width() - width) // 2, max(20, (self.height() - h) // 2 - 10), width, h)
+
+    def _set_scrolling(self, on: bool) -> None:
+        """Show the body's scroll bar, in the body's right-hand margin: the content keeps its width, so nothing
+        wraps differently because the dialog scrolls."""
+        policy = Qt.ScrollBarPolicy.ScrollBarAlwaysOn if on else Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        self.scroll.setVerticalScrollBarPolicy(policy)
+        bar = self.scroll.verticalScrollBar().sizeHint().width() if on else 0
+        m = self.body.contentsMargins()
+        self.body.setContentsMargins(m.left(), m.top(), max(0, T.S6 - bar), m.bottom())
+
+    def scrolling(self) -> bool:
+        return self.scroll.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+
+    def _reveal(self, widget: QWidget | None) -> None:
+        """Scroll the body (and a list inside it, innermost first) so that ``widget`` is on screen."""
+        if widget is None or not self._inner.isAncestorOf(widget):
+            return
+        area = widget.parentWidget()
+        while area is not self.card:
+            if isinstance(area, ScrollArea):
+                area.ensureWidgetVisible(widget, 0, T.S3)
+            area = area.parentWidget()
 
     def eventFilter(self, obj, ev):
         if obj is self._host and ev.type() == QEvent.Type.Resize:
@@ -882,6 +1035,9 @@ class Modal(QWidget):
         elif e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and hasattr(self, "btn_primary") \
                 and not (e.modifiers() & Qt.KeyboardModifier.ShiftModifier):
             (getattr(self, "btn_default", None) or self.btn_primary).click()   # a focused button takes Enter itself
+        elif e.key() in (Qt.Key.Key_PageUp, Qt.Key.Key_PageDown) and self.scrolling():
+            bar = self.scroll.verticalScrollBar()       # with the focus in the body, the body takes these itself
+            bar.setValue(bar.value() + bar.pageStep() * (1 if e.key() == Qt.Key.Key_PageDown else -1))
         else:
             super().keyPressEvent(e)
 
@@ -893,8 +1049,9 @@ class Modal(QWidget):
             return True
         cur = self.window().focusWidget()
         i = chain.index(cur) if cur in chain else (-1 if forward else 0)
-        chain[(i + (1 if forward else -1)) % len(chain)].setFocus(
-            Qt.FocusReason.TabFocusReason if forward else Qt.FocusReason.BacktabFocusReason)
+        target = chain[(i + (1 if forward else -1)) % len(chain)]
+        target.setFocus(Qt.FocusReason.TabFocusReason if forward else Qt.FocusReason.BacktabFocusReason)
+        self._reveal(target)
         return True
 
     def paintEvent(self, _):
@@ -1075,6 +1232,15 @@ class TranscriptList(QWidget):
     def selected(self) -> dict | None:
         return self.items[self._sel] if 0 <= self._sel < len(self.items) else None
 
+    def select_id(self, entry_id) -> bool:
+        """Choose the card of the transcript with this id and bring it into view. False when it is not listed."""
+        index = next((i for i, it in enumerate(self.items) if it.get("id") == entry_id), -1)
+        if index < 0:
+            return False
+        self._select(index)
+        self._reveal(index)
+        return True
+
     # a list whose value is the chosen transcript (see voxflow.ui.a11y)
     def a11y_role(self):
         return a11y.Role.List
@@ -1116,7 +1282,8 @@ class TranscriptList(QWidget):
                     last_day = day
                     self._rows.append(("head", QRect(self.PAD, y, w - 2 * self.PAD, self.HEAD_H), day))
                     y += self.HEAD_H
-            br = fm.boundingRect(QRectF(0, 0, max(60, text_w), 100000), int(Qt.TextFlag.TextWordWrap), self.body_text(it))
+            br = fm.boundingRect(QRectF(0, 0, max(60, text_w), 100000), int(Qt.TextFlag.TextWordWrap),
+                                 breakable(self.body_text(it)))             # a long link wraps, it is not cut off
             th = int(br.height()) + 2
             h = 40 + th + 14
             card = QRect(self.PAD, y, w - 2 * self.PAD, h)
@@ -1285,7 +1452,7 @@ class TranscriptList(QWidget):
             # body
             p.setPen(T.TEXT if not self.show_raw else T.TEXT_DIM)
             p.setFont(self._font)
-            p.drawText(QRectF(text_rect), int(Qt.TextFlag.TextWordWrap), self.body_text(it))
+            p.drawText(QRectF(text_rect), int(Qt.TextFlag.TextWordWrap), breakable(self.body_text(it)))
             # actions: visible on hover / selection, otherwise faint
             for k, (ar, (icon, _tip)) in enumerate(zip(self._action_rects(card), self.actions)):
                 arf = QRectF(ar)

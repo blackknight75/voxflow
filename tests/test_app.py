@@ -514,6 +514,37 @@ def test_window_visibility_at_start(qapp, clean_process_state, data_dir, monkeyp
     assert shown["show_window"] is expect_window
 
 
+def test_quitting_hides_everything_before_the_shutdown_that_may_take_seconds(qapp, clean_process_state, data_dir,
+                                                                            monkeypatch):
+    """QA C-02: with a dictation still being worked on the shutdown waits for it; the window, the tray icon and the
+    Flow bar stayed on screen meanwhile and looked frozen."""
+    import json
+    (data_dir / "config.json").write_text(json.dumps({"onboarding_done": True}), encoding="utf-8")
+    from voxflow import controller as ctl
+    from voxflow.ui import shell
+    order, built = [], {}
+    real_build, real_shutdown = shell.build_ui, ctl.Controller.shutdown
+
+    def build(controller, *, show_window=False):
+        ui = real_build(controller, show_window=show_window)
+        real_close = ui.close
+        ui.close = lambda: (order.append("ui hidden"), real_close())[1]
+        built["ui"] = ui
+        return ui
+
+    def shutdown(self):
+        if not self._closed:
+            order.append(("shutdown", built["ui"].window.isVisible(), built["ui"].tray.icon.isVisible()))
+        real_shutdown(self)
+
+    monkeypatch.setattr(shell, "build_ui", build)
+    monkeypatch.setattr(ctl.Controller, "shutdown", shutdown)
+    quit_after(300)
+    assert app.run_app(fake=True, no_hook=True) == 0
+    assert order[0] == "ui hidden" and ("shutdown", False, False) in order, order
+    assert not [step for step in order if isinstance(step, tuple) and (step[1] or step[2])], "nothing visible by then"
+
+
 def test_instance_name_is_per_user_and_safe(monkeypatch):
     import getpass
     monkeypatch.setattr(getpass, "getuser", lambda: "Dan O'Brien-Smith")

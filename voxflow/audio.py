@@ -16,6 +16,11 @@ log = logging.getLogger("voxflow.audio")
 
 SAMPLE_RATE = 16000
 PREROLL_S = 0.3
+# What was said just before the key came up is still on its way when the release arrives: up to one audio block
+# (32 ms) inside PortAudio plus the device's own delay (a wireless headset adds tens of ms). Measured on the
+# development PC: 16 ms on average not yet delivered at the stop, whatever the stream's latency setting. Without a
+# tail the end of the last word is cut off (QA C-01). stop() keeps listening for this long.
+RELEASE_TAIL_S = 0.08
 _RING_S = 2.0
 _STALL_S = 1.5              # no audio callback for this long = the device went away
 
@@ -176,6 +181,8 @@ class Recorder:
         self._ring = np.zeros(int(_RING_S * SAMPLE_RATE), dtype=np.float32)
         self._level = 0.0
         self._last_cb = 0.0         # monotonic time of the last audio callback
+        self._arrived = threading.Condition(self._lock)   # notified by every audio callback
+        self.release_tail_s = RELEASE_TAIL_S
         self._opened = 0.0
         self.level_boost = 1.0      # meter gain (raised in whisper mode so quiet speech still moves it)
         self.error: BaseException | None = None    # why the last attempt to open the stream failed
@@ -209,6 +216,7 @@ class Recorder:
                     self._hit_cap = True
             lvl = min(1.0, rms * 8.0 * self.level_boost)
             self._level = lvl if lvl > self._level else self._level * 0.85 + lvl * 0.15
+            self._arrived.notify_all()
 
     # ---- stream management
     def _open(self, device):
@@ -307,7 +315,20 @@ class Recorder:
             self._recording = True
 
     def stop(self) -> np.ndarray:
+        """End the recording and return it. Audio captured up to ``release_tail_s`` after the call is still taken
+        (see RELEASE_TAIL_S), but only while the stream is delivering: a dead microphone is not waited for."""
         with self._lock:
+            want = self._rec_samples + int(self.release_tail_s * SAMPLE_RATE)
+            end = time.monotonic() + self.release_tail_s + 0.05
+            while (self._recording and self._rec_samples < min(want, self._max_samples)
+                   and time.monotonic() - self._last_cb < 0.1):
+                left = end - time.monotonic()
+                if left <= 0 or not self._arrived.wait(left):
+                    break
+            if self._recording and self._rec_samples > want:
+                extra = self._rec_samples - want             # the last block reached past the tail: cut it there
+                self._chunks[-1] = self._chunks[-1][:-extra]
+                self._rec_samples = want
             self._recording = False
             chunks, self._chunks = self._chunks, []
         if not chunks:
@@ -316,6 +337,27 @@ class Recorder:
         out = np.clip(np.concatenate(chunks), -1.0, 1.0).astype(np.float32)
         self._last_speech_s = max(0, out.size - self._preroll_samples) / SAMPLE_RATE
         return out
+
+    def backdate(self, seconds: float) -> int:
+        """The recording should have begun ``seconds`` ago (the key went down then, the call came late): put the
+        audio from back then in front of it, as far as the ring buffer still holds it. Returns the samples added."""
+        with self._lock:
+            if not self._recording:
+                return 0
+            have = self._rec_samples                         # the pre-roll and what arrived since start()
+            extra = min(int(max(0.0, seconds) * SAMPLE_RATE), self._ring.size - have, self._max_samples - have)
+            if extra <= 0:
+                return 0
+            self._chunks.insert(0, self._ring[-(have + extra):-have].copy())
+            self._rec_samples += extra
+            return extra
+
+    def discard(self) -> None:
+        """End the recording at once and throw it away (Esc, pause): nothing to wait for."""
+        with self._lock:
+            self._recording = False
+            self._chunks = []
+        self._last_speech_s = 0.0
 
     @property
     def hit_cap(self) -> bool:

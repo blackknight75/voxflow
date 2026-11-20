@@ -161,7 +161,7 @@ def test_only_this_repository_over_https_is_allowed(url, kind, ok):
 
 
 def test_a_redirect_outside_the_allow_list_is_stopped():
-    handler = U._CheckedRedirect("asset")
+    handler = U.checked_redirect()("asset")
     req = urllib.request.Request(f"{REPO}/releases/download/v1.0.0/VoxFlow-Setup-1.0.0.exe",
                                  headers={"Range": "bytes=10-"})
     with pytest.raises(U.UpdateError, match="does not trust"):

@@ -378,7 +378,7 @@ def test_an_installer_that_cannot_be_read_is_not_restarted_into(tmp_path, qtbot,
     settle(up)
     up.install("quit")
     qtbot.waitUntil(lambda: up.info()["downloaded"], timeout=3000)
-    monkeypatch.setattr(U, "sha256_file", _raiser(PermissionError("locked by a scanner")))
+    monkeypatch.setattr(U, "sha256_stream", _raiser(PermissionError("locked by a scanner")))
     up.install("now")
     assert up.events["restart"] == 0 and up.phase == "idle" and up.error
     up.close()

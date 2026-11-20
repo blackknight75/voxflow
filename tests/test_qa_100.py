@@ -476,3 +476,151 @@ def test_undo_waits_for_a_dictation_that_is_still_being_worked_on(rig):
     rig.wait(lambda: rig.c.state == "done" and len(rig.injector.pasted) == 2)
     assert rig.c.undo_last_paste() is True                      # now it removes the paste that is on screen
     rig.wait(lambda: rig.injector.undone == 1)
+
+
+# ============================================================================ a busy UI thread (QA F-03)
+def test_a_hold_whose_events_arrive_late_and_together_is_still_a_dictation(rig):
+    """The UI thread was busy for the whole hold: "start" and "stop" are handled back to back. Measured from the
+    handling, the hold was 0 s and the dictation was dropped as a tap, without a word."""
+    import time
+    backdated = []
+    rig.rec.backdate = backdated.append
+    down = time.perf_counter() - 1.0                            # the key went down a second ago ...
+    rig.c._on_hotkey("dictate", "start", down)
+    rig.c._on_hotkey("dictate", "stop", down + 0.9)             # ... and came up 0.9 s later
+    rig.wait(lambda: rig.c.state == "done")
+    assert rig.injector.pasted == ["Hello world."]
+    assert len(backdated) == 1 and 0.95 < backdated[0] < 1.5, "the recording reaches back to the key-down"
+
+
+def test_event_times_that_make_no_sense_are_ignored(rig):
+    import time
+    rig.c._on_hotkey("dictate", "start", time.perf_counter() + 60)      # in the future: now
+    assert rig.c._active and abs(rig.c._t_start - time.perf_counter()) < 1.0
+    rig.c._t_start -= 1.0
+    rig.c._on_hotkey("dictate", "stop", rig.c._t_start - 5)             # before the start: now
+    rig.wait(lambda: rig.c.state == "done")
+    assert rig.injector.pasted == ["Hello world."]
+
+
+# ============================================================================ a locked clipboard at the restore (QA F-05)
+class _Clip:
+    def __init__(self):
+        self.content, self.seq, self.busy = "USER CLIPBOARD", 1, 0
+
+    def snapshot(self):
+        return self.content
+
+    def set_text(self, text, private=True):
+        self.content, self.seq = text, self.seq + 1
+        return self.seq
+
+    def sequence(self):
+        return self.seq
+
+    def restore(self, snap):
+        if self.busy:
+            self.busy -= 1
+            return False                    # what the real clipboard does when OpenClipboard keeps failing
+        self.content, self.seq = snap, self.seq + 1
+        return True
+
+
+class _Keys:
+    def paste(self):
+        return True
+
+    def type_text(self, _text):
+        return True
+
+    def modifiers_down(self):
+        return False
+
+
+def test_a_restore_that_finds_the_clipboard_locked_is_tried_again(monkeypatch, caplog):
+    import time
+    from voxflow import inject
+    monkeypatch.setattr(inject, "RESTORE_RETRY_S", 0.02)
+    clip = _Clip()
+    inj = inject.Injector(clip, _Keys(), restore=True, restore_delay=0.0)
+    inj.begin("dictated text")
+    clip.busy = 2                             # another program holds the clipboard for the next two attempts
+    inj.finish()
+    assert clip.content == "dictated text" and inj._pending is not None, "kept for another try"
+    deadline = time.monotonic() + 2
+    while clip.content != "USER CLIPBOARD" and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert clip.content == "USER CLIPBOARD" and inj._pending is None and inj._restore_retries == inject.RESTORE_RETRIES
+    assert "could not be put back" not in caplog.text
+
+
+def test_a_clipboard_that_stays_locked_is_given_up_with_a_line_in_the_log(monkeypatch, caplog):
+    import time
+    from voxflow import inject
+    monkeypatch.setattr(inject, "RESTORE_RETRY_S", 0.01)
+    clip = _Clip()
+    inj = inject.Injector(clip, _Keys(), restore=True, restore_delay=0.0)
+    inj.begin("dictated text")
+    clip.busy = 99
+    with caplog.at_level("WARNING", logger="voxflow.inject"):
+        inj.finish()
+        deadline = time.monotonic() + 2
+        while "could not be put back" not in caplog.text and time.monotonic() < deadline:
+            time.sleep(0.01)
+    assert "could not be put back" in caplog.text and "dictated text" not in caplog.text
+    assert clip.busy == 99 - 1 - inject.RESTORE_RETRIES and inj._pending is None
+    assert inj._restore_retries == inject.RESTORE_RETRIES, "the next paste gets its own tries"
+
+
+# ============================================================================ Copy while a paste is under way
+def test_copy_from_the_window_queues_behind_a_dictation_that_is_being_pasted(rig):
+    gate, entered = _gate_asr(rig)
+    rig.dictate(wait=False)
+    rig.wait(entered.is_set)
+    assert rig.c.copy_text("from the history page") is True
+    assert rig.injector.copied == [], "not on the UI thread, where it would wait for the paste"
+    gate.set()
+    rig.wait(lambda: rig.injector.copied == ["from the history page"])
+    assert rig.injector.events.index(("copy_text", "from the history page")) > rig.injector.events.index(
+        ("begin", "Hello world.")), "after the paste, in order"
+    rig.wait(lambda: rig.c.state in ("done", "idle"))
+    rig.injector.copy_ok = False                                # the queued copy reports its own failure
+    rig.c._work.put({"kind": "copy", "text": "again"})
+    rig.wait(lambda: any("Couldn't copy" in m for _lvl, m in rig.spy.notices()))
+    rig.injector.copy_ok = True
+    rig.wait(lambda: rig.c._work.empty())
+    assert rig.c.copy_text("direct") is True and rig.injector.copied[-1] == "direct"
+    assert rig.c.copy_text("") is False
+
+
+# ============================================================================ loading threads after a quit
+def test_a_model_that_finishes_loading_after_voxflow_was_quit_tells_nobody(rig):
+    before = dict(rig.c.model_status("asr"))
+    rig.c._closed = True
+    rig.c._report_model("asr", {"state": "failed", "detail": "late", "progress": None, "backend": ""})
+    rig.settle(30)
+    assert rig.c.model_status("asr") == before
+    rig.c._closed = False
+
+    class Gone:
+        def emit(self, *_a):
+            raise RuntimeError("Signal source has been deleted")
+    real = rig.c._sig_model
+    try:
+        rig.c._sig_model = Gone()
+        rig.c._report_model("asr", {"state": "ready", "detail": "", "progress": None, "backend": "cuda"})   # no raise
+    finally:
+        del rig.c._sig_model
+    assert rig.c._sig_model is not None and real is not None
+
+
+def test_a_sync_state_file_that_cannot_be_read_is_said_at_start(tmp_path, qtbot, monkeypatch):
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "sync_state.json").write_text("{ not json", encoding="utf-8")
+    r = make_rig(tmp_path, qtbot, monkeypatch)
+    try:
+        assert r.c.sync.load_problem
+        assert r.c.sync.load_problem[:40] in str(r.startup_events), "shown with the other start-up notices"
+    finally:
+        r.close()

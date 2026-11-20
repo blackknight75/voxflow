@@ -55,10 +55,6 @@ def config_path() -> Path:
     return app_dir() / "config.json"
 
 
-def history_path() -> Path:
-    return app_dir() / "history.json"
-
-
 @dataclass
 class Config:
     # ---- hotkeys
@@ -373,6 +369,27 @@ def sweep_tmp(folder: Path, older_than_s: float = 3600.0) -> int:
 
 
 last_load_problem = ""   # human message when the last load_config() fell back to defaults; "" otherwise
+_BAD_COPIES = 5          # config.json.bad, config.json.bad.2 ... config.json.bad.5
+
+
+def _keep_bad_copy(path: Path) -> str:
+    """Copy an unreadable settings file aside; returns the copy's name ('' when that failed). The first copy,
+    ``config.json.bad``, is never overwritten: it is the one most likely to hold the user's own settings, and the
+    next unreadable file used to replace it (QA D-09). Later ones are numbered up to ``.bad.5``, then the last
+    one is replaced. A file that already has an identical copy gets no second one."""
+    names = [f"{path.name}.bad"] + [f"{path.name}.bad.{n}" for n in range(2, _BAD_COPIES + 1)]
+    try:
+        data = path.read_bytes()
+        for name in names:
+            target = path.with_name(name)
+            if not target.exists():
+                break
+            if target.read_bytes() == data:
+                return name
+        target.write_bytes(data)                 # under a free name, or the last one when all are taken
+    except OSError:
+        return ""
+    return target.name
 
 
 def load_config(path: Path | None = None) -> Config:
@@ -383,7 +400,7 @@ def load_config(path: Path | None = None) -> Config:
         data = json.loads(path.read_text(encoding="utf-8-sig"))     # tolerate a BOM added by an editor
         if not isinstance(data, dict):
             raise ValueError("not a JSON object")
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RecursionError) as exc:        # RecursionError: brackets nested 100,000 deep
         cfg = Config()
         if not path.exists():
             try:
@@ -392,14 +409,11 @@ def load_config(path: Path | None = None) -> Config:
                 pass
         else:
             # keep the unreadable file: the next save would otherwise overwrite the user's settings for good
-            log.warning("config file %s is unreadable (%s); using defaults, copy kept as %s.bad",
-                        path, exc, path.name)
-            try:
-                path.with_name(path.name + ".bad").write_bytes(path.read_bytes())
-            except OSError:
-                pass
-            last_load_problem = ("Your settings file could not be read, so defaults are in use. "
-                                 f"The old file was kept as {path.name}.bad.")
+            kept = _keep_bad_copy(path)
+            log.warning("config file %s is unreadable (%s); using defaults, copy kept as %s",
+                        path, exc, kept or "nothing: it could not be copied")
+            last_load_problem = ("Your settings file could not be read, so defaults are in use."
+                                 + (f" The old file was kept as {kept}." if kept else ""))
         return cfg
     rejected: list[str] = []
     cfg = Config.from_dict(data, rejected)

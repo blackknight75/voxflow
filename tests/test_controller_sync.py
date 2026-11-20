@@ -391,8 +391,8 @@ def test_a_damaged_dictionary_or_settings_file_on_one_device_does_not_empty_the_
     b.c.set_sync_folder(str(folder))
     everything = {"Grafana", "Kubernetes", "Parakeet"}
     b.wait(lambda: set(terms(b)) == everything and synced(a) and synced(b), timeout=8000)
-    b.c.set("history_limit", 20000)
-    a.wait(lambda: a.c.get("history_limit") == 20000 and synced(a) and synced(b), timeout=8000)
+    b.c.set("language", "de")
+    a.wait(lambda: a.c.get("language") == "de" and synced(a) and synced(b), timeout=8000)
 
     a.close()                                                   # alpha is closed and two of its files get damaged
     for name in ("dictionary.json", "config.json"):
@@ -404,7 +404,7 @@ def test_a_damaged_dictionary_or_settings_file_on_one_device_does_not_empty_the_
     a2.wait(lambda: set(terms(a2)) == everything and synced(a2) and synced(b), timeout=8000)
     assert set(terms(b)) == everything, "beta keeps its words, and alpha has them back from the folder"
     assert set(snips(a2)) == set(snips(b)) and len(snips(b)) == 1
-    assert b.c.get("history_limit") == 20000 and a2.c.get("history_limit") == 20000, "the folder's setting wins"
+    assert b.c.get("language") == "de" and a2.c.get("language") == "de", "the folder's setting wins"
 
 
 def test_rejoining_without_a_sync_folder_does_nothing(rig):

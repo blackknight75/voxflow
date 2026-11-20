@@ -40,9 +40,15 @@ def main(argv=None) -> int:
     if not (args.after_update or args.demo) and system.update_setup_running():
         system.tell_update_running()          # never start on files Setup is replacing
         return 0
+    autostart = args.autostart
+    if args.after_update and not autostart:
+        # an update at the set time ran while nobody was at the PC: come back in the tray, like a start at login,
+        # not with the main window open (after "Install now" the window opens as usual)
+        from .updater import relaunch_in_tray
+        autostart = relaunch_in_tray()
     from .app import run_app
     return run_app(demo=args.demo, fake=args.fake, open_settings=args.settings, no_hook=args.no_hook,
-                   autostart=args.autostart)
+                   autostart=autostart)
 
 
 if __name__ == "__main__":

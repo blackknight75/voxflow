@@ -42,14 +42,32 @@ def _norm_spaces(s: str) -> str:
     return " ".join(str(s).split())
 
 
+_UNSAFE_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ud800-\udfff]")
+
+
 def clean_text(s) -> str:
     """Make text safe to store: lone surrogates become U+FFFD, NUL and other C0 controls (except tab / newline) go."""
     s = str(s)
+    if not _UNSAFE_RE.search(s):          # nearly always: one scan instead of a Python loop over every character
+        return s                          # (that loop was 78 % of loading a 5,000-entry history: QA D-06)
     try:
         s.encode("utf-8")
     except UnicodeEncodeError:
         s = s.encode("utf-8", "replace").decode("utf-8")
     return "".join(ch for ch in s if ch in "\t\n\r" or (ch >= " " and ch != "\x7f"))
+
+
+# Text that arrives from outside (a sync folder, a backup, a pack someone shared) and is later typed into other
+# programs: besides what clean_text removes, no C1 control characters and none of the invisible direction overrides
+# that make text read differently from what it is, and a bound on its length (security review S-01).
+_FOREIGN_UNSAFE_RE = re.compile("[\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069\u061c]")
+MAX_SNIPPET_LEN = 20_000
+
+
+def foreign_text(s, limit: int = MAX_SNIPPET_LEN) -> str | None:
+    """``s`` as it may be taken over from a file that someone else may have written, or None when it is too long."""
+    s = _FOREIGN_UNSAFE_RE.sub("", clean_text(s))
+    return s if len(s) <= limit else None
 
 
 def count_words(text: str) -> int:
@@ -98,6 +116,61 @@ def flush_all() -> None:
 atexit.register(flush_all)
 
 
+def corrupt_copies(path: Path) -> list[Path]:
+    """The copies of unreadable files kept so far for ``path`` (``history.corrupt-20261117-072301.json``, and the
+    older single ``history.corrupt.json``)."""
+    return sorted(path.parent.glob(f"{path.stem}.corrupt*{path.suffix}"))
+
+
+def keep_corrupt_copy(path: Path) -> str:
+    """Copy an unreadable file aside, under a name with the time, so a second bad file never overwrites the copy
+    of the first. A file that already has an identical copy gets no second one: a damaged file that the session
+    never rewrites was copied again at every start (QA DL-09). Returns the copy's file name ('' when there was
+    nothing to copy or it failed)."""
+    try:
+        data = path.read_bytes()
+        for old in corrupt_copies(path):
+            if old.is_file() and old.stat().st_size == len(data) and old.read_bytes() == data:
+                return old.name
+        base = f"{path.stem}.corrupt-{_dt.datetime.now():%Y%m%d-%H%M%S}"
+        target, n = path.with_name(base + path.suffix), 1
+        while target.exists():                     # two bad files within one second
+            n += 1
+            target = path.with_name(f"{base}-{n}{path.suffix}")
+        target.write_bytes(data)
+    except OSError as exc:
+        log.warning("could not keep a copy of %s: %s", path.name, exc)
+        return ""
+    return target.name
+
+
+class _StoreLock:
+    """The lock around a store's data: re-entrant, used as ``with store._lock:``. A file write asked for while it
+    is held (``after``: 1 = write, 2 = write even inside a batch) runs when the thread that asked lets go of the
+    lock completely, after the release. So the disk is never waited for with the lock held: a rename that has to
+    wait out a virus scanner or a backup program takes up to 2 s, and a dictation applying the dictionary or a
+    page listing the history used to wait behind it (QA R-01)."""
+
+    def __init__(self, mutex, store):
+        self._mutex, self._store = mutex, weakref.ref(store)       # weak: the store owns the lock, not the reverse
+        self._depth = 0
+        self.after = 0
+
+    def __enter__(self):
+        self._mutex.acquire()
+        self._depth += 1
+        return self
+
+    def __exit__(self, *exc):
+        self._depth -= 1
+        after = 0
+        if not self._depth:
+            after, self.after = self.after, 0
+        self._mutex.release()
+        if after:
+            self._store()._write_out(force=after == 2)
+
+
 class _JsonStore:
     """Shared plumbing: load, atomic save, change notification."""
 
@@ -106,7 +179,9 @@ class _JsonStore:
     def __init__(self, path: str | Path | None = None):
         path = Path(path) if path else cfgmod.app_dir()
         self.path = path / self.filename if path.is_dir() or not path.suffix else path
-        self._lock = threading.RLock()
+        self._mutex = threading.RLock()
+        self._lock = _StoreLock(self._mutex, self)
+        self._io = threading.RLock()               # one file write at a time, in the order the data was read
         self._listeners: list = []
         _STORES.add(self)
         self._read()
@@ -126,7 +201,7 @@ class _JsonStore:
             data = json.loads(self.path.read_text(encoding="utf-8-sig"))    # tolerate an editor's BOM
         except FileNotFoundError:
             pass
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, RecursionError) as exc:    # RecursionError: 100,000 nested brackets
             log.warning("%s is unreadable (%s); starting empty and keeping a copy", self.path.name, exc)
             broken = True
         if not broken:
@@ -145,8 +220,7 @@ class _JsonStore:
         if broken or self._skipped:
             self._report_load_problem(self._keep_corrupt_copy(), self._skipped)
         if self._dirty:                            # the load changed the data (a migration): write it now,
-            with self._lock:                       # after the copy above, before anything waits on the store
-                self._write()
+            self.flush()                           # after the copy above, before anything waits on the store
 
     # What the user is told when the file could not be read (completely, or some entries of it). The controller
     # shows it once at start-up with "Open data folder", where the untouched copy of the file is kept.
@@ -162,24 +236,10 @@ class _JsonStore:
             self.load_problem = f"{self.label[0].upper()}{self.label[1:]} could not be read, so it starts empty.{kept}"
 
     def _corrupt_copies(self) -> list[Path]:
-        """The copies of unreadable files kept so far (``history.corrupt-20261117-072301.json``, and the
-        older single ``history.corrupt.json``)."""
-        return sorted(self.path.parent.glob(f"{self.path.stem}.corrupt*{self.path.suffix}"))
+        return corrupt_copies(self.path)
 
     def _keep_corrupt_copy(self) -> str:
-        """Copy the unreadable file aside, under a name with the time, so a second bad file never overwrites the
-        copy of the first. Returns the copy's file name ('' when there was nothing to copy or it failed)."""
-        base = f"{self.path.stem}.corrupt-{_dt.datetime.now():%Y%m%d-%H%M%S}"
-        target, n = self.path.with_name(base + self.path.suffix), 1
-        while target.exists():                     # two bad files within one second
-            n += 1
-            target = self.path.with_name(f"{base}-{n}{self.path.suffix}")
-        try:
-            target.write_bytes(self.path.read_bytes())
-        except OSError as exc:
-            log.warning("could not keep a copy of %s: %s", self.path.name, exc)
-            return ""
-        return target.name
+        return keep_corrupt_copy(self.path)
 
     BACKUP_TAGS: tuple[str, ...] = ()           # every ``_backup`` tag this store can write
     _purge_backups = False      # data was deleted: drop the backup copies after the next successful write
@@ -213,13 +273,26 @@ class _JsonStore:
         raise NotImplementedError
 
     def _dump(self):
+        """The file's content as a copy: it is turned into JSON after the lock is released."""
         raise NotImplementedError
+
+    def _row_id(self, raw: dict, taken: set[str]) -> str:
+        """The id of a stored row: its own, or a new one when it has none or an earlier row of the file has the
+        same. Two entries sharing an id (a hand edit, two files merged) were deleted together (QA DL-13); the
+        file is rewritten with the new id."""
+        row_id = str(raw.get("id") or "")
+        if row_id in taken:
+            row_id, self._dirty = "", True
+        row_id = row_id or _new_id()
+        taken.add(row_id)
+        return row_id
 
     indent: int | None = 1          # small hand-editable files stay readable; the big history file is compact
 
     COALESCE_S = 0.2                 # saves closer together than this share one write (burst of adds / imports)
-    # The history is written behind the caller, on the write timer's thread: a dictation never waits for it (at
-    # 100,000 transcripts the file is about 40 MB and took about 165 ms per dictation to write).
+    # The history and the statistics are written behind the caller, on the write timer's thread: a dictation
+    # never waits for them (at 100,000 transcripts the history file is about 40 MB and took about 165 ms per
+    # dictation to write; a year of statistics took 11 ms, with an fsync, on the dictation's own thread).
     WRITE_BEHIND = False
     _dirty = False
     _last_write = 0.0
@@ -236,54 +309,43 @@ class _JsonStore:
         store.batch():`` holds every save back until the block ends."""
         with self._lock:
             self._changes += 1
+            self._dirty = True
             if self._batch:
-                self._dirty = True
                 return
             wait = self._last_write + self.COALESCE_S - time.monotonic()
             if wait <= 0 and self._timer is None and not self.WRITE_BEHIND:
-                self._write()
-                return
-            self._dirty = True
-            if self._timer is None:
+                self._lock.after = max(self._lock.after, 1)      # written when the caller lets go of the lock
+            elif self._timer is None:
                 self._timer = threading.Timer(max(wait, 0.01), self._timer_fired)
                 self._timer.daemon = True
                 self._timer.name = "voxflow-store-write"
                 self._timer.start()
 
     def _timer_fired(self) -> None:
-        if self.WRITE_BEHIND:
-            self._write_behind()
-            return
         with self._lock:
             self._timer = None
             if self._dirty and not self._batch:
-                self._write()
+                self._lock.after = 1
 
-    def _write_behind(self) -> None:
-        """The write of a ``WRITE_BEHIND`` store (timer thread). The data is turned into JSON outside the lock,
-        so a page reading the history or the next dictation filing its transcript does not wait for that; only
-        the file replace itself runs under the lock, where a newer write (``flush``) wins over this one."""
-        with self._lock:
-            self._timer = None
-            if not self._dirty or self._batch:
-                return
-            self._seq += 1
-            seq, changes = self._seq, self._changes
-            purge = (self._purge_backups, self._purge_corrupt)
-            payload = self._dump()                       # a snapshot: the store keeps changing meanwhile
-        text = self._serialise(payload)
-        with self._lock:
-            if seq == self._seq:                         # else a flush() already wrote newer data
-                self._commit(text, purge, current=changes == self._changes)
+    _write_behind = _timer_fired         # the name the write of a ``WRITE_BEHIND`` store had
 
     def flush(self) -> None:
-        """Write any pending change now (shutdown, export of the raw file, tests)."""
+        """Write any pending change now (shutdown, export of the raw file, tests). Called inside ``with
+        store._lock:`` it writes when that block ends."""
         with self._lock:
             timer, self._timer = self._timer, None
             if timer is not None:
                 timer.cancel()
             if self._dirty:
-                self._write()
+                self._lock.after = 2
+
+    def save_now(self) -> str:
+        """Write any pending change now and say how that went: '' when the file is current, else why the write
+        failed. Unlike ``last_save_error`` it is about this write only: '' when there was nothing to write."""
+        with self._lock:
+            pending = self._dirty
+        self.flush()
+        return self.last_save_error if pending else ""
 
     def retry_save(self) -> bool:
         """Try to write the file again after a failed save. True when the file is current."""
@@ -292,8 +354,8 @@ class _JsonStore:
             timer, self._timer = self._timer, None
             if timer is not None:
                 timer.cancel()
-            self._write()
-            return not self.last_save_error
+            self._lock.after = 2
+        return not self.last_save_error
 
     class _Batch:
         def __init__(self, store):
@@ -314,44 +376,92 @@ class _JsonStore:
         """Context manager: many changes, one write at the end."""
         return self._Batch(self)
 
-    def _write(self) -> None:
-        """Write the file atomically, now (call with the lock held). Never raises; a failure is remembered in
+    def _write_out(self, force: bool = False) -> None:
+        """Write the file atomically, now. Never called with the lock held (``_StoreLock`` calls it after the
+        release): the data is copied under the lock, then turned into JSON and put on disk outside it, so readers
+        and the next change never wait for the disk. ``_io`` keeps the writes in the order their data was read.
+        Without ``force`` a batch in progress keeps its write. Never raises; a failure is remembered in
         ``last_save_error`` and announced once to the subscribers as the topic ``"save_failed:<file stem>"`` (and
         ``"save_ok:<stem>"`` when a later save works again)."""
-        self._seq += 1
-        self._commit(self._serialise(self._dump()), (self._purge_backups, self._purge_corrupt), current=True)
+        topic = ""
+        with self._io:
+            with self._mutex:
+                if not self._dirty or (self._batch and not force):
+                    return                               # a write that ran meanwhile took this change along
+                self._seq += 1
+                seq, changes = self._seq, self._changes
+                # the backup purge that is pending now: it may only run once a file without that data is on disk
+                purge = (self._purge_backups, self._purge_corrupt)
+                payload = self._dump()                   # a copy: the store keeps changing meanwhile
+            text = self._serialise(payload)
+            if seq != self._seq:                         # a flush() from inside the above already wrote newer data
+                return
+            error = self._put(text)
+            with self._mutex:
+                current = changes == self._changes       # else: more came in meanwhile, and stays to be written
+                if current:
+                    self._dirty = False
+                self._last_write = time.monotonic()
+                if error:                                # a pending backup purge waits for a write that works
+                    if not self.last_save_error:
+                        topic = "save_failed:" + self.path.stem
+                    self.last_save_error = error
+                else:
+                    if purge[0] and current:
+                        self._purge_backups = self._purge_corrupt = False
+                    if self.last_save_error:
+                        self.last_save_error, topic = "", "save_ok:" + self.path.stem
+            if purge[0] and not error:                   # the file without the deleted data is on disk now
+                self._drop_backups(purge[1])
+        if topic:
+            self._notify(topic)
 
     def _serialise(self, payload):
-        """The file's text, or the exception that stopped it (``_commit`` reports it)."""
+        """The file's text, or the exception that stopped it (``_put`` reports it)."""
         try:
             return json.dumps(payload, ensure_ascii=False, indent=self.indent)
         except (ValueError, TypeError) as exc:
             return exc
 
-    def _commit(self, text, purge: tuple[bool, bool], current: bool) -> None:
-        """Put ``text`` on disk (lock held). ``current``: it holds every change made so far. ``purge``: the backup
-        purge that was pending when ``text`` was made (it may only run once a file without that data is on disk)."""
-        if current:
-            self._dirty = False
-        self._last_write = time.monotonic()
+    def _put(self, text) -> str:
+        """Put ``text`` on disk. Returns '' or why that failed."""
         try:
             if isinstance(text, Exception):
                 raise text
             cfgmod._atomic_write(self.path, text)
         except (OSError, UnicodeError, ValueError, TypeError) as exc:   # lone surrogates raise UnicodeEncodeError
             log.warning("could not save %s: %s", self.path.name, exc)
-            first = not self.last_save_error
-            self.last_save_error = str(exc) or type(exc).__name__
-            if first:
-                self._notify("save_failed:" + self.path.stem)
-            return                               # a pending backup purge waits for a write that works
-        if purge[0]:                             # the file without the deleted data is on disk now
-            if current:
-                self._purge_backups = self._purge_corrupt = False
-            self._drop_backups(purge[1])
-        if self.last_save_error:
-            self.last_save_error = ""
-            self._notify("save_ok:" + self.path.stem)
+            return str(exc) or type(exc).__name__
+        return ""
+
+    # ---- undoing a bulk change
+    _STATE: tuple[str, ...] = ()        # the attributes that hold the store's data, where a deep copy will do
+    TOPICS: tuple[str, ...] = ()        # what subscribers are told when all of it changes
+
+    def checkpoint(self):
+        """A copy of everything the store holds, for ``rollback``. An import that fails half-way is undone with
+        it exactly: the same ids, the suggestion queue, the pending purge of backup copies. Re-applying the old
+        entries instead gave them new ids, dropped suggestions and deleted the backup copies (QA DL-05)."""
+        with self._lock:
+            return self._state_copy(), self._purge_backups, self._purge_corrupt
+
+    def _state_copy(self) -> dict:
+        return {name: copy.deepcopy(getattr(self, name)) for name in self._STATE}
+
+    def rollback(self, saved) -> None:
+        """Put back what ``checkpoint()`` returned (use it once) and save."""
+        state, purge_backups, purge_corrupt = saved
+        with self._lock:
+            for name, value in state.items():
+                setattr(self, name, value)
+            self._purge_backups, self._purge_corrupt = purge_backups, purge_corrupt
+            self._restored()
+            self._save()
+        for topic in self.TOPICS:
+            self._notify(topic)
+
+    def _restored(self) -> None:
+        """The data was replaced as a whole: forget what was derived from it."""
 
     last_save_error = ""
 
@@ -498,7 +608,19 @@ def _fuzzy_index(entries) -> dict:
     if not by_sound:
         return {}
     return {"by_sound": by_sound, "longest": longest, "words": words, "names": names,
-            "terms": frozenset(e["term"] for e in entries)}
+            "terms": frozenset(e["term"] for e in entries), "matchers": threading.local()}
+
+
+def _matcher(index: dict, key: str) -> difflib.SequenceMatcher:
+    """The matcher that compares a span with ``key``. One per key instead of one per (span, key) pair: difflib
+    indexes its second sequence, so with the key there only the span changes from call to call (the same
+    results, 30 % less time: QA P-03). A matcher is mutable, and ``Dictionary.apply`` runs on more than one thread
+    (a dictation, the live preview), so every thread has its own, for as long as this index lives."""
+    cache = index["matchers"].__dict__
+    matcher = cache.get(key)
+    if matcher is None:
+        matcher = cache[key] = difflib.SequenceMatcher(None, "", key)
+    return matcher
 
 
 def _fuzzy_allowed(span_words: list[str], index: dict) -> bool:
@@ -528,10 +650,14 @@ def _fuzzy_score(cand: str, n_words: int, index: dict) -> tuple[float, str] | No
         else:
             if n_words == 1 and (cand.startswith(sq) or sq.startswith(cand)):
                 continue                       # the term plus / minus an ending ("Stripes")
-            m = difflib.SequenceMatcher(None, cand, sq)
+            m = _matcher(index, sq)
+            m.set_seq1(cand)
             if m.real_quick_ratio() < 0.75 or m.quick_ratio() < 0.75:
                 continue
-            spelt, heard = m.ratio(), difflib.SequenceMatcher(None, sound, ph).ratio()
+            spelt = m.ratio()                  # before the next line: ``sq`` and ``ph`` can be the same key
+            m = _matcher(index, ph)
+            m.set_seq1(sound)
+            heard = m.ratio()
             # it must both look and sound like the term: one word closely ("Kubernetis", "Graphana"), a name
             # split into words ("Supercaliphragolistus expialidocio", "Go lang") a little more loosely
             if n_words == 1:
@@ -674,6 +800,7 @@ class Dictionary(_JsonStore):
 
     filename = "dictionary.json"
     label = "your dictionary"
+    TOPICS = ("dictionary", "suggestions")
 
     def _load(self, data) -> None:
         self._entries: list[dict] = []
@@ -689,21 +816,23 @@ class Dictionary(_JsonStore):
             return
         # one damaged entry costs that entry only, never the whole dictionary (it is counted and reported)
         seen: set[str] = set()
+        ids: set[str] = set()
         for raw in _rows(data, "entries"):
             term = self._stored_term(raw)
             if term is None:
                 self._skipped += 1
             elif _match_key(term) not in seen:
                 seen.add(_match_key(term))
-                self._entries.append({"id": str(raw.get("id") or _new_id()), "term": term,
+                self._entries.append({"id": self._row_id(raw, ids), "term": term,
                                       "aliases": self._clean_aliases(term, _alias_list(raw.get("aliases")))})
+        ids = set()
         for raw in _rows(data, "suggestions"):
             term = self._stored_term(raw)
             if term is None:
                 self._skipped += 1
                 continue
             self._suggestions.append({
-                "id": str(raw.get("id") or _new_id()), "term": term, "aliases": _alias_list(raw.get("aliases")),
+                "id": self._row_id(raw, ids), "term": term, "aliases": _alias_list(raw.get("aliases")),
                 "ts": _num(raw.get("ts")), "source": str(raw.get("source") or "cleanup")})
         self._dismissed = {d.lower() for d in _rows(data, "dismissed") if isinstance(d, str)}
 
@@ -715,8 +844,16 @@ class Dictionary(_JsonStore):
         return None
 
     def _dump(self):
-        return {"version": 1, "entries": self._entries, "suggestions": self._suggestions,
+        return {"version": 1, "entries": [{**e, "aliases": list(e["aliases"])} for e in self._entries],
+                "suggestions": [{**s, "aliases": list(s["aliases"])} for s in self._suggestions],
                 "dismissed": sorted(self._dismissed)}
+
+    def _state_copy(self) -> dict:
+        dump = self._dump()
+        return {"_entries": dump["entries"], "_suggestions": dump["suggestions"], "_dismissed": set(self._dismissed)}
+
+    def _restored(self) -> None:
+        self._by_key = self._regex = None
 
     # ---- helpers (call with the lock held)
     _by_key: dict | None = None      # match key -> entry, built on first use, kept up to date (None: rebuild)
@@ -972,7 +1109,7 @@ class Dictionary(_JsonStore):
         if ext == ".json":
             try:
                 data = json.loads(text)
-            except ValueError:
+            except (ValueError, RecursionError):
                 raise ValueError(f"{path.name} is not a valid JSON file.") from None
             if isinstance(data, dict):
                 data = data.get("entries", [])
@@ -993,6 +1130,7 @@ class Dictionary(_JsonStore):
                 cells = [c.strip() for c in row if c.strip()]
                 if not cells or (i == 0 and cells[0].lower() == "term"):
                     continue
+                cells = [_csv_plain(c) for c in cells]        # the mark the export puts before = + - @
                 rows.append((cells[0], cells[1:]))
         else:
             for line in text.splitlines():
@@ -1056,7 +1194,9 @@ class Dictionary(_JsonStore):
             writer = csv.writer(buf, lineterminator="\n")
             writer.writerow(["term", "aliases"])
             for e in entries:
-                writer.writerow([e["term"]] + e["aliases"])
+                # a term can come from a pack or a sync folder: one that starts with = + - @ would run as a formula
+                # when the file is opened in a spreadsheet (security review S-08). The import takes the mark off again.
+                writer.writerow([_csv_safe(cell) for cell in [e["term"]] + e["aliases"]])
             text = "\ufeff" + buf.getvalue()           # the BOM tells Excel it is UTF-8 ("Köln", not "KÃ¶ln")
         elif ext == ".txt":
             text = "".join(_txt_line(e["term"], e["aliases"]) + "\n" for e in entries)
@@ -1247,6 +1387,10 @@ _LEAD_VERBS = (
 _SEPARABLE_LEADS = ("füge", "füg", "fuge", "setze", "setz", "voeg")                          # "füge X ein"
 _SEPARABLE_PARTICLE = r"(?:[\s,]+(?:ein|in)(?![\w]))?"
 _TRAILING_VERBS = ("einfügen", "eintippen", "einsetzen", "invoegen", "plakken", "intypen")    # "meine Adresse einfügen"
+# The trailing-verb regex starts with the triggers, so it tries every one of them at every position of the text
+# (27 ms per dictation with 2,000 snippets: QA DL-06), and it can only match where one of its verbs is: look for
+# a verb first.
+_TRAILING_VERB_RE = re.compile("|".join(_TRAILING_VERBS), re.I)
 _PLEASE = r"(?:please|por\s+favor|s['’]il\s+(?:te|vous)\s+pla[iî]t|bitte|per\s+favore|alsjeblieft|alstublieft)"
 _DETERMINER = r"(?:the|a|an|el|la|le|l['’]|den|die|das|il|lo|o|de|het)"
 _LEAD = (r"(?:" + _PLEASE + r"[\s,]+)?(?:(?P<sep>" + "|".join(_SEPARABLE_LEADS) + r")|"
@@ -1317,6 +1461,7 @@ class Snippets(_JsonStore):
 
     filename = "snippets.json"
     label = "your snippets"
+    TOPICS = ("snippets",)
 
     def _load(self, data) -> None:
         self._entries: list[dict] = []
@@ -1325,6 +1470,7 @@ class Snippets(_JsonStore):
         if data is None:
             return
         seen: set[str] = set()
+        ids: set[str] = set()
         for raw in _rows(data, "entries"):
             if not (isinstance(raw, dict) and isinstance(raw.get("trigger"), str) and isinstance(raw.get("text"), str)
                     and self._norm_trigger(raw["trigger"]) and raw["text"]):
@@ -1333,10 +1479,16 @@ class Snippets(_JsonStore):
             trigger = self._norm_trigger(raw["trigger"])
             if _trigger_key(trigger) not in seen:
                 seen.add(_trigger_key(trigger))
-                self._entries.append({"id": str(raw.get("id") or _new_id()), "trigger": trigger, "text": raw["text"]})
+                self._entries.append({"id": self._row_id(raw, ids), "trigger": trigger, "text": raw["text"]})
 
     def _dump(self):
-        return {"version": 1, "entries": self._entries}
+        return {"version": 1, "entries": [dict(e) for e in self._entries]}
+
+    def _state_copy(self) -> dict:
+        return {"_entries": self._dump()["entries"]}
+
+    def _restored(self) -> None:
+        self._regex = None
 
     @staticmethod
     def _norm_trigger(trigger: str) -> str:
@@ -1476,7 +1628,8 @@ class Snippets(_JsonStore):
         """Would ``expand`` insert a snippet into ``text``?"""
         whole_rx, lead_rx, trail_rx, _texts = self._compiled()
         return bool(text and whole_rx is not None
-                    and (whole_rx.fullmatch(text) or lead_rx.search(text) or trail_rx.search(text)))
+                    and (whole_rx.fullmatch(text) or lead_rx.search(text)
+                         or (_TRAILING_VERB_RE.search(text) and trail_rx.search(text))))
 
     def expand(self, text: str, transform=None) -> str:
         """Insert snippets where they were asked for, the way people say it and the recogniser writes it down:
@@ -1502,7 +1655,9 @@ class Snippets(_JsonStore):
         whole = whole_rx.fullmatch(text)
         if whole:
             return self._snippet_of(whole, texts)
-        hits = sorted(list(lead_rx.finditer(text)) + list(trail_rx.finditer(text)), key=lambda m: m.start())
+        hits = list(lead_rx.finditer(text))
+        if _TRAILING_VERB_RE.search(text):
+            hits = sorted(hits + list(trail_rx.finditer(text)), key=lambda m: m.start())
         out: list[str] = []
         last = 0
         for m in hits:
@@ -1531,7 +1686,7 @@ class Snippets(_JsonStore):
         src = Path(path)
         try:
             data = json.loads(_read_import_text(src))
-        except ValueError as exc:
+        except (ValueError, RecursionError) as exc:
             if str(exc).startswith("Couldn't read"):
                 raise
             raise ValueError(f"{src.name} is not a valid JSON file.") from None
@@ -1581,13 +1736,14 @@ _HISTORY_FIELDS = ("id", "ts", "raw", "text", "app_exe", "app_title", "duration_
 
 def make_entry(text: str, raw: str = "", *, app_exe: str = "", app_title: str = "", duration_s: float = 0.0,
                mode: str = "dictate", latency_ms: float = 0.0, ts: float | None = None,
-               rules_only: bool = False, words: int | None = None) -> dict:
+               rules_only: bool = False, words: int | None = None, entry_id: str | None = None) -> dict:
     """Build a history-shaped entry (also used for transcripts that are not stored).
 
     ``rules_only``: the language model timed out or was skipped for this dictation, so the text got the rule
     clean-up only. The key is present (and True) only on such entries; read it with ``entry.get("rules_only")``.
     ``words``: how many words were spoken, when that is not the text's own count (a snippet types many words for
-    the two that were said; speed and time saved are measured on what was said)."""
+    the two that were said; speed and time saved are measured on what was said).
+    ``entry_id``: the id of an entry that has one already (read from a file); a new entry gets a new id."""
     text, raw, app_title = clean_text(text), clean_text(raw or ""), clean_text(app_title or "")
     if words is None:
         words = count_words(text)
@@ -1595,7 +1751,7 @@ def make_entry(text: str, raw: str = "", *, app_exe: str = "", app_title: str = 
         words = min(max(0, int(words)), max(count_words(text), count_words(raw)))
     duration_s = max(0.0, float(duration_s or 0.0))
     wpm = round(words / (duration_s / 60.0), 1) if duration_s >= 1.0 and mode == "dictate" else 0.0
-    entry = {"id": _new_id(), "ts": float(ts if ts is not None else time.time()), "raw": raw, "text": text,
+    entry = {"id": entry_id or _new_id(), "ts": float(ts if ts is not None else time.time()), "raw": raw, "text": text,
             "app_exe": clean_text(app_exe or "").lower(), "app_title": app_title, "duration_s": round(duration_s, 2),
             "words": words, "wpm": wpm, "mode": mode if mode in ("dictate", "command") else "dictate",
             "latency_ms": int(round(latency_ms or 0))}
@@ -1604,11 +1760,32 @@ def make_entry(text: str, raw: str = "", *, app_exe: str = "", app_title: str = 
     return entry
 
 
+class _Entry(dict):
+    """A transcript in the history. It is never changed once it is there (a changed time makes a new one), so its
+    JSON text is kept with it: a write joins the ready texts instead of encoding the whole history again. That
+    encoding held the interpreter for 18 ms per dictation at 5,000 entries, on whatever thread (QA D-01)."""
+
+    __slots__ = ("json",)
+
+
+_encode_entry = json.JSONEncoder(ensure_ascii=False).encode     # what json.dumps builds anew for every call
+
+
+def _entry_json(entry) -> str:
+    text = getattr(entry, "json", None)
+    if text is None:
+        text = _encode_entry(entry)
+        if isinstance(entry, _Entry):
+            entry.json = text
+    return text
+
+
 class History(_JsonStore):
     """Transcript history, newest first, with a size cap and optional retention in days."""
 
     filename = "history.json"
     label = "your history"
+    TOPICS = ("history",)
     BACKUP_TAGS = ("v1",)
     indent = None                   # compact: the file holds thousands of entries and is rewritten per dictation
     WRITE_BEHIND = True             # see _JsonStore: filing a transcript never waits for the file
@@ -1628,10 +1805,14 @@ class History(_JsonStore):
         else:
             data = _layout(data)
             source = [] if data is None else _rows(data, "items")
+        ids: set[str] = set()
         for raw in source:
             if not (isinstance(raw, dict) and isinstance(raw.get("text"), str)):
                 self._skipped += 1                   # damaged: left out and reported, the others still load
                 continue
+            entry_id = raw["id"] if isinstance(raw.get("id"), str) else None
+            if entry_id and entry_id in ids:         # two entries with one id were deleted together (QA DL-13):
+                entry_id, self._dirty = None, True   # the later one gets a new id, and the file is rewritten
             entry = make_entry(
                 raw["text"], raw.get("raw") if isinstance(raw.get("raw"), str) else "",
                 app_exe=str(raw.get("app_exe") or ""), app_title=str(raw.get("app_title") or ""),
@@ -1640,10 +1821,9 @@ class History(_JsonStore):
                 # a stored time is kept even when it lies after today's clock (any year up to 2100): whether the
                 # entry or the clock is wrong is decided for the history as a whole, in _prune
                 ts=_sane_ts(raw.get("ts"), _YEAR_2100) or self._clock(), rules_only=raw.get("rules_only") is True,
-                words=_stored_words(raw))
-            if isinstance(raw.get("id"), str) and raw["id"]:
-                entry["id"] = raw["id"]
-            self._items.append(entry)
+                words=_stored_words(raw), entry_id=entry_id)
+            ids.add(entry["id"])
+            self._items.append(_Entry(entry))
         self._items.sort(key=lambda e: e["ts"], reverse=True)
         pruned = self._prune()
         if migrated and self._items:
@@ -1652,7 +1832,21 @@ class History(_JsonStore):
             self._dirty = True                   # written by _read, after a damaged file's copy is kept
 
     def _dump(self):
-        return {"version": 2, "items": list(self._items)}     # a copy: it may be written outside the lock
+        return {"version": 2, "items": list(self._items)}     # a copy of the list: the entries never change
+
+    def _state_copy(self) -> dict:
+        return {"_items": list(self._items)}                  # the same: no need to copy 100,000 transcripts
+
+    def _serialise(self, payload):
+        """As for every store, with the text of each entry taken from the entry (made once, then kept)."""
+        items = payload.get("items") if isinstance(payload, dict) else None
+        head = super()._serialise({**payload, "items": []}) if isinstance(items, list) else None
+        if not isinstance(head, str) or not head.endswith('"items": []}'):
+            return super()._serialise(payload)
+        try:
+            return head[:-2] + ", ".join(map(_entry_json, items)) + "]}"
+        except (ValueError, TypeError) as exc:
+            return exc
 
     def _prune(self) -> bool:
         before = len(self._items)
@@ -1662,9 +1856,8 @@ class History(_JsonStore):
         # the entries. Leave their times alone and delete nothing by age this time: rewriting them to "now" lost every
         # transcript's own time, and with a retention set the whole history once the clock was right again (QA DL-02).
         clock_is_off = len(ahead) >= 3 and 2 * len(ahead) > len(self._items)
-        if not clock_is_off:
-            for e in ahead:                         # a clock that ran ahead once must not pin entries for years
-                e["ts"] = now
+        if ahead and not clock_is_off:              # a clock that ran ahead once must not pin entries for years
+            self._items = [_Entry({**e, "ts": now}) if e["ts"] > now + 86_400.0 else e for e in self._items]
         if self.retention_days and self.retention_days > 0 and not clock_is_off:
             cutoff = now - self.retention_days * 86400.0
             self._items = [e for e in self._items if e["ts"] >= cutoff]
@@ -1705,7 +1898,7 @@ class History(_JsonStore):
 
     def add_entry(self, entry: dict) -> dict:
         flagged = entry.get("rules_only") is True
-        entry = {k: entry[k] for k in _HISTORY_FIELDS}
+        entry = _Entry({k: entry[k] for k in _HISTORY_FIELDS})
         if flagged:
             entry["rules_only"] = True
         with self._lock:
@@ -1716,8 +1909,10 @@ class History(_JsonStore):
                 self._items.sort(key=lambda e: e["ts"], reverse=True)
             self._prune()
             self._save()
+            # what is stored: _prune may have given it another time (a new object), or dropped it already
+            out = dict(next((e for e in self._items[:1] if e["id"] == entry["id"]), entry))
         self._notify("history")
-        return dict(entry)
+        return out
 
     def import_entries(self, items, replace: bool = False) -> int:
         """Add history entries from a profile (entries whose id is already present are skipped); with
@@ -1732,18 +1927,17 @@ class History(_JsonStore):
             for raw in items or []:
                 if not (isinstance(raw, dict) and isinstance(raw.get("text"), str) and raw["text"].strip()):
                     continue
+                entry_id = raw["id"] if isinstance(raw.get("id"), str) else None
+                if entry_id in known:
+                    continue
                 entry = make_entry(
                     raw["text"], raw.get("raw") if isinstance(raw.get("raw"), str) else "",
                     app_exe=str(raw.get("app_exe") or ""), app_title=str(raw.get("app_title") or ""),
                     duration_s=_num(raw.get("duration_s")), mode=str(raw.get("mode") or "dictate"),
                     latency_ms=_num(raw.get("latency_ms")), ts=_sane_ts(raw.get("ts"), now) or now,
-                    rules_only=raw.get("rules_only") is True, words=_stored_words(raw))
-                if isinstance(raw.get("id"), str) and raw["id"]:
-                    entry["id"] = raw["id"]
-                if entry["id"] in known:
-                    continue
+                    rules_only=raw.get("rules_only") is True, words=_stored_words(raw), entry_id=entry_id)
                 known.add(entry["id"])
-                self._items.append(entry)
+                self._items.append(_Entry(entry))
                 added += 1
             self._items.sort(key=lambda e: e["ts"], reverse=True)
             self._prune()
@@ -1856,9 +2050,19 @@ def _stored_words(raw: dict) -> int | None:
 
 def _num(value) -> float:
     """A finite number, else 0.0 (hand-edited files can hold NaN, Infinity or strings)."""
-    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
-        return float(value)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            value = float(value)
+        except OverflowError:                    # a 400-digit integer: JSON allows it, a float cannot hold it
+            return 0.0
+        if math.isfinite(value):
+            return value
     return 0.0
+
+
+def _csv_plain(value: str) -> str:
+    """The cell without the apostrophe ``_csv_safe`` put in front of it."""
+    return value[1:] if value[:1] == "'" and value[1:2] in ("=", "+", "-", "@") else value
 
 
 def _csv_safe(value: str) -> str:
@@ -1880,11 +2084,37 @@ def _stamp(ts: float) -> str:
 
 
 # =========================================================================== stats
+_STATS_KEEP_DAYS = 400              # days older than this, counted from the newest day with use, are kept per month
+_MONTH_RE = re.compile(r"\d{4}-(?:0[1-9]|1[0-2])")
+
+
+def _centis(totals: dict) -> int:
+    """Seconds in hundredths (as ``Stats._add`` rounds them): whole numbers add up the same in any order, so a
+    total does not depend on which days were folded into months."""
+    return round(totals["seconds"] * 100)
+
+
+def _copy_totals(totals: dict) -> dict:
+    out = {**totals, "apps": {exe: dict(a) for exe, a in totals["apps"].items()}}
+    if "active" in out:
+        out["active"] = list(out["active"])
+    return out
+
+
 class Stats(_JsonStore):
-    """Per-day usage totals. Independent of the history, so clearing or disabling history keeps them."""
+    """Per-day usage totals. Independent of the history, so clearing or disabling history keeps them.
+
+    Days from before the month that began ``_STATS_KEEP_DAYS`` before the newest day are folded into one total per
+    month, which also remembers on which days of that month VoxFlow was used. The totals, the top apps and the
+    streak stay exactly what they were, and only ``daily()`` no longer sees those days (the chart shows 30). Without
+    it the file grew by a day's apps every day and was rewritten per dictation: 3.7 MB after ten years (QA DL-07)."""
 
     filename = "stats.json"
     label = "your usage statistics"
+    indent = None                   # rewritten after every dictation, read by nobody but VoxFlow
+    WRITE_BEHIND = True             # see _JsonStore: counting a dictation never waits for the file
+    _STATE = ("_days", "_months", "is_new")
+    TOPICS = ("stats",)
 
     def __init__(self, path: str | Path | None = None, clock=time.time):
         self._clock = clock
@@ -1892,25 +2122,35 @@ class Stats(_JsonStore):
 
     def _load(self, data) -> None:
         self._days: dict[str, dict] = {}
+        self._months: dict[str, dict] = {}       # "2024-03" -> the month's totals plus "active": [days with use]
         data = _layout(data)
         self.is_new = data is None
         if not self.is_new:
-            days = data.get("days") or {}
-            if not isinstance(days, dict):
+            days, months = data.get("days") or {}, data.get("months") or {}
+            if not isinstance(days, dict) or not isinstance(months, dict):
                 raise ValueError("the per-day totals are not a dictionary")     # -> backed up and reset
-            self._days = self.parse_days(days)
+            self._set(self.parse_days({**months, **days}))
+            if self._fold():
+                self._dirty = True               # written by _read
+
+    def _set(self, totals: dict) -> None:
+        self._days = {key: t for key, t in totals.items() if "active" not in t}
+        self._months = {key: t for key, t in totals.items() if "active" in t}
 
     @staticmethod
     def parse_days(raw_days) -> dict[str, dict]:
-        """Validated ``{iso date: totals}`` from stored or imported data (anything malformed is dropped)."""
+        """Validated ``{iso date: totals}`` from stored or imported data (anything malformed is dropped). A key
+        like "2024-03" is a folded month: the same totals plus ``active``, the days of that month with use."""
         days: dict[str, dict] = {}
         for day, raw in raw_days.items() if isinstance(raw_days, dict) else ():
             if not (isinstance(day, str) and isinstance(raw, dict)):
                 continue
-            try:
-                _dt.date.fromisoformat(day)
-            except ValueError:
-                continue
+            month = _MONTH_RE.fullmatch(day) is not None
+            if not month:
+                try:
+                    day = _dt.date.fromisoformat(day).isoformat()        # "20240305" is the same day
+                except ValueError:
+                    continue
             apps = {}
             for exe, a in (raw.get("apps") or {}).items() if isinstance(raw.get("apps"), dict) else ():
                 if isinstance(exe, str) and isinstance(a, dict):
@@ -1918,38 +2158,82 @@ class Stats(_JsonStore):
             days[day] = {"words": int(_num(raw.get("words"))), "sessions": int(_num(raw.get("sessions"))),
                          "seconds": _num(raw.get("seconds")), "timed_words": int(_num(raw.get("timed_words"))),
                          "apps": apps}
+            if month:
+                active = raw.get("active") if isinstance(raw.get("active"), list) else []
+                days[day]["active"] = sorted({d for d in active if type(d) is int and 1 <= d <= 31})
         return days
 
     def export_days(self) -> dict[str, dict]:
-        """A copy of the per-day totals (for a backup)."""
+        """A copy of the per-day totals, and of the per-month totals of older days (for a backup)."""
         with self._lock:
-            return copy.deepcopy(self._days)
+            return {key: _copy_totals(t) for key, t in {**self._days, **self._months}.items()}
+
+    def _has(self, key: str) -> bool:
+        """Are there totals here for this day or month already?"""
+        month = self._months.get(key[:7])
+        if len(key) == 7:                        # a month: also when one of its days is still kept by itself
+            return month is not None or any(day.startswith(key) for day in self._days)
+        return key in self._days or (month is not None and int(key[8:]) in month["active"])
 
     def import_days(self, days, replace: bool = False) -> int:
-        """Take per-day totals from a backup: days that have no totals here are added; with ``replace``
-        the imported days become the statistics. Returns the number of days taken."""
+        """Take per-day totals from a backup: days (and months of older days) that have no totals here are added;
+        with ``replace`` the imported totals become the statistics. Returns the number of days and months taken."""
         days = self.parse_days(days)
         with self._lock:
             if replace:
-                taken, self._days = len(days), days
+                taken = len(days)
+                self._set(days)
             else:
-                fresh = {day: totals for day, totals in days.items() if day not in self._days}
-                taken = len(fresh)
-                self._days.update(fresh)
+                taken = 0
+                for key in sorted(days, key=len):        # months first: their days may come along separately
+                    if not self._has(key):
+                        (self._months if len(key) == 7 else self._days)[key] = days[key]
+                        taken += 1
+            self._fold()
             self.is_new = False
             self._save()
         self._notify("stats")
         return taken
 
     def _dump(self):
-        return {"version": 1, "days": self._days}
+        out = {"version": 1, "days": {day: _copy_totals(t) for day, t in self._days.items()}}
+        if self._months:
+            out["months"] = {month: _copy_totals(t) for month, t in self._months.items()}
+        return out
 
     def _today(self) -> _dt.date:
         return _dt.date.fromtimestamp(self._clock())
 
-    def _add(self, words: int, seconds: float, app_exe: str, ts: float) -> None:
-        day = self._days.setdefault(_dt.date.fromtimestamp(ts).isoformat(),
-                                    {"words": 0, "sessions": 0, "seconds": 0.0, "timed_words": 0, "apps": {}})
+    def _fold(self) -> bool:
+        """Move the days from before the kept time into their months' totals. True when there were any. The kept
+        time is counted from the newest day with use, not from the clock: a clock that is wrong for one start
+        must not fold the whole year (as it once re-timed the history: QA DL-02)."""
+        try:
+            newest = _dt.date.fromisoformat(max(self._days, default=""))
+            first = (newest - _dt.timedelta(days=_STATS_KEEP_DAYS)).replace(day=1).isoformat()
+        except (ValueError, OverflowError):      # no days at all, or a hand-written year 1
+            return False
+        old = [day for day in self._days if day < first]
+        for day in old:
+            totals = self._days.pop(day)
+            month = self._months.setdefault(day[:7], {"words": 0, "sessions": 0, "seconds": 0.0, "timed_words": 0,
+                                                      "apps": {}, "active": []})
+            for key in ("words", "sessions", "timed_words"):
+                month[key] += totals[key]
+            month["seconds"] = (_centis(month) + _centis(totals)) / 100
+            for exe, a in totals["apps"].items():
+                app = month["apps"].setdefault(exe, {"words": 0, "sessions": 0})
+                app["words"] += a["words"]
+                app["sessions"] += a["sessions"]
+            if totals["sessions"]:
+                month["active"] = sorted({*month["active"], int(day[8:])})
+        return bool(old)
+
+    def _add(self, words: int, seconds: float, app_exe: str, ts: float) -> bool:
+        key = _dt.date.fromtimestamp(ts).isoformat()
+        day = self._days.get(key)
+        if day is None:
+            day = self._days[key] = {"words": 0, "sessions": 0, "seconds": 0.0, "timed_words": 0, "apps": {}}
         day["words"] += words
         day["sessions"] += 1
         if seconds > 0:
@@ -1959,6 +2243,7 @@ class Stats(_JsonStore):
             app = day["apps"].setdefault(app_exe.lower(), {"words": 0, "sessions": 0})
             app["words"] += words
             app["sessions"] += 1
+        return day["sessions"] == 1              # a new day: older ones may have left the kept time
 
     def record(self, words: int, seconds: float = 0.0, app_exe: str = "", ts: float | None = None) -> None:
         """Count one finished dictation of ``words`` words spoken in ``seconds``."""
@@ -1967,35 +2252,42 @@ class Stats(_JsonStore):
         with self._lock:
             now = self._clock()
             ts = _sane_ts(ts, now) or now                # a dead-battery clock (1601, year 9999) must not raise
-            self._add(int(words), max(0.0, float(seconds)), app_exe, ts)
+            if self._add(int(words), max(0.0, float(seconds)), app_exe, ts):
+                self._fold()
             self._save()
         self._notify("stats")
 
     def seed_from_history(self, items: list[dict]) -> None:
         """First run after an upgrade: derive totals from the transcripts that already exist."""
         with self._lock:
-            if self._days:
+            if self._days or self._months:
                 return
             for e in items:
                 if e.get("mode", "dictate") == "dictate" and e.get("words"):
                     self._add(int(e["words"]), float(e.get("duration_s") or 0.0), e.get("app_exe") or "", e["ts"])
+            self._fold()
             self.is_new = False
             self._save()
         self._notify("stats")
 
+    def _used(self, day: _dt.date) -> bool:
+        key = day.isoformat()
+        month = self._months.get(key[:7])
+        return bool(self._days.get(key, {}).get("sessions")) or (month is not None and day.day in month["active"])
+
     def summary(self) -> dict:
         with self._lock:
-            days = self._days
-            total_words = sum(d["words"] for d in days.values())
-            sessions = sum(d["sessions"] for d in days.values())
-            seconds = sum(d["seconds"] for d in days.values())
-            timed_words = sum(d["timed_words"] for d in days.values())
+            parts = [*self._days.values(), *self._months.values()]
+            total_words = sum(d["words"] for d in parts)
+            sessions = sum(d["sessions"] for d in parts)
+            seconds = sum(map(_centis, parts)) / 100
+            timed_words = sum(d["timed_words"] for d in parts)
             today = self._today()
-            today_words = days.get(today.isoformat(), {}).get("words", 0)
+            today_words = self._days.get(today.isoformat(), {}).get("words", 0)
             streak, day = 0, today
-            if not days.get(day.isoformat(), {}).get("sessions"):
+            if not self._used(day):
                 day -= _dt.timedelta(days=1)          # today not used yet: the streak is still alive
-            while days.get(day.isoformat(), {}).get("sessions"):
+            while self._used(day):
                 streak += 1
                 day -= _dt.timedelta(days=1)
         avg_wpm = round(timed_words / (seconds / 60.0), 1) if seconds >= 1.0 else 0.0
@@ -2005,7 +2297,8 @@ class Stats(_JsonStore):
                 "today_words": today_words}
 
     def daily(self, n_days: int = 14) -> list[dict]:
-        """One row per day for the last ``n_days`` days (oldest first), including empty days."""
+        """One row per day for the last ``n_days`` days (oldest first), including empty days. Days that were
+        folded into their month (more than ``_STATS_KEEP_DAYS`` before the newest day) count as empty."""
         n_days = max(1, int(n_days))
         with self._lock:
             today = self._today()
@@ -2020,7 +2313,7 @@ class Stats(_JsonStore):
     def top_apps(self, n: int = 5) -> list[dict]:
         totals: dict[str, dict] = {}
         with self._lock:
-            for d in self._days.values():
+            for d in (*self._days.values(), *self._months.values()):
                 for exe, a in d["apps"].items():
                     t = totals.setdefault(exe, {"exe": exe, "words": 0, "sessions": 0})
                     t["words"] += a["words"]
@@ -2030,7 +2323,7 @@ class Stats(_JsonStore):
 
     def reset(self) -> None:
         with self._lock:
-            self._days = {}
+            self._days, self._months = {}, {}
             self._save()
         self._notify("stats")
 
@@ -2097,6 +2390,8 @@ class Styles(_JsonStore):
 
     filename = "styles.json"
     label = "your style settings"
+    _STATE = ("_tones", "_apps")
+    TOPICS = ("styles",)
     CATEGORIES = CATEGORIES
     TONES = TONES
 
@@ -2115,7 +2410,7 @@ class Styles(_JsonStore):
                 self._apps[normalize_exe(exe)] = cat
 
     def _dump(self):
-        return {"version": 1, "tones": self._tones, "apps": self._apps}
+        return {"version": 1, "tones": dict(self._tones), "apps": dict(self._apps)}
 
     def tones(self) -> dict[str, str]:
         with self._lock:

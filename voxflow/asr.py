@@ -19,7 +19,7 @@ from typing import Any, Callable
 
 import numpy as np
 
-from . import gpuprobe
+from . import gpuprobe, system
 from . import modelhub  # also switches Hugging Face telemetry off (import side effect)
 
 log = logging.getLogger("voxflow.asr")
@@ -29,6 +29,20 @@ MIN_SAMPLES = int(0.2 * SAMPLE_RATE)
 _dll_dirs_added = False
 
 
+def _onnxruntime():
+    """The onnxruntime module, with its Windows telemetry events switched off. The official Windows builds emit
+    usage events through ETW by default, which Windows' diagnostic service may pass on to Microsoft; VoxFlow
+    promises that nothing leaves the PC (security review S-11)."""
+    import onnxruntime as ort
+    off = getattr(ort, "disable_telemetry_events", None)
+    if callable(off):
+        try:
+            off()
+        except Exception:  # noqa: BLE001 - a build without the switch has nothing to switch off
+            pass
+    return ort
+
+
 def _add_nvidia_dll_dirs() -> None:
     """Make the DLLs of the pip CUDA 13 wheels (nvidia-cublas, nvidia-cudnn-cu13, ...) loadable; no system CUDA needed."""
     global _dll_dirs_added
@@ -36,7 +50,7 @@ def _add_nvidia_dll_dirs() -> None:
         return
     _dll_dirs_added = True
     import site
-    roots = list(site.getsitepackages()) + list(sys.path)
+    roots = list(site.getsitepackages()) + system.import_roots()
     seen = set()
     for root in roots:
         nv = os.path.join(root, "nvidia")
@@ -80,7 +94,7 @@ def _register_webgpu() -> str | None:
     global _webgpu_problem
     if _webgpu_problem is _UNSET:
         try:
-            import onnxruntime as ort
+            ort = _onnxruntime()
             import onnxruntime_ep_webgpu as plugin
 
             ort.register_execution_provider_library("voxflow_webgpu", plugin.get_library_path())
@@ -97,7 +111,7 @@ def _megabytes(text: str) -> int:
 
 def _webgpu_adapters() -> list[Adapter]:
     """The GPUs the registered plugin can run on (call ``_register_webgpu`` first)."""
-    import onnxruntime as ort
+    ort = _onnxruntime()
 
     found = []
     for ep_device in ort.get_ep_devices():
@@ -125,7 +139,7 @@ def _cuda_unusable(asked_for: bool) -> str | None:
     if not gpuprobe.nvidia_driver():
         return "no NVIDIA driver (nvcuda.dll)"
     _add_nvidia_dll_dirs()
-    import onnxruntime as ort
+    ort = _onnxruntime()
 
     if "CUDAExecutionProvider" not in ort.get_available_providers():
         return "CUDAExecutionProvider not available"
@@ -150,7 +164,7 @@ def _cpu_unusable(asked_for: bool) -> None:
 def _session_options():
     """The onnxruntime SessionOptions every model session starts from (one place, so a check can switch
     profiling on and see which provider ran each node)."""
-    import onnxruntime as ort
+    ort = _onnxruntime()
 
     return ort.SessionOptions()
 
@@ -167,7 +181,7 @@ def _decoder_on_cpu(model):
     if not path:
         log.info("the decoder stays on the GPU (this onnx-asr has no _decoder_joint session to replace)")
         return model
-    import onnxruntime as ort
+    ort = _onnxruntime()
 
     try:
         recogniser._decoder_joint = ort.InferenceSession(path, sess_options=_session_options(),
@@ -205,7 +219,7 @@ class _ShrinkingSession:
         if run_options is None and frames > SHRINK_AFTER_S * _FEATURE_FRAMES_PER_S:
             free = gpuprobe.cuda_free_mb()
             if free is not None and free < SHRINK_BELOW_FREE_MB:
-                import onnxruntime as ort
+                ort = _onnxruntime()
 
                 log.info("long clip with %d MiB of GPU memory free: its working memory is given back", free)
                 run_options = ort.RunOptions()
@@ -386,7 +400,7 @@ class Transcriber:
         return self._backend
 
     def _build(self, backend: AsrBackend):
-        import onnxruntime as ort
+        ort = _onnxruntime()
 
         ort.set_default_logger_severity(3)
         return backend.build(self.model_name)

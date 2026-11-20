@@ -128,7 +128,8 @@ def test_unreadable_config_falls_back_to_defaults_even_when_the_backup_copy_fail
     monkeypatch.setattr(type(path), "write_bytes", write_bytes)
     cfg = load_config(path)
     assert cfg == Config()
-    assert "could not be read" in cfgmod.last_load_problem and "config.json.bad" in cfgmod.last_load_problem
+    assert cfgmod.last_load_problem == "Your settings file could not be read, so defaults are in use.", \
+        "no copy could be kept, so none is promised"
     assert not (tmp_path / "config.json.bad").exists()
     assert path.read_text(encoding="utf-8") == "{ not json", "the damaged file itself is left alone"
 

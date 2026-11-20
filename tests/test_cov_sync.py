@@ -65,7 +65,8 @@ def test_import_that_fails_and_cannot_be_rolled_back_still_reports_a_human_error
     def broken(items, replace=False):
         raise RuntimeError("history file is gone")
 
-    dev.history.import_entries = broken                # fails during the import and again during the roll-back
+    dev.history.import_entries = broken                # fails during the import ...
+    dev.history.rollback = broken                      # ... and the history cannot be put back either
     incoming = {"dictionary": {"pytorch": {"term": "PyTorch", "aliases": []}}}
     with caplog.at_level("ERROR"):
         with pytest.raises(ValueError, match="could not be completed, so nothing was changed"):

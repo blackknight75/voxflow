@@ -110,6 +110,20 @@ def test_install_cuda12_runtime_copies_only_the_cuda12_dlls(monkeypatch, tmp_pat
             z.writestr("nvidia/cublas/bin/nvblas64_12.dll", b"NOT NEEDED")
 
     monkeypatch.setattr(subprocess, "check_call", fake_pip)
+    with pytest.raises(SystemExit) as refused:                  # not the reviewed wheels: nothing is copied
+        C.install_cuda12_runtime()
+    assert "is not the reviewed file" in str(refused.value) and list((pkg / "lib").iterdir()) == []
+
+    def digests(cmd):
+        import hashlib
+        fake_pip(cmd)
+        target = cmd[cmd.index("-d") + 1]
+        monkeypatch.setattr(C, "_CUDA12_WHEELS", tuple(
+            (n, v, hashlib.sha256(open(os.path.join(target, f), "rb").read()).hexdigest())
+            for (n, v, _h), f in zip(C._CUDA12_WHEELS, sorted(os.listdir(target), reverse=True))))
+
+    commands.clear()
+    monkeypatch.setattr(subprocess, "check_call", digests)
     C.install_cuda12_runtime()
 
     (cmd,) = commands
