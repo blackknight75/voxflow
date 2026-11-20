@@ -31,8 +31,9 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+# Actions are pinned by commit, not by tag: a tag can be moved to other code, a commit cannot.
 permissions:
-  contents: write          # create the draft release and upload its assets
+  contents: read           # the job that drafts the release asks for more, below
 
 env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
@@ -64,12 +65,18 @@ jobs:
     # the installer test needs Windows Server 2025 (build 26100). Server 2022 (build 20348) would be refused.
     runs-on: windows-2025
     timeout-minutes: 180
+    permissions:
+      contents: write        # create the draft release and upload its assets
     env:
       INSTALLER_TEST: ${{ (inputs.skip_installer_test || vars.RELEASE_SKIP_INSTALLER_TEST == 'true') && 'skip' || 'run' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          # the token is not left in .git/config: the build below runs third-party code (pip wheels, PyInstaller
+          # hooks, Inno Setup), and only the two steps that talk to the release get it, through GH_TOKEN
+          persist-credentials: false
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: "3.12"
 
@@ -259,7 +266,7 @@ jobs:
 
       - name: Keep the install and uninstall logs
         if: failure() && env.INSTALLER_TEST == 'run'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
         with:
           name: installer-test-logs
           path: ${{ runner.temp }}/installer-test
